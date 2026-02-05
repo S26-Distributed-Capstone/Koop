@@ -21,7 +21,7 @@ import io.vertx.core.parsetools.RecordParser;
 public class StorageNodeServer extends AbstractVerticle {
     private final int port;
     private final StorageNode storageNode;
-    private final NetServer server;
+    private NetServer server;
     private final Map<Integer, BiConsumer<NetSocket, RecordParser>> handlers;
 
     private final OpenOptions openOptions;
@@ -33,9 +33,7 @@ public class StorageNodeServer extends AbstractVerticle {
         this.port = port;
         this.storageNode = new StorageNode("data");
         this.openOptions = new OpenOptions();
-        this.server = Vertx.vertx().createNetServer();
         this.handlers = new HashMap<>();
-        this.registerHandlers();
     }
 
     public static void main(String[] args){
@@ -94,6 +92,8 @@ public class StorageNodeServer extends AbstractVerticle {
 
     @Override
     public void start() {
+        this.server = super.vertx.createNetServer();
+        this.registerHandlers();
         server.connectHandler(socket -> {
             try {
                 //read opcode
@@ -116,6 +116,13 @@ public class StorageNodeServer extends AbstractVerticle {
                 System.err.println("Failed to start TCP server: " + res.cause());
             }
         });
+    }
+
+    @Override
+    public void stop(){
+        if(server != null){
+            server.close();
+        }
     }
 
     private Buffer awaitBuffer(RecordParser parser) {
