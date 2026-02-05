@@ -1,6 +1,10 @@
 package com.github.koop.storagenode;
 
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.BiConsumer;
+
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.DeploymentOptions;
 import io.vertx.core.Future;
@@ -11,20 +15,27 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.file.AsyncFile;
 import io.vertx.core.file.OpenOptions;
 import io.vertx.core.net.NetServer;
+import io.vertx.core.net.NetSocket;
 import io.vertx.core.parsetools.RecordParser;
 
 public class StorageNodeServer extends AbstractVerticle {
     private final int port;
     private final StorageNode storageNode;
     private final NetServer server;
+    private final Map<Integer, BiConsumer<NetSocket, RecordParser>> handlers;
 
     private final OpenOptions openOptions;
+
+    private static final int OPCODE_PUT = 1;
+    private static final int OPCODE_GET = 2;
 
     public StorageNodeServer(int port) {
         this.port = port;
         this.storageNode = new StorageNode("data");
         this.openOptions = new OpenOptions();
         this.server = Vertx.vertx().createNetServer();
+        this.handlers = new HashMap<>();
+        this.registerHandlers();
     }
 
     public static void main(String[] args){
@@ -33,24 +44,16 @@ public class StorageNodeServer extends AbstractVerticle {
         vertx.deployVerticle(new StorageNodeServer(7000), options);
     }
 
-    @Override
-    public void start() {
-        server.connectHandler(socket -> {
+    private void registerHandlers(){
+        handlers.put(OPCODE_PUT, (socket, parser) -> {
             try {
-                RecordParser parser = RecordParser.newFixed(4, socket);
-                Buffer intBuf = awaitBuffer(parser);
-                int partitionId = intBuf.getInt(0);
-
                 parser.fixedSizeMode(4);
-                Buffer keyLengthBuf = awaitBuffer(parser);
-                int keyLength = keyLengthBuf.getInt(0);
+                int partitionId = awaitBuffer(parser).getInt(0);
+                int keyLength = awaitBuffer(parser).getInt(0);
                 parser.fixedSizeMode(keyLength);
-                Buffer keyBuf = awaitBuffer(parser);
-                String key = keyBuf.toString();
-
+                String key = awaitBuffer(parser).toString();
                 socket.pause();
                 parser.handler(null);
-
                 AsyncFile file = Future
                         .await(vertx.fileSystem().open(this.storageNode.getPathFor(partitionId, key), openOptions));
                 var writeTask = socket.pipeTo(file);
@@ -60,7 +63,49 @@ public class StorageNodeServer extends AbstractVerticle {
                 socket.resume();
                 Future.await(writeTask);
                 socket.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+        handlers.put(OPCODE_GET, (socket, parser) -> {
+            try {
+                parser.fixedSizeMode(4);
+                int partitionId = awaitBuffer(parser).getInt(0);
+                parser.fixedSizeMode(4);
+                int keyLength = awaitBuffer(parser).getInt(0);
+                parser.fixedSizeMode(keyLength);
+                String key = awaitBuffer(parser).toString();
+                socket.pause();
+                parser.handler(null);
+                AsyncFile file = Future
+                        .await(vertx.fileSystem().open(this.storageNode.getPathFor(partitionId, key), openOptions));
+                var readTask = file.pipeTo(socket);
+                readTask.onFailure(throwable -> {
+                    System.err.println("Error reading file: " + throwable.getMessage());
+                });
+                socket.resume();
+                Future.await(readTask);
+                socket.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+    }
 
+    @Override
+    public void start() {
+        server.connectHandler(socket -> {
+            try {
+                //read opcode
+                RecordParser parser = RecordParser.newFixed(4, socket);
+                int opcode = awaitBuffer(parser).getInt(0);
+                var handler = handlers.get(opcode);
+                if (handler != null) {
+                    handler.accept(socket, parser);
+                } else {
+                    System.err.println("Unknown opcode: " + opcode);
+                    socket.close();
+                }
             } catch (Exception e) {
                 e.printStackTrace();
             }
