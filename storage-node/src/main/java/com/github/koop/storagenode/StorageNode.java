@@ -87,9 +87,7 @@ public class StorageNode {
     private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException{
         Path versionTrackingFile = getVersionTrackingFile(partition, key);
         Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key, requestID);
-        if(requestID!=null){
-            Files.write(versionTrackingFileTemp, requestID.getBytes());
-        }
+        Files.write(versionTrackingFileTemp, requestID.getBytes());
         Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     }
 
@@ -134,8 +132,9 @@ public class StorageNode {
         if(latestObjectIDStored.isEmpty()){
             return false;
         }
-        //delete our pointer to the latest object stored before deleting the file, so that if there is a concurrent store happening, we won't delete the new file
-        bumpLatestObjectStored(partition, key, null);
+        //delete our pointer 
+        var versionTrackingFile = getVersionTrackingFile(partition, key);
+        Files.deleteIfExists(versionTrackingFile);
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
         return Files.deleteIfExists(path);
     }
