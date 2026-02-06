@@ -10,6 +10,17 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
+/**
+ * The {@code StorageNodeServer} class implements a simple server for handling storage operations
+ * such as PUT, GET, and DELETE on a {@link StorageNode}. It listens for incoming client connections
+ * and dispatches requests to appropriate handlers based on operation codes (opcodes).
+ * <p>
+ * The server uses a thread-per-task executor with virtual threads for handling concurrent client connections.
+ * Handlers for each operation are registered in a concurrent map and invoked based on the opcode received from the client.
+ * <p>
+ * Data is read from the client using a simple protocol where integers and strings are read from the input stream.
+ * 
+ */
 public class StorageNodeServer {
 
     private int port;
