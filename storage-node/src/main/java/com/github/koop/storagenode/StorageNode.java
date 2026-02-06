@@ -62,9 +62,10 @@ public class StorageNode {
             .resolve("current");
     }
 
-    private Path getVersionTrackingTempFile(int partition, String key){
+    private Path getVersionTrackingTempFile(int partition, String key, String requestID){
         // partition/key/current_temp
         return getObjectFolder(partition, key)
+            .resolve(requestID)
             .resolve("current_temp");
     }
 
@@ -80,13 +81,15 @@ public class StorageNode {
         Path path = getObjectFile(partition, requestID, key);
         Files.createDirectories(path.getParent());
         pipeToFile(data, path, length);
-        bumpLatestObjectStored(partition, requestID, key);
+        bumpLatestObjectStored(partition, key, requestID);
     }
 
-    private void bumpLatestObjectStored(int partition, String requestID, String key) throws IOException{
+    private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException{
         Path versionTrackingFile = getVersionTrackingFile(partition, key);
-        Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key);
-        Files.write(versionTrackingFileTemp, requestID.getBytes());
+        Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key, requestID);
+        if(requestID!=null){
+            Files.write(versionTrackingFileTemp, requestID.getBytes());
+        }
         Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     }
 
@@ -131,6 +134,8 @@ public class StorageNode {
         if(latestObjectIDStored.isEmpty()){
             return false;
         }
+        //delete our pointer to the latest object stored before deleting the file, so that if there is a concurrent store happening, we won't delete the new file
+        bumpLatestObjectStored(partition, key, null);
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
         return Files.deleteIfExists(path);
     }

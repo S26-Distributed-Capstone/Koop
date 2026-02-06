@@ -246,6 +246,89 @@ class StorageNodeServerTest {
         }
     }
 
+    @Test
+    void testConcurrentPutSameKeyConsistency() throws Exception {
+        int clientCount = 10;
+        String key = "shared-key";
+        int partition = 7;
+        String[] values = new String[clientCount];
+        Thread[] threads = new Thread[clientCount];
+
+        for (int i = 0; i < clientCount; i++) {
+            final int idx = i;
+            // Generate a random alphanumeric string of length 16
+            values[idx] = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            threads[idx] = new Thread(() -> {
+                try (Socket socket = new Socket("localhost", PORT);
+                     OutputStream out = socket.getOutputStream();
+                     InputStream in = socket.getInputStream()) {
+
+                    String reqId = "req-" + idx;
+                    byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
+                    byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+                    byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
+
+                    int totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+
+                    writeInt(out, totalLength);
+                    writeInt(out, 1); // PUT
+                    writeString(out, reqId);
+                    writeInt(out, partition);
+                    writeString(out, key);
+                    out.write(data);
+                    out.flush();
+
+                    int status = in.read();
+                    assertEquals(1, status, "PUT should return success (1)");
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+
+        for (Thread t : threads) t.start();
+        for (Thread t : threads) t.join();
+
+        // After all PUTs, GET the value and ensure it's one of the written values (not a mix)
+        try (Socket socket = new Socket("localhost", PORT);
+             OutputStream out = socket.getOutputStream();
+             InputStream in = socket.getInputStream()) {
+
+            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+            int getLen = 4 + 4 + 4 + keyBytes.length;
+            writeInt(out, getLen);
+            writeInt(out, 6); // GET
+            writeInt(out, partition);
+            writeString(out, key);
+            out.flush();
+
+            int found = in.read();
+            assertEquals(1, found, "GET after concurrent PUTs should return found (1)");
+
+            // Try all possible value lengths
+            String result = null;
+            for (String v : values) {
+                byte[] responseData = in.readNBytes(v.getBytes(StandardCharsets.UTF_8).length);
+                String candidate = new String(responseData, StandardCharsets.UTF_8);
+                for (String expected : values) {
+                    if (candidate.equals(expected)) {
+                        result = candidate;
+                        break;
+                    }
+                }
+                if (result != null) break;
+            }
+            boolean foundMatch = false;
+            for (String v : values) {
+                if (v.equals(result)) {
+                    foundMatch = true;
+                    break;
+                }
+            }
+            assertEquals(true, foundMatch, "GET result should be one of the concurrently written values");
+        }
+    }
+
     private void writeInt(OutputStream out, int v) throws IOException {
         out.write(ByteBuffer.allocate(4).putInt(v).array());
     }
