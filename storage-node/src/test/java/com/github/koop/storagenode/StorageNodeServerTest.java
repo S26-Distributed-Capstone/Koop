@@ -27,13 +27,7 @@ class StorageNodeServerTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        server = new StorageNodeServer(PORT);
-
-        // Reflection to inject tempDir (same as before)
-        Field storageNodeField = StorageNodeServer.class.getDeclaredField("storageNode");
-        storageNodeField.setAccessible(true);
-        storageNodeField.set(server, new StorageNode(tempDir));
-
+        server = new StorageNodeServer(PORT, tempDir);
         serverExecutor = Executors.newSingleThreadExecutor();
         serverExecutor.submit(() -> server.start());
         Thread.sleep(100);

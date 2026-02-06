@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,10 +35,10 @@ public class StorageNodeServer {
 
     private boolean running = false;
 
-    public StorageNodeServer(int port) {
+    public StorageNodeServer(int port, Path dir) {
         this.port = port;
         this.handlers = new ConcurrentHashMap<>();
-        this.storageNode = new StorageNode(Paths.get("data"));
+        this.storageNode = new StorageNode(dir);
         registerHandlers();
     }
 
@@ -89,7 +90,7 @@ public class StorageNodeServer {
         running = true;
         var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
         try (var serverSocket = new ServerSocket(port)) {
-            while (running) {
+            while (running && !Thread.currentThread().isInterrupted()) {
                 var clientSocket = serverSocket.accept();
                 executor.submit(() -> {
                     try (clientSocket) {
