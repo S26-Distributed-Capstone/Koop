@@ -121,7 +121,10 @@ public class StorageNode {
     }
 
     /**
-     * Deletes the data for the specified partition and key. The method reads the version tracking file to determine the latest stored object for the given partition and key, and then deletes the corresponding file. If no data is found for the specified partition and key, the method returns false. If the deletion is successful, it returns true.
+     * Deletes the data for the specified partition and key.
+     * The method reads the version tracking file to determine the latest stored object for the given partition and key, and then deletes the version tracking file & corresponding data file. 
+     * If no data is found for the specified partition and key, the method returns false.
+     * If the deletion is successful, it returns true.
      * @param partition
      * @param key
      * @return
@@ -135,6 +138,7 @@ public class StorageNode {
         //delete our pointer 
         var versionTrackingFile = getVersionTrackingFile(partition, key);
         Files.deleteIfExists(versionTrackingFile);
+        //delete object file
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
         return Files.deleteIfExists(path);
     }
