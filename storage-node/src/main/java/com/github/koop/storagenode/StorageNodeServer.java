@@ -1,135 +1,103 @@
 package com.github.koop.storagenode;
 
-
-import java.util.HashMap;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.file.Paths;
 import java.util.Map;
-import java.util.function.BiConsumer;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
-import io.vertx.core.AbstractVerticle;
-import io.vertx.core.DeploymentOptions;
-import io.vertx.core.Future;
-import io.vertx.core.Promise;
-import io.vertx.core.ThreadingModel;
-import io.vertx.core.Vertx;
-import io.vertx.core.buffer.Buffer;
-import io.vertx.core.file.AsyncFile;
-import io.vertx.core.file.OpenOptions;
-import io.vertx.core.net.NetServer;
-import io.vertx.core.net.NetSocket;
-import io.vertx.core.parsetools.RecordParser;
+import javax.management.RuntimeErrorException;
 
-public class StorageNodeServer extends AbstractVerticle {
-    private final int port;
+public class StorageNodeServer {
+
+    private int port;
+    private final Map<Integer, Handler> handlers;
+
     private final StorageNode storageNode;
-    private NetServer server;
-    private final Map<Integer, BiConsumer<NetSocket, RecordParser>> handlers;
-
-    private final OpenOptions openOptions;
 
     private static final int OPCODE_PUT = 1;
     private static final int OPCODE_GET = 2;
+    private static final int OPCODE_DELETE = 3;
 
     public StorageNodeServer(int port) {
         this.port = port;
-        this.storageNode = new StorageNode("data");
-        this.openOptions = new OpenOptions();
-        this.handlers = new HashMap<>();
-    }
-
-    public static void main(String[] args){
-        var vertx = Vertx.vertx();
-        var options = new DeploymentOptions().setThreadingModel(ThreadingModel.VIRTUAL_THREAD).setInstances(Runtime.getRuntime().availableProcessors());
-        vertx.deployVerticle(new StorageNodeServer(7000), options);
+        this.handlers = new ConcurrentHashMap<>();
+        this.storageNode = new StorageNode(Paths.get("data"));
     }
 
     private void registerHandlers(){
-        handlers.put(OPCODE_PUT, (socket, parser) -> {
-            try {
-                parser.fixedSizeMode(4);
-                int partitionId = awaitBuffer(parser).getInt(0);
-                int keyLength = awaitBuffer(parser).getInt(0);
-                parser.fixedSizeMode(keyLength);
-                String key = awaitBuffer(parser).toString();
-                socket.pause();
-                parser.handler(null);
-                AsyncFile file = Future
-                        .await(vertx.fileSystem().open(this.storageNode.getPathFor(partitionId, key), openOptions));
-                var writeTask = socket.pipeTo(file);
-                writeTask.onFailure(throwable -> {
-                    System.err.println("Error writing file: " + throwable.getMessage());
-                });
-                socket.resume();
-                Future.await(writeTask);
-                socket.close();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        this.handlers.put(OPCODE_PUT, (socket)->{
+            var in = socket.getInputStream();
+            var reqId = readString(in);
+            var partition = readInt(in);
+            var key = readString(in);
+            this.storageNode.store(partition, reqId, key, in);
         });
-        handlers.put(OPCODE_GET, (socket, parser) -> {
-            try {
-                parser.fixedSizeMode(4);
-                int partitionId = awaitBuffer(parser).getInt(0);
-                parser.fixedSizeMode(4);
-                int keyLength = awaitBuffer(parser).getInt(0);
-                parser.fixedSizeMode(keyLength);
-                String key = awaitBuffer(parser).toString();
-                socket.pause();
-                parser.handler(null);
-                AsyncFile file = Future
-                        .await(vertx.fileSystem().open(this.storageNode.getPathFor(partitionId, key), openOptions));
-                var readTask = file.pipeTo(socket);
-                readTask.onFailure(throwable -> {
-                    System.err.println("Error reading file: " + throwable.getMessage());
-                });
-                socket.resume();
-                Future.await(readTask);
-                socket.close();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        this.handlers.put(OPCODE_GET, socket->{
+            var in = socket.getInputStream();
+            var partition = readInt(in);
+            var key = readString(in);
+            this.storageNode.retrieve(partition, key);
         });
     }
 
-    @Override
     public void start() {
-        this.server = super.vertx.createNetServer();
-        this.registerHandlers();
-        server.connectHandler(socket -> {
-            try {
-                //read opcode
-                RecordParser parser = RecordParser.newFixed(4, socket);
-                int opcode = awaitBuffer(parser).getInt(0);
-                var handler = handlers.get(opcode);
-                if (handler != null) {
-                    handler.accept(socket, parser);
-                } else {
-                    System.err.println("Unknown opcode: " + opcode);
-                    socket.close();
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }).listen(port, res -> {
-            if (res.succeeded()) {
-                System.out.println("TCP server started on port " + port);
-            } else {
-                System.err.println("Failed to start TCP server: " + res.cause());
-            }
-        });
-    }
+        var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
+        try (var serverSocket = new ServerSocket(port)) {
+            while (true) {
+                var clientSocket = serverSocket.accept();
+                executor.submit(() -> {
+                    try (clientSocket) {
+                        InputStream in = clientSocket.getInputStream();
+                        int opcode = readInt(in);
 
-    @Override
-    public void stop(){
-        if(server != null){
-            server.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                });
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
-    private Buffer awaitBuffer(RecordParser parser) {
-        Promise<Buffer> promise = Promise.promise();
-        parser.handler(promise::complete); // Complete the future when bytes arrive
-        parser.exceptionHandler(promise::fail);
-        return Future.await(promise.future());
+    private int readInt(InputStream in) {
+        try {
+            byte[] buf = new byte[4];
+            int bytesRead = in.readNBytes(buf, 0, 4);
+            if (bytesRead < 4) {
+                throw new EOFException("Not enough bytes to read an int");
+            }
+            return ((buf[0] & 0xFF) << 24) |
+                    ((buf[1] & 0xFF) << 16) |
+                    ((buf[2] & 0xFF) << 8) |
+                    (buf[3] & 0xFF);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private byte[] readBytes(InputStream in) {
+        try {
+            var length = readInt(in);
+            byte[] readBytes = new byte[length];
+            int bytesRead = in.readNBytes(readBytes, 0, length);
+            if (bytesRead < length) {
+                throw new EOFException("Expected " + length + " bytes but got " + bytesRead);
+            }
+            return readBytes;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String readString(InputStream in) {
+        return new String(readBytes(in));
     }
 
 }
