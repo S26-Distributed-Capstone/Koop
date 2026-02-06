@@ -9,6 +9,29 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 
+/**
+ * StorageNode is responsible for managing the storage and retrieval of data objects
+ * in a partitioned directory structure on the local filesystem. Each object is identified
+ * by a partition, a unique request ID, and a key. The class provides methods to store,
+ * retrieve, and delete objects, as well as to track the latest stored version for each key.
+ * <p>
+ * The storage layout is organized as follows:
+ * <pre>
+ *   dataDirectory/
+ *     partition_{partition}/
+ *       {key}/
+ *         {requestID}/
+ *           data.dat
+ *         current
+ *         current_temp
+ * </pre>
+ * The {@code current} file tracks the latest request ID for a given partition and key.
+ * </p>
+ * <p>
+ * This class is intended to be used as a backend for distributed or local storage systems
+ * that require version tracking and atomic updates.
+ * </p>
+ */
 public class StorageNode {
     private final Path dataDirectory;
 
@@ -20,6 +43,12 @@ public class StorageNode {
         return dataDirectory;
     }
 
+    private Path getObjectFolder(int partition, String key){
+        // partition/key/
+        return dataDirectory.resolve("partition_" + partition)
+            .resolve(key);
+    }
+
     private Path getObjectFile(int partition, String requestID, String key) {
         // partition/key/data.dat
         return getObjectFolder(partition, key)
@@ -28,20 +57,25 @@ public class StorageNode {
     }
 
     private Path getVersionTrackingFile(int partition, String key){
+        // partition/key/current
         return getObjectFolder(partition, key)
             .resolve("current");
     }
 
     private Path getVersionTrackingTempFile(int partition, String key){
+        // partition/key/current_temp
         return getObjectFolder(partition, key)
             .resolve("current_temp");
     }
 
-    private Path getObjectFolder(int partition, String key){
-        return dataDirectory.resolve("partition_" + partition)
-            .resolve(key);
-    }
-
+    /**
+     * Stores the given data for the specified partition, requestID, and key. The data is written to a file in the storage node's data directory. The method also updates the version tracking file to keep track of the latest stored object for the given partition and key.
+     * @param partition
+     * @param requestID
+     * @param key
+     * @param data
+     * @throws IOException
+     */
     protected void store(int partition, String requestID, String key, InputStream data) throws IOException {
         Path path = getObjectFile(partition, requestID, key);
         Files.createDirectories(path.getParent());
@@ -65,6 +99,13 @@ public class StorageNode {
         return Optional.of(new String(bytes));
     }
 
+    /**
+     * Retrieves the data for the specified partition and key. The method reads the version tracking file to determine the latest stored object for the given partition and key, and then returns an InputStream to read the data from the corresponding file. If no data is found for the specified partition and key, an empty Optional is returned.
+     * @param partition
+     * @param key
+     * @return
+     * @throws IOException
+     */
     protected Optional<InputStream> retrieve(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);
         if(latestObjectIDStored.isEmpty()){
@@ -78,6 +119,13 @@ public class StorageNode {
         return Optional.of(Files.newInputStream(path));
     }
 
+    /**
+     * Deletes the data for the specified partition and key. The method reads the version tracking file to determine the latest stored object for the given partition and key, and then deletes the corresponding file. If no data is found for the specified partition and key, the method returns false. If the deletion is successful, it returns true.
+     * @param partition
+     * @param key
+     * @return
+     * @throws IOException
+     */
     protected boolean delete(int partition, String key) throws IOException{
         var latestObjectIDStored = getLatestObjectStored(partition, key);
         if(latestObjectIDStored.isEmpty()){
