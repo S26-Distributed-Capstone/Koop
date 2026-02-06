@@ -1,5 +1,6 @@
 package com.github.koop.storagenode;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -75,10 +76,10 @@ public class StorageNode {
      * @param data
      * @throws IOException
      */
-    protected void store(int partition, String requestID, String key, InputStream data) throws IOException {
+    protected void store(int partition, String requestID, String key, InputStream data, int length) throws IOException {
         Path path = getObjectFile(partition, requestID, key);
         Files.createDirectories(path.getParent());
-        pipeToFile(data, path);
+        pipeToFile(data, path, length);
         bumpLatestObjectStored(partition, requestID, key);
     }
 
@@ -86,7 +87,7 @@ public class StorageNode {
         Path versionTrackingFile = getVersionTrackingFile(partition, key);
         Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key);
         Files.write(versionTrackingFileTemp, requestID.getBytes());
-        Files.move(versionTrackingFile, versionTrackingFileTemp, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     }
 
     private Optional<String> getLatestObjectStored(int partition, String key) throws IOException{
@@ -134,9 +135,23 @@ public class StorageNode {
         return Files.deleteIfExists(path);
     }
 
-    private static void pipeToFile(InputStream in, Path path) throws IOException {
+    private static void pipeToFile(InputStream in, Path path, int length) throws IOException {
         try (OutputStream out = Files.newOutputStream(path)) {
-            in.transferTo(out);
+            copyNBytes(in, out, length);
+        }
+    }
+
+    private static void copyNBytes(InputStream in, OutputStream out, int length) throws IOException {
+        byte[] buffer = new byte[8192];
+        int totalRead = 0;
+        while (totalRead < length) {
+            int bytesToRead = Math.min(buffer.length, length - totalRead);
+            int read = in.read(buffer, 0, bytesToRead);
+            if (read == -1) {
+                throw new EOFException("Expected " + length + " bytes but got " + totalRead);
+            }
+            out.write(buffer, 0, read);
+            totalRead += read;
         }
     }
 

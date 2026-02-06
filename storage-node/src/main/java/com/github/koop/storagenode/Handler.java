@@ -5,5 +5,5 @@ import java.net.Socket;
 
 public interface Handler {
     
-    void handle(Socket socket) throws IOException;
+    void handle(Socket socket, int length) throws IOException;
 }

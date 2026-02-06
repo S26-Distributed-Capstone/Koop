@@ -45,26 +45,37 @@ public class StorageNodeServer {
         this.handlers.put(OPCODE_DELETE, this::handleDelete);
     }
 
-    protected void handlePut(Socket socket) throws IOException {
+    protected void handlePut(Socket socket, int length) throws IOException {
         var in = socket.getInputStream();
         var reqId = readString(in);
         var partition = readInt(in);
         var key = readString(in);
-        this.storageNode.store(partition, reqId, key, in);
+        int payloadLength = length - 4 - reqId.getBytes().length - 4 - key.getBytes().length - 4; // subtract lengths of reqId, partition, key and their length prefixes
+        this.storageNode.store(partition, reqId, key, in,payloadLength);
+        socket.getOutputStream().write(1); // success
     }
 
-    protected void handleGet(Socket socket) throws IOException {
+    protected void handleGet(Socket socket, int length) throws IOException {
         var in = socket.getInputStream();
         var partition = readInt(in);
         var key = readString(in);
-        this.storageNode.retrieve(partition, key);
+        var data = this.storageNode.retrieve(partition, key);
+        if(data.isEmpty()){
+            socket.getOutputStream().write(0); // not found
+        } else {
+            socket.getOutputStream().write(1); // found
+            try (var dataStream = data.get()) {
+                dataStream.transferTo(socket.getOutputStream());
+            }
+        }
     }
 
-    protected void handleDelete(Socket socket) throws IOException {
+    protected void handleDelete(Socket socket, int length) throws IOException {
         var in = socket.getInputStream();
         var partition = readInt(in);
         var key = readString(in);
-        this.storageNode.delete(partition, key);
+        var result = this.storageNode.delete(partition, key);
+        socket.getOutputStream().write(result ? 1 : 0);
     }
 
     public void start() {
@@ -76,9 +87,14 @@ public class StorageNodeServer {
                     try (clientSocket) {
                         InputStream in = clientSocket.getInputStream();
                         while (clientSocket.isConnected()) {
+                            int length = readInt(in);
+                            if (length <= 0) {
+                                break;
+                            }
                             int opcode = readInt(in);
                             var handler = this.handlers.get(opcode);
-                            handler.handle(clientSocket);
+                            //subtract 4 for opcode
+                            handler.handle(clientSocket, length-4);
                         }
                     } catch (IOException e) {
                         e.printStackTrace();
