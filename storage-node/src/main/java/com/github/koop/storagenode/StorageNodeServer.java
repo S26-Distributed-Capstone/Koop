@@ -9,9 +9,6 @@ import java.nio.file.Paths;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.function.Consumer;
-
-import javax.management.RuntimeErrorException;
 
 public class StorageNodeServer {
 
@@ -68,7 +65,8 @@ public class StorageNodeServer {
                     try (clientSocket) {
                         InputStream in = clientSocket.getInputStream();
                         int opcode = readInt(in);
-
+                        var handler = this.handlers.get(opcode);
+                        handler.handle(clientSocket);
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
