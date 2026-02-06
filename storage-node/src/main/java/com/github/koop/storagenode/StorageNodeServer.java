@@ -18,8 +18,8 @@ public class StorageNodeServer {
     private final StorageNode storageNode;
 
     private static final int OPCODE_PUT = 1;
-    private static final int OPCODE_GET = 2;
-    private static final int OPCODE_DELETE = 3;
+    private static final int OPCODE_GET = 6;
+    private static final int OPCODE_DELETE = 2;
 
     public StorageNodeServer(int port) {
         this.port = port;
