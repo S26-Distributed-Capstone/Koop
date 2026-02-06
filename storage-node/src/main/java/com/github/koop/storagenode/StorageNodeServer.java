@@ -64,9 +64,11 @@ public class StorageNodeServer {
                 executor.submit(() -> {
                     try (clientSocket) {
                         InputStream in = clientSocket.getInputStream();
-                        int opcode = readInt(in);
-                        var handler = this.handlers.get(opcode);
-                        handler.handle(clientSocket);
+                        while (clientSocket.isConnected()) {
+                            int opcode = readInt(in);
+                            var handler = this.handlers.get(opcode);
+                            handler.handle(clientSocket);
+                        }
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
