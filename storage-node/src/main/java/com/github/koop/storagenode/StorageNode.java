@@ -89,19 +89,7 @@ public class StorageNode {
 
     private static void pipeToFile(InputStream in, Path path) throws IOException {
         try (OutputStream out = Files.newOutputStream(path)) {
-            pipe(in, out);
-        }
-    }
-
-    private static void pipe(InputStream in, OutputStream out) {
-        try {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) != -1) {
-                out.write(buf, 0, n);
-            }
-        } catch (IOException exception) {
-            throw new RuntimeException(exception);
+            in.transferTo(out);
         }
     }
 
