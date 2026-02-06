@@ -32,6 +32,8 @@ public class StorageNodeServer {
     private static final int OPCODE_GET = 6;
     private static final int OPCODE_DELETE = 2;
 
+    private boolean running = false;
+
     public StorageNodeServer(int port) {
         this.port = port;
         this.handlers = new ConcurrentHashMap<>();
@@ -84,9 +86,10 @@ public class StorageNodeServer {
     }
 
     public void start() {
+        running = true;
         var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
         try (var serverSocket = new ServerSocket(port)) {
-            while (true) {
+            while (running) {
                 var clientSocket = serverSocket.accept();
                 executor.submit(() -> {
                     try (clientSocket) {
@@ -109,6 +112,10 @@ public class StorageNodeServer {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    public void stop(){
+        this.running = false;
     }
 
     private int readInt(InputStream in) {

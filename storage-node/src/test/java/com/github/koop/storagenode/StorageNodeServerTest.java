@@ -42,6 +42,7 @@ class StorageNodeServerTest {
     @AfterEach
     void tearDown() {
         serverExecutor.shutdownNow();
+        server.stop();
     }
 
     @Test
