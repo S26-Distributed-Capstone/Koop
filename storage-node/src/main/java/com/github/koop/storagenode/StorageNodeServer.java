@@ -28,22 +28,35 @@ public class StorageNodeServer {
         this.port = port;
         this.handlers = new ConcurrentHashMap<>();
         this.storageNode = new StorageNode(Paths.get("data"));
+        registerHandlers();
     }
 
-    private void registerHandlers(){
-        this.handlers.put(OPCODE_PUT, (socket)->{
-            var in = socket.getInputStream();
-            var reqId = readString(in);
-            var partition = readInt(in);
-            var key = readString(in);
-            this.storageNode.store(partition, reqId, key, in);
-        });
-        this.handlers.put(OPCODE_GET, socket->{
-            var in = socket.getInputStream();
-            var partition = readInt(in);
-            var key = readString(in);
-            this.storageNode.retrieve(partition, key);
-        });
+    private void registerHandlers() {
+        this.handlers.put(OPCODE_PUT, this::handlePut);
+        this.handlers.put(OPCODE_GET, this::handleGet);
+        this.handlers.put(OPCODE_DELETE, this::handleDelete);
+    }
+
+    protected void handlePut(Socket socket) throws IOException {
+        var in = socket.getInputStream();
+        var reqId = readString(in);
+        var partition = readInt(in);
+        var key = readString(in);
+        this.storageNode.store(partition, reqId, key, in);
+    }
+
+    protected void handleGet(Socket socket) throws IOException {
+        var in = socket.getInputStream();
+        var partition = readInt(in);
+        var key = readString(in);
+        this.storageNode.retrieve(partition, key);
+    }
+
+    protected void handleDelete(Socket socket) throws IOException {
+        var in = socket.getInputStream();
+        var partition = readInt(in);
+        var key = readString(in);
+        this.storageNode.delete(partition, key);
     }
 
     public void start() {
