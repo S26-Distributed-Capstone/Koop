@@ -47,12 +47,15 @@ public class StorageNodeServer {
 
     protected void handlePut(Socket socket, int length) throws IOException {
         var in = socket.getInputStream();
-        var reqId = readString(in);
+        var reqIdBytes = readBytes(in);
+        var reqId = new String(reqIdBytes);
         var partition = readInt(in);
-        var key = readString(in);
-        int payloadLength = length - 4 - reqId.getBytes().length - 4 - key.getBytes().length - 4; // subtract lengths of reqId, partition, key and their length prefixes
+        var keyBytes = readBytes(in);
+        var key = new String(keyBytes);
+        int payloadLength = length - 4 - reqIdBytes.length - 4 - keyBytes.length - 4; // subtract lengths of reqId, partition, key and their length prefixes
         this.storageNode.store(partition, reqId, key, in,payloadLength);
         socket.getOutputStream().write(1); // success
+        socket.getOutputStream().flush();
     }
 
     protected void handleGet(Socket socket, int length) throws IOException {
@@ -68,6 +71,7 @@ public class StorageNodeServer {
                 dataStream.transferTo(socket.getOutputStream());
             }
         }
+        socket.getOutputStream().flush();
     }
 
     protected void handleDelete(Socket socket, int length) throws IOException {
@@ -76,6 +80,7 @@ public class StorageNodeServer {
         var key = readString(in);
         var result = this.storageNode.delete(partition, key);
         socket.getOutputStream().write(result ? 1 : 0);
+        socket.getOutputStream().flush();
     }
 
     public void start() {
