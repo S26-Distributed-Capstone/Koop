@@ -2,11 +2,9 @@ package com.github.koop.storagenode;
 
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
@@ -16,28 +14,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
-/**
- * The {@code StorageNodeServer} class implements a simple server for handling
- * storage operations
- * such as PUT, GET, and DELETE on a {@link StorageNode}. It listens for
- * incoming client connections
- * and dispatches requests to appropriate handlers based on operation codes
- * (opcodes).
- * <p>
- * The server uses a thread-per-task executor with virtual threads for handling
- * concurrent client connections.
- * Handlers for each operation are registered in a concurrent map and invoked
- * based on the opcode received from the client.
- * <p>
- * Data is read from the client using a simple protocol where integers and
- * strings are read from the input stream.
- * 
- */
 public class StorageNodeServer {
 
     private int port;
     private final Map<Integer, Handler> handlers;
-
     private final StorageNode storageNode;
 
     private static final int OPCODE_PUT = 1;
@@ -73,16 +53,22 @@ public class StorageNodeServer {
         return buffer;
     }
 
+    // --- Handlers ---
+
     protected void handlePut(SocketChannel socketChannel, long length) throws IOException {
         var reqIdBytes = readBytes(socketChannel);
         var reqId = new String(reqIdBytes);
         var partition = readInt(socketChannel);
         var keyBytes = readBytes(socketChannel);
         var key = new String(keyBytes);
-        long payloadLength = length - 4 - reqIdBytes.length - 4 - keyBytes.length - 4; // subtract lengths of reqId,
-                                                                                       // partition, key and their
-                                                                                       // length prefixes
+        // Calculate payload: Total frame length - (Opcode=4 is already subtracted)
+        // We must subtract: ReqIDLen(4) + ReqID + Partition(4) + KeyLen(4) + Key
+        long headerOverhead = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length;
+        long payloadLength = length - headerOverhead;
+
+        // Use the updated StorageNode API (accepts ReadableByteChannel)
         this.storageNode.store(partition, reqId, key, socketChannel, payloadLength);
+        
         socketChannel.write(length(1));
         socketChannel.write(succeeded(true));
     }
@@ -91,17 +77,17 @@ public class StorageNodeServer {
         var partition = readInt(socketChannel);
         var key = readString(socketChannel);
         var data = this.storageNode.retrieve(partition, key);
+        
         if (data.isEmpty()) {
             socketChannel.write(length(1));
-            socketChannel.write(succeeded(false));// not found
+            socketChannel.write(succeeded(false)); // not found
         } else {
-            try (var dataStream = data.get()) {
-                var size = dataStream.size();
-                var responseLen = 1 + size; // 1 byte for success flag + data size
+            try (var dataChannel = data.get()) {
+                var size = dataChannel.size();
+                var responseLen = 1 + size; // 1 byte success flag + data
                 socketChannel.write(length(responseLen));
                 socketChannel.write(succeeded(true));
-                transferAll(dataStream, socketChannel);
-                dataStream.close();
+                transferAll(dataChannel, socketChannel);
             }
         }
     }
@@ -114,36 +100,78 @@ public class StorageNodeServer {
         socketChannel.write(succeeded(result));
     }
 
+    // --- Server Lifecycle ---
+
     public void start() {
         var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
         try {
             this.serverSocketChannel = ServerSocketChannel.open();
             this.serverSocketChannel.bind(new InetSocketAddress(port));
+            
             while (this.serverSocketChannel.isOpen() && !Thread.currentThread().isInterrupted()) {
-                var clientChannel = this.serverSocketChannel.accept();
-                if (!serverSocketChannel.isOpen()) {
-                    // might have closed on stop()
+                SocketChannel clientChannel;
+                try {
+                    clientChannel = this.serverSocketChannel.accept();
+                } catch (ClosedByInterruptException e) {
+                    // Server is stopping (likely triggered by test tearDown)
                     break;
                 }
+
+                if (!this.serverSocketChannel.isOpen()) {
+                    break;
+                }
+                
                 executor.submit(() -> {
                     try (clientChannel) {
                         while (clientChannel.isConnected()) {
-                            long length = readLong(clientChannel);
-                            if (length <= 0) {
-                                break;
+                            // 1. Read Frame Length (Check for EOF here)
+                            ByteBuffer lenBuf = ByteBuffer.allocate(8);
+                            int read = clientChannel.read(lenBuf);
+                            
+                            // If client disconnected gracefully, read returns -1
+                            if (read == -1) {
+                                break; 
                             }
+                            
+                            // If we got partial bytes, finish reading the 8-byte header
+                            while (lenBuf.hasRemaining()) {
+                                if (clientChannel.read(lenBuf) == -1) {
+                                    throw new EOFException("Unexpected EOF inside length header");
+                                }
+                            }
+                            lenBuf.flip();
+                            long length = lenBuf.getLong();
+                            
+                            if (length <= 0) break;
+
+                            // 2. Read Opcode
                             int opcode = readInt(clientChannel);
+                            
+                            // 3. Dispatch
                             var handler = this.handlers.get(opcode);
-                            // subtract 4 for opcode
-                            handler.handle(clientChannel, length - 4);
+                            if (handler != null) {
+                                // subtract 4 bytes (Opcode) from the remaining length
+                                handler.handle(clientChannel, length - 4);
+                            } else {
+                                System.err.println("Unknown opcode: " + opcode);
+                                break; // disconnect invalid client
+                            }
                         }
+                    } catch (EOFException e) {
+                        // Client closed connection during a read (Normal behavior)
                     } catch (IOException e) {
-                        e.printStackTrace();
+                        // Only print real errors (not connection resets during shutdown)
+                        if (e.getMessage() != null && !e.getMessage().contains("Connection reset")) {
+                            e.printStackTrace();
+                        }
                     }
                 });
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            // Check if we are stopping before printing stack trace
+            if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -156,6 +184,8 @@ public class StorageNodeServer {
             }
         }
     }
+
+    // --- Helpers ---
 
     private void readFully(SocketChannel sc, ByteBuffer buf) throws IOException {
         while (buf.hasRemaining()) {
@@ -179,13 +209,6 @@ public class StorageNodeServer {
         return transferred;
     }
 
-    private long readLong(SocketChannel in) throws IOException {
-        ByteBuffer buf = ByteBuffer.allocate(8);
-        readFully(in, buf);
-        buf.flip();
-        return buf.getLong();
-    }
-
     private int readInt(SocketChannel in) throws IOException {
         ByteBuffer buf = ByteBuffer.allocate(4);
         readFully(in, buf);
@@ -204,5 +227,4 @@ public class StorageNodeServer {
     private String readString(SocketChannel in) throws IOException {
         return new String(readBytes(in));
     }
-
 }

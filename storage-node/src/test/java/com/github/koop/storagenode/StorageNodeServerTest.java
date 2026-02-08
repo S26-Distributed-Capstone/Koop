@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.*;
-import java.lang.reflect.Field;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -50,17 +49,13 @@ class StorageNodeServerTest {
             int partition = 5;
             String key = "my-key";
             byte[] data = "Hello Server".getBytes(StandardCharsets.UTF_8);
-
-            // Calculate Lengths
             byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            // Total Length calculation:
-            // Opcode(4) + ReqIdLen(4) + ReqIdBytes + Partition(4) + KeyLen(4) + KeyBytes + DataBytes
-            int totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+            // Total Length: Opcode(4) + ReqIdLen(4) + ReqIdBytes + Partition(4) + KeyLen(4) + KeyBytes + DataBytes
+            long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
 
-            // Send Frame
-            writeInt(out, totalLength);     // Frame Length
+            writeLong(out, totalLength);    // FIXED: Write frame length as Long
             writeInt(out, 1);               // Opcode (PUT)
             writeString(out, reqId);        // ReqID
             writeInt(out, partition);       // Partition
@@ -68,22 +63,24 @@ class StorageNodeServerTest {
             out.write(data);                // Data
             out.flush();
 
-            // Read PUT Response (1 byte: 1=success)
-            int status = in.read();
+            // Read PUT Response
+            consumeResponseLength(in);      // FIXED: Consume 8-byte response length
+            int status = in.read();         // Status (1 byte)
             assertEquals(1, status, "PUT should return success (1)");
 
             // --- GET Request ---
-            // Calculate Length for GET: Opcode(4) + Partition(4) + KeyLen(4) + KeyBytes
-            int getLength = 4 + 4 + 4 + keyBytes.length;
+            // Length: Opcode(4) + Partition(4) + KeyLen(4) + KeyBytes
+            long getLength = 4 + 4 + 4 + keyBytes.length;
 
-            writeInt(out, getLength);       // Frame Length
+            writeLong(out, getLength);      // FIXED: Write frame length as Long
             writeInt(out, 6);               // Opcode (GET)
             writeInt(out, partition);       // Partition
             writeString(out, key);          // Key
             out.flush();
 
             // Read GET Response
-            int found = in.read();
+            consumeResponseLength(in);      // FIXED: Consume 8-byte response length
+            int found = in.read();          // Status (1 byte)
             assertEquals(1, found, "GET should return found (1)");
 
             byte[] responseData = in.readNBytes(data.length);
@@ -101,32 +98,34 @@ class StorageNodeServerTest {
             String reqId = "del-req";
             int partition = 2;
             String key = "del-key";
-            byte[] data = "ToBeDeleted".getBytes();
-            
-            byte[] reqIdBytes = reqId.getBytes();
-            byte[] keyBytes = key.getBytes();
-            int putLen = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+            byte[] data = "ToBeDeleted".getBytes(StandardCharsets.UTF_8);
+            byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
+            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            writeInt(out, putLen);
+            long putLen = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+
+            writeLong(out, putLen);         // FIXED: Long
             writeInt(out, 1); // PUT
             writeString(out, reqId);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data);
             out.flush();
+            
+            consumeResponseLength(in);      // FIXED
             in.read(); // consume success
 
             // --- DELETE Request ---
-            // Length: Opcode(4) + Partition(4) + KeyLen(4) + KeyBytes
-            int delLen = 4 + 4 + 4 + keyBytes.length;
+            long delLen = 4 + 4 + 4 + keyBytes.length;
 
-            writeInt(out, delLen);
+            writeLong(out, delLen);         // FIXED: Long
             writeInt(out, 2); // DELETE
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
             // Check Result
+            consumeResponseLength(in);      // FIXED
             int deleted = in.read();
             assertEquals(1, deleted, "DELETE should return success (1)");
         }
@@ -154,9 +153,9 @@ class StorageNodeServerTest {
                     byte[] keyBytes = keys[idx].getBytes(StandardCharsets.UTF_8);
                     byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
 
-                    int totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+                    long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
 
-                    writeInt(out, totalLength);
+                    writeLong(out, totalLength); // FIXED: Long
                     writeInt(out, 1); // PUT
                     writeString(out, reqId);
                     writeInt(out, partition);
@@ -164,17 +163,19 @@ class StorageNodeServerTest {
                     out.write(data);
                     out.flush();
 
+                    consumeResponseLength(in);   // FIXED
                     int status = in.read();
                     assertEquals(1, status, "PUT should return success (1)");
 
                     // GET
-                    int getLength = 4 + 4 + 4 + keyBytes.length;
-                    writeInt(out, getLength);
+                    long getLength = 4 + 4 + 4 + keyBytes.length;
+                    writeLong(out, getLength);   // FIXED: Long
                     writeInt(out, 6); // GET
                     writeInt(out, partition);
                     writeString(out, keys[idx]);
                     out.flush();
 
+                    consumeResponseLength(in);   // FIXED
                     int found = in.read();
                     assertEquals(1, found, "GET should return found (1)");
                     byte[] responseData = in.readNBytes(data.length);
@@ -201,44 +202,49 @@ class StorageNodeServerTest {
             String key = "overwrite-key";
             byte[] data1 = "FirstValue".getBytes(StandardCharsets.UTF_8);
             byte[] data2 = "SecondValue".getBytes(StandardCharsets.UTF_8);
+            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
             // First PUT
             byte[] reqIdBytes1 = reqId1.getBytes(StandardCharsets.UTF_8);
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-            int putLen1 = 4 + 4 + reqIdBytes1.length + 4 + 4 + keyBytes.length + data1.length;
+            long putLen1 = 4 + 4 + reqIdBytes1.length + 4 + 4 + keyBytes.length + data1.length;
 
-            writeInt(out, putLen1);
+            writeLong(out, putLen1); // FIXED: Long
             writeInt(out, 1); // PUT
             writeString(out, reqId1);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data1);
             out.flush();
+            
+            consumeResponseLength(in); // FIXED
             int status1 = in.read();
             assertEquals(1, status1, "First PUT should return success (1)");
 
             // Second PUT (overwrite)
             byte[] reqIdBytes2 = reqId2.getBytes(StandardCharsets.UTF_8);
-            int putLen2 = 4 + 4 + reqIdBytes2.length + 4 + 4 + keyBytes.length + data2.length;
+            long putLen2 = 4 + 4 + reqIdBytes2.length + 4 + 4 + keyBytes.length + data2.length;
 
-            writeInt(out, putLen2);
+            writeLong(out, putLen2); // FIXED: Long
             writeInt(out, 1); // PUT
             writeString(out, reqId2);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data2);
             out.flush();
+            
+            consumeResponseLength(in); // FIXED
             int status2 = in.read();
             assertEquals(1, status2, "Second PUT should return success (1)");
 
-            // GET (should return second value)
-            int getLen = 4 + 4 + 4 + keyBytes.length;
-            writeInt(out, getLen);
+            // GET
+            long getLen = 4 + 4 + 4 + keyBytes.length;
+            writeLong(out, getLen); // FIXED: Long
             writeInt(out, 6); // GET
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
+            consumeResponseLength(in); // FIXED
             int found = in.read();
             assertEquals(1, found, "GET after overwrite should return found (1)");
             byte[] responseData = in.readNBytes(data2.length);
@@ -256,7 +262,6 @@ class StorageNodeServerTest {
 
         for (int i = 0; i < clientCount; i++) {
             final int idx = i;
-            // Generate a random alphanumeric string of length 16
             values[idx] = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
             threads[idx] = new Thread(() -> {
                 try (Socket socket = new Socket("localhost", PORT);
@@ -268,9 +273,9 @@ class StorageNodeServerTest {
                     byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
                     byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
 
-                    int totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+                    long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
 
-                    writeInt(out, totalLength);
+                    writeLong(out, totalLength); // FIXED: Long
                     writeInt(out, 1); // PUT
                     writeString(out, reqId);
                     writeInt(out, partition);
@@ -278,6 +283,7 @@ class StorageNodeServerTest {
                     out.write(data);
                     out.flush();
 
+                    consumeResponseLength(in); // FIXED
                     int status = in.read();
                     assertEquals(1, status, "PUT should return success (1)");
                 } catch (IOException e) {
@@ -289,38 +295,31 @@ class StorageNodeServerTest {
         for (Thread t : threads) t.start();
         for (Thread t : threads) t.join();
 
-        // After all PUTs, GET the value and ensure it's one of the written values (not a mix)
+        // GET verification
         try (Socket socket = new Socket("localhost", PORT);
              OutputStream out = socket.getOutputStream();
              InputStream in = socket.getInputStream()) {
 
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-            int getLen = 4 + 4 + 4 + keyBytes.length;
-            writeInt(out, getLen);
+            long getLen = 4 + 4 + 4 + keyBytes.length;
+            
+            writeLong(out, getLen); // FIXED: Long
             writeInt(out, 6); // GET
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
+            consumeResponseLength(in); // FIXED
             int found = in.read();
             assertEquals(1, found, "GET after concurrent PUTs should return found (1)");
 
-            // Try all possible value lengths
-            String result = null;
-            for (String v : values) {
-                byte[] responseData = in.readNBytes(v.getBytes(StandardCharsets.UTF_8).length);
-                String candidate = new String(responseData, StandardCharsets.UTF_8);
-                for (String expected : values) {
-                    if (candidate.equals(expected)) {
-                        result = candidate;
-                        break;
-                    }
-                }
-                if (result != null) break;
-            }
+            // Read the value (16 bytes)
+            byte[] responseData = in.readNBytes(16);
+            String candidate = new String(responseData, StandardCharsets.UTF_8);
+            
             boolean foundMatch = false;
-            for (String v : values) {
-                if (v.equals(result)) {
+            for (String expected : values) {
+                if (candidate.equals(expected)) {
                     foundMatch = true;
                     break;
                 }
@@ -332,10 +331,23 @@ class StorageNodeServerTest {
     private void writeInt(OutputStream out, int v) throws IOException {
         out.write(ByteBuffer.allocate(4).putInt(v).array());
     }
+    
+    // New Helper for Protocol Compliance
+    private void writeLong(OutputStream out, long v) throws IOException {
+        out.write(ByteBuffer.allocate(8).putLong(v).array());
+    }
 
     private void writeString(OutputStream out, String s) throws IOException {
         byte[] b = s.getBytes(StandardCharsets.UTF_8);
         writeInt(out, b.length);
         out.write(b);
+    }
+    
+    // New Helper to consume the 8-byte response length
+    private void consumeResponseLength(InputStream in) throws IOException {
+        byte[] b = in.readNBytes(8);
+        if (b.length < 8) {
+             throw new EOFException("Unexpected EOF while reading response length");
+        }
     }
 }
