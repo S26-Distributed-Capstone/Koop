@@ -101,6 +101,7 @@ public class StorageNodeServer {
                 socketChannel.write(length(responseLen));
                 socketChannel.write(succeeded(true));
                 transferAll(dataStream, socketChannel);
+                dataStream.close();
             }
         }
     }

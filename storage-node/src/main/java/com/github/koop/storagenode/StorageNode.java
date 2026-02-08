@@ -80,18 +80,28 @@ public class StorageNode {
                 .resolve("current_temp");
     }
 
-    /**
-     * Stores the given data for the specified partition, requestID, and key. The
-     * data is written to a file in the storage node's data directory. The method
-     * also updates the version tracking file to keep track of the latest stored
-     * object for the given partition and key.
-     * 
-     * @param partition
-     * @param requestID
-     * @param key
-     * @param data
-     * @throws IOException
-     */
+    private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException {
+        Path versionTrackingFile = getVersionTrackingFile(partition, key);
+        Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key, requestID);
+        Files.write(versionTrackingFileTemp, requestID.getBytes());
+        Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    private Optional<String> getLatestObjectStored(int partition, String key){
+        Path versionTrackingFile = getVersionTrackingFile(partition, key);
+        try{
+            var bytes = Files.readAllBytes(versionTrackingFile);
+            if (bytes.length == 0) {
+                return Optional.empty();
+            }
+            return Optional.of(new String(bytes));
+        }catch (IOException e) {
+            // If we fail to read the version tracking file, treat it as if no version is stored.
+            return Optional.empty();
+        }
+    }
+
     protected void store(
             int partition,
             String requestID,
@@ -121,67 +131,22 @@ public class StorageNode {
         bumpLatestObjectStored(partition, key, requestID);
     }
 
-    private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException {
-        Path versionTrackingFile = getVersionTrackingFile(partition, key);
-        Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key, requestID);
-        Files.write(versionTrackingFileTemp, requestID.getBytes());
-        Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING);
-    }
-
-    private Optional<String> getLatestObjectStored(int partition, String key) throws IOException {
-        Path versionTrackingFile = getVersionTrackingFile(partition, key);
-        var bytes = Files.readAllBytes(versionTrackingFile);
-        if (bytes.length == 0) {
-            return Optional.empty();
-        }
-        return Optional.of(new String(bytes));
-    }
-
-    /**
-     * Retrieves the data for the specified partition and key. The method reads the
-     * version tracking file to determine the latest stored object for the given
-     * partition and key, and then returns an InputStream to read the data from the
-     * corresponding file. If no data is found for the specified partition and key,
-     * an empty Optional is returned.
-     * 
-     * @param partition
-     * @param key
-     * @return
-     * @throws IOException
-     */
     protected Optional<FileChannel> retrieve(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);
         if (latestObjectIDStored.isEmpty()) {
             return Optional.empty();
         }
-
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
-
-        if (!Files.exists(path)) {
-            throw new IOException(
-                    "Data not found for partition " + partition + ", requestID " + latestObjectIDStored.get() + ", key "
-                            + key);
+        try {
+            FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
+            return Optional.of(channel);
+        } catch (IOException e) {
+            // the file was deleted after reading the version tracking file, return empty to
+            // indicate not found
+            return Optional.empty();
         }
-
-        FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
-        return Optional.of(channel);
     }
 
-    /**
-     * Deletes the data for the specified partition and key.
-     * The method reads the version tracking file to determine the latest stored
-     * object for the given partition and key, and then deletes the version tracking
-     * file & corresponding data file.
-     * If no data is found for the specified partition and key, the method returns
-     * false.
-     * If the deletion is successful, it returns true.
-     * 
-     * @param partition
-     * @param key
-     * @return
-     * @throws IOException
-     */
     protected boolean delete(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);
         if (latestObjectIDStored.isEmpty()) {
@@ -189,10 +154,46 @@ public class StorageNode {
         }
         // delete our pointer
         var versionTrackingFile = getVersionTrackingFile(partition, key);
-        Files.deleteIfExists(versionTrackingFile);
+        var deletedVersionFile = deleteUntilSuccess(versionTrackingFile);
+        if (!deletedVersionFile) {
+            return false;
+        }
         // delete object file
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
-        return Files.deleteIfExists(path);
+        deleteUntilSuccess(path);
+        return true;
+    }
+
+    /**
+     * Aggressively retries deletion until it succeeds or times out.
+     * Ideal for Windows where readers might hold brief locks.
+     */
+    private boolean deleteUntilSuccess(Path path) throws IOException {
+        long timeoutMs = 5000; // 5 seconds is plenty for a pointer file
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        
+        // Start with a tiny wait (yield) to catch micro-gaps quickly
+        long waitMs = 1; 
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                // If returns true (deleted) or false (not found), we are done.
+                // We only catch the exception (Locked).
+                Files.deleteIfExists(path);
+                return true;
+            } catch (IOException e) {
+                // File is locked. Wait for the gap.
+                try {
+                    Thread.sleep(waitMs);
+                    // Exponential backoff up to 100ms
+                    if (waitMs < 100) waitMs *= 2; 
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while deleting " + path);
+                }
+            }
+        }
+        return false;
     }
 
 }
