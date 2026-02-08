@@ -33,6 +33,38 @@ public class StorageNodeServer {
         registerHandlers();
     }
 
+    public static void main(String[] args) {
+    // 1. Read configuration from Environment Variables
+    String envPort = System.getenv("PORT");
+    String envDir = System.getenv("STORAGE_DIR");
+
+    // 2. Set defaults if environment variables are missing
+    int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
+    Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
+
+    // 3. Ensure the storage directory exists
+    try {
+        java.nio.file.Files.createDirectories(storagePath);
+    } catch (IOException e) {
+        System.err.println("Failed to create storage directory: " + storagePath);
+        System.exit(1);
+    }
+
+    // 4. Initialize and start the server
+    StorageNodeServer server = new StorageNodeServer(port, storagePath);
+    
+    System.out.println("Storage Node starting on port: " + port);
+    System.out.println("Storage directory: " + storagePath.toAbsolutePath());
+
+    // Add a shutdown hook to close the server gracefully on Ctrl+C
+    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        System.out.println("Shutting down server...");
+        server.stop();
+    }));
+
+    server.start();
+}
+
     private void registerHandlers() {
         this.handlers.put(OPCODE_PUT, this::handlePut);
         this.handlers.put(OPCODE_GET, this::handleGet);
