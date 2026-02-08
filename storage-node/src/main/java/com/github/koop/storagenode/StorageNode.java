@@ -195,24 +195,4 @@ public class StorageNode {
         return Files.deleteIfExists(path);
     }
 
-    private static void pipeToFile(InputStream in, Path path, int length) throws IOException {
-        try (OutputStream out = Files.newOutputStream(path)) {
-            copyNBytes(in, out, length);
-        }
-    }
-
-    private static void copyNBytes(InputStream in, OutputStream out, int length) throws IOException {
-        byte[] buffer = new byte[8192];
-        int totalRead = 0;
-        while (totalRead < length) {
-            int bytesToRead = Math.min(buffer.length, length - totalRead);
-            int read = in.read(buffer, 0, bytesToRead);
-            if (read == -1) {
-                throw new EOFException("Expected " + length + " bytes but got " + totalRead);
-            }
-            out.write(buffer, 0, read);
-            totalRead += read;
-        }
-    }
-
 }
