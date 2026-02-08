@@ -88,6 +88,7 @@ public class StorageNodeServer {
                 socketChannel.write(length(responseLen));
                 socketChannel.write(succeeded(true));
                 transferAll(dataChannel, socketChannel);
+                dataChannel.close(); // Ensure channel is closed after transfer
             }
         }
     }
