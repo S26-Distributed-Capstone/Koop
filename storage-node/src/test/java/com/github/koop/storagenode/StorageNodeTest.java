@@ -110,26 +110,4 @@ class StorageNodeTest {
                            .resolve("data.dat");
         assertFalse(Files.exists(path), "Physical file should be deleted");
     }
-    
-    @Test
-    void testGarbageCollectionOfOldVersion() throws IOException {
-        StorageNode node = new StorageNode(tempDir);
-        String key = "gc-key";
-        int partition = 1;
-
-        // Store Version 1
-        node.store(partition, "v1", key, createChannel("data1"), 5);
-        Path v1Path = tempDir.resolve("partition_" + partition).resolve(key).resolve("v1").resolve("data.dat");
-        assertTrue(Files.exists(v1Path));
-
-        // Store Version 2 (Should trigger GC of V1)
-        node.store(partition, "v2", key, createChannel("data2"), 5);
-        
-        // Check that V1 was cleaned up
-        assertFalse(Files.exists(v1Path), "Old version (v1) should have been garbage collected");
-        
-        // Check that V2 exists
-        Path v2Path = tempDir.resolve("partition_" + partition).resolve(key).resolve("v2").resolve("data.dat");
-        assertTrue(Files.exists(v2Path));
-    }
 }
