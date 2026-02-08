@@ -4,18 +4,26 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.FileChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 
 /**
- * StorageNode is responsible for managing the storage and retrieval of data objects
- * in a partitioned directory structure on the local filesystem. Each object is identified
- * by a partition, a unique request ID, and a key. The class provides methods to store,
- * retrieve, and delete objects, as well as to track the latest stored version for each key.
+ * StorageNode is responsible for managing the storage and retrieval of data
+ * objects
+ * in a partitioned directory structure on the local filesystem. Each object is
+ * identified
+ * by a partition, a unique request ID, and a key. The class provides methods to
+ * store,
+ * retrieve, and delete objects, as well as to track the latest stored version
+ * for each key.
  * <p>
  * The storage layout is organized as follows:
+ * 
  * <pre>
  *   dataDirectory/
  *     partition_{partition}/
@@ -25,10 +33,13 @@ import java.util.Optional;
  *         current
  *         current_temp
  * </pre>
- * The {@code current} file tracks the latest request ID for a given partition and key.
+ * 
+ * The {@code current} file tracks the latest request ID for a given partition
+ * and key.
  * </p>
  * <p>
- * This class is intended to be used as a backend for distributed or local storage systems
+ * This class is intended to be used as a backend for distributed or local
+ * storage systems
  * that require version tracking and atomic updates.
  * </p>
  */
@@ -43,10 +54,10 @@ public class StorageNode {
         return dataDirectory;
     }
 
-    private Path getObjectFolder(int partition, String key){
+    private Path getObjectFolder(int partition, String key) {
         // partition/key/
         return dataDirectory.resolve("partition_" + partition)
-            .resolve(key);
+                .resolve(key);
     }
 
     private Path getObjectFile(int partition, String requestID, String key) {
@@ -56,89 +67,130 @@ public class StorageNode {
                 .resolve("data.dat");
     }
 
-    private Path getVersionTrackingFile(int partition, String key){
+    private Path getVersionTrackingFile(int partition, String key) {
         // partition/key/current
         return getObjectFolder(partition, key)
-            .resolve("current");
+                .resolve("current");
     }
 
-    private Path getVersionTrackingTempFile(int partition, String key, String requestID){
+    private Path getVersionTrackingTempFile(int partition, String key, String requestID) {
         // partition/key/current_temp
         return getObjectFolder(partition, key)
-            .resolve(requestID)
-            .resolve("current_temp");
+                .resolve(requestID)
+                .resolve("current_temp");
     }
 
     /**
-     * Stores the given data for the specified partition, requestID, and key. The data is written to a file in the storage node's data directory. The method also updates the version tracking file to keep track of the latest stored object for the given partition and key.
+     * Stores the given data for the specified partition, requestID, and key. The
+     * data is written to a file in the storage node's data directory. The method
+     * also updates the version tracking file to keep track of the latest stored
+     * object for the given partition and key.
+     * 
      * @param partition
      * @param requestID
      * @param key
      * @param data
      * @throws IOException
      */
-    protected void store(int partition, String requestID, String key, InputStream data, int length) throws IOException {
+    protected void store(
+            int partition,
+            String requestID,
+            String key,
+            SocketChannel data,
+            long length) throws IOException {
+
         Path path = getObjectFile(partition, requestID, key);
         Files.createDirectories(path.getParent());
-        pipeToFile(data, path, length);
+
+        try (FileChannel fc = FileChannel.open(
+                path,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE)) {
+
+            long written = 0;
+            while (written < length) {
+                long n = fc.transferFrom(data, written, length - written);
+                if (n == 0) {
+                    throw new EOFException("Unexpected EOF while reading payload");
+                }
+                written += n;
+            }
+        }
+
         bumpLatestObjectStored(partition, key, requestID);
     }
 
-    private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException{
+    private void bumpLatestObjectStored(int partition, String key, String requestID) throws IOException {
         Path versionTrackingFile = getVersionTrackingFile(partition, key);
         Path versionTrackingFileTemp = getVersionTrackingTempFile(partition, key, requestID);
         Files.write(versionTrackingFileTemp, requestID.getBytes());
-        Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        Files.move(versionTrackingFileTemp, versionTrackingFile, StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING);
     }
 
-    private Optional<String> getLatestObjectStored(int partition, String key) throws IOException{
+    private Optional<String> getLatestObjectStored(int partition, String key) throws IOException {
         Path versionTrackingFile = getVersionTrackingFile(partition, key);
         var bytes = Files.readAllBytes(versionTrackingFile);
-        if(bytes.length == 0){
+        if (bytes.length == 0) {
             return Optional.empty();
         }
         return Optional.of(new String(bytes));
     }
 
     /**
-     * Retrieves the data for the specified partition and key. The method reads the version tracking file to determine the latest stored object for the given partition and key, and then returns an InputStream to read the data from the corresponding file. If no data is found for the specified partition and key, an empty Optional is returned.
+     * Retrieves the data for the specified partition and key. The method reads the
+     * version tracking file to determine the latest stored object for the given
+     * partition and key, and then returns an InputStream to read the data from the
+     * corresponding file. If no data is found for the specified partition and key,
+     * an empty Optional is returned.
+     * 
      * @param partition
      * @param key
      * @return
      * @throws IOException
      */
-    protected Optional<InputStream> retrieve(int partition, String key) throws IOException {
+    protected Optional<FileChannel> retrieve(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);
-        if(latestObjectIDStored.isEmpty()){
+        if (latestObjectIDStored.isEmpty()) {
             return Optional.empty();
         }
+
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
+
         if (!Files.exists(path)) {
             throw new IOException(
-                    "Data not found for partition " + partition + ", requestID " + latestObjectIDStored.get() + ", key " + key);
+                    "Data not found for partition " + partition + ", requestID " + latestObjectIDStored.get() + ", key "
+                            + key);
         }
-        return Optional.of(Files.newInputStream(path));
+
+        FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
+        return Optional.of(channel);
     }
 
     /**
      * Deletes the data for the specified partition and key.
-     * The method reads the version tracking file to determine the latest stored object for the given partition and key, and then deletes the version tracking file & corresponding data file. 
-     * If no data is found for the specified partition and key, the method returns false.
+     * The method reads the version tracking file to determine the latest stored
+     * object for the given partition and key, and then deletes the version tracking
+     * file & corresponding data file.
+     * If no data is found for the specified partition and key, the method returns
+     * false.
      * If the deletion is successful, it returns true.
+     * 
      * @param partition
      * @param key
      * @return
      * @throws IOException
      */
-    protected boolean delete(int partition, String key) throws IOException{
+    protected boolean delete(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);
-        if(latestObjectIDStored.isEmpty()){
+        if (latestObjectIDStored.isEmpty()) {
             return false;
         }
-        //delete our pointer 
+        // delete our pointer
         var versionTrackingFile = getVersionTrackingFile(partition, key);
         Files.deleteIfExists(versionTrackingFile);
-        //delete object file
+        // delete object file
         Path path = getObjectFile(partition, latestObjectIDStored.get(), key);
         return Files.deleteIfExists(path);
     }
