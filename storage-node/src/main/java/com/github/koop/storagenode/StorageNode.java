@@ -2,10 +2,8 @@ package com.github.koop.storagenode;
 
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.channels.FileChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -106,7 +104,7 @@ public class StorageNode {
             int partition,
             String requestID,
             String key,
-            SocketChannel data,
+            ReadableByteChannel data,
             long length) throws IOException {
 
         Path path = getObjectFile(partition, requestID, key);
