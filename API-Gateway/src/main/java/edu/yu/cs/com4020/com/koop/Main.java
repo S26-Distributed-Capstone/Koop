@@ -6,8 +6,9 @@ import java.io.InputStream;
 public class Main {
     public static void main(String[] args) {
         // 1. Initialize the Service (Dependency Injection)
-        // Later,  will swap this line to: new NetworkRouterStorage(); or something 
-        StorageService storage = new LocalFileStorage("/app/storage");
+        String routerHost = System.getenv().getOrDefault("ROUTER_HOST", "localhost");
+        int routerPort = Integer.parseInt(System.getenv().getOrDefault("ROUTER_PORT", "9000"));
+        StorageService storage = new TcpStorageService(routerHost, routerPort);
 
         var app = Javalin.create(config -> {
             config.useVirtualThreads = true;
