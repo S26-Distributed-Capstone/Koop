@@ -1,4 +1,4 @@
-package com.github.koop.queryprocessor.gateway;
+package com.github.koop.queryprocessor.gateway.StorageServices;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;

@@ -3,6 +3,9 @@ package com.github.koop.queryprocessor.gateway;
 import io.javalin.Javalin;
 import java.io.InputStream;
 
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.gateway.StorageServices.TcpStorageService;
+
 public class Main {
     public static void main(String[] args) {
         // 1. Initialize the Service (Dependency Injection)
