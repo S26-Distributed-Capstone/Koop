@@ -9,7 +9,9 @@ public class Main {
         // Later,  will swap this line to: new NetworkRouterStorage(); or something 
         StorageService storage = new LocalFileStorage("/app/storage");
 
-        var app = Javalin.create().start(8080);
+        var app = Javalin.create(config -> {
+            config.useVirtualThreads = true;
+        }).start(8080);
 
         app.get("/health", ctx -> ctx.result("API Gateway is healthy!"));
 
