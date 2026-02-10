@@ -1,5 +1,6 @@
 package com.github.koop.queryprocessor.processor;
 import com.backblaze.erasure.ReedSolomon;
+import jdk.jshell.spi.ExecutionControl;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -8,6 +9,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Worker implements:
@@ -99,6 +101,35 @@ public final class StorageWorker{
                 });
             }
         }
+    }
+
+    public boolean put(UUID requestID, String bucket, String key, InputStream data) throws IOException {
+        /*
+        finds set
+        encodes,
+        read in TOTAL bytes
+        write to output streams
+        return true on success, false on fail
+         */
+
+        throw new UnsupportedOperationException("not implemented yet :)");
+    }
+
+    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+        /*
+        finds set
+        reconstructs data from set
+        streams out
+         */
+        throw new UnsupportedOperationException("not implemented yet :)");
+    }
+
+    public boolean delete(UUID requestID, String bucket, String key) throws IOException {
+        /*
+        sends to delete
+        returns true on success false on fail
+         */
+        throw new UnsupportedOperationException("not implemented yet :)");
     }
 
     // ------------------ Gateway protocol helpers (no Wire) ------------------
