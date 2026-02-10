@@ -103,7 +103,7 @@ public final class StorageWorker{
         }
     }
 
-    public boolean put(UUID requestID, String bucket, String key, InputStream data) throws IOException {
+    public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
         /*
         finds set
         encodes,
