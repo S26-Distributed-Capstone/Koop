@@ -5,6 +5,7 @@ import java.io.InputStream;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.LocalFileStorage;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
 import com.github.koop.queryprocessor.gateway.StorageServices.TcpStorageService;
 
 public class Main {
@@ -12,7 +13,8 @@ public class Main {
         // 1. Initialize the Service (Dependency Injection)
         String routerHost = System.getenv().getOrDefault("ROUTER_HOST", "localhost");
         int routerPort = Integer.parseInt(System.getenv().getOrDefault("ROUTER_PORT", "9000"));
-        StorageService storage = new LocalFileStorage("./data");
+        StorageService storage = new StorageWorkerService();
+
 
         var app = Javalin.create(config -> {
             config.useVirtualThreads = true;
