@@ -32,9 +32,7 @@ public final class StorageWorker {
     private final List<InetSocketAddress> set2;
     private final List<InetSocketAddress> set3;
 
-    public StorageWorker(List<InetSocketAddress> set1,
-                         List<InetSocketAddress> set2,
-                         List<InetSocketAddress> set3) {
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
         if (set1.size() != TOTAL || set2.size() != TOTAL || set3.size() != TOTAL) {
             throw new IllegalArgumentException("Each set must have exactly " + TOTAL + " nodes");
         }
@@ -43,11 +41,7 @@ public final class StorageWorker {
         this.set3 = set3;
     }
 
-    public boolean put(UUID requestID,
-                       String bucket,
-                       String key,
-                       long length,
-                       InputStream data) throws IOException {
+    public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
 
         // ---- Basic validation ----
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
