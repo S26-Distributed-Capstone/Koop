@@ -2,9 +2,6 @@ package com.github.koop.queryprocessor.gateway.StorageServices;
 
 import java.io.InputStream;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
@@ -14,12 +11,11 @@ import com.github.koop.queryprocessor.processor.StorageWorker;
  * This service handles incoming requests from the API Gateway and delegates them to the
  * StorageWorker for processing (routing, erasure encoding, distribution to storage nodes).
  * 
- * Each request is handled in a dedicated virtual thread for optimal concurrency and performance.
+ * Requests are handled directly in Javalin's virtual threads for optimal performance.
  */
 public class StorageWorkerService implements StorageService {
     
     private final StorageWorker storageWorker;
-    private final ExecutorService virtualThreadExecutor;
     
     /**
      * Initializes the StorageWorkerService with the configured StorageWorker.
@@ -29,8 +25,6 @@ public class StorageWorkerService implements StorageService {
      */
     public StorageWorkerService(StorageWorker storageWorker) {
         this.storageWorker = storageWorker;
-        // Create a virtual thread executor for handling requests
-        this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
     }
     
     /**
@@ -43,7 +37,6 @@ public class StorageWorkerService implements StorageService {
         // Temporary: Create StorageWorker with null sets
         // This will need to be properly initialized with node addresses
         this.storageWorker = new StorageWorker(null, null, null);
-        this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     @Override
@@ -51,17 +44,8 @@ public class StorageWorkerService implements StorageService {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
         
-        // Execute in a virtual thread and wait for completion
-        CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
-            try {
-                return storageWorker.put(requestId, bucket, key, length, data);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to store object: " + e.getMessage(), e);
-            }
-        }, virtualThreadExecutor);
-        
-        // Block until the operation completes
-        boolean success = future.join();
+        // Execute directly in the calling thread (Javalin's virtual thread)
+        boolean success = storageWorker.put(requestId, bucket, key, length, data);
         
         if (!success) {
             throw new RuntimeException("StorageWorker failed to store object");
@@ -73,17 +57,8 @@ public class StorageWorkerService implements StorageService {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
         
-        // Execute in a virtual thread and wait for completion
-        CompletableFuture<InputStream> future = CompletableFuture.supplyAsync(() -> {
-            try {
-                return storageWorker.get(requestId, bucket, key);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to retrieve object: " + e.getMessage(), e);
-            }
-        }, virtualThreadExecutor);
-        
-        // Block until the operation completes and return the stream
-        return future.join();
+        // Execute directly in the calling thread (Javalin's virtual thread)
+        return storageWorker.get(requestId, bucket, key);
     }
 
     @Override
@@ -91,28 +66,11 @@ public class StorageWorkerService implements StorageService {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
         
-        // Execute in a virtual thread and wait for completion
-        CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
-            try {
-                return storageWorker.delete(requestId, bucket, key);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to delete object: " + e.getMessage(), e);
-            }
-        }, virtualThreadExecutor);
-        
-        // Block until the operation completes
-        boolean success = future.join();
+        // Execute directly in the calling thread (Javalin's virtual thread)
+        boolean success = storageWorker.delete(requestId, bucket, key);
         
         if (!success) {
             throw new RuntimeException("StorageWorker failed to delete object");
         }
-    }
-    
-    /**
-     * Cleanup method to shutdown the executor service.
-     * Should be called when the application is shutting down.
-     */
-    public void shutdown() {
-        virtualThreadExecutor.shutdown();
     }
 }
