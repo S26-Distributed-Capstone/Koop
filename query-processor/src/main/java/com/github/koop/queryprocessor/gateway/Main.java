@@ -2,14 +2,9 @@ package com.github.koop.queryprocessor.gateway;
 
 import io.javalin.Javalin;
 import java.io.InputStream;
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.List;
 
-import com.github.koop.queryprocessor.gateway.StorageServices.LocalFileStorage;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
-import com.github.koop.queryprocessor.gateway.StorageServices.TcpStorageService;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
 public class Main {

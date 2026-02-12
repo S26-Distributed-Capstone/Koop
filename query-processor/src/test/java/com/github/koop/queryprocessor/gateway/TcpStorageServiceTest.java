@@ -121,7 +121,7 @@ class TcpStorageServiceTest {
         ByteArrayInputStream data = new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
         
         System.out.println("CLIENT: Sending PUT request...");
-        service.putObject("my-bucket", key, data);
+        service.putObject("my-bucket", key, data, content.length());
         System.out.println("CLIENT: PUT request finished");
 
         // Ensure server finished cleanly
