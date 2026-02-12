@@ -1,4 +1,5 @@
 package com.github.koop.queryprocessor.processor;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -7,18 +8,42 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Mock storage node matching the protocol:
+ *
+ * STORE (opcode 1):
+ *   requestId: string
+ *   partition: int
+ *   key: string  (bucket-key)
+ *   data: rest of stream (until EOF)
+ *   -> responds 1 byte: 1 ok / 0 fail
+ *
+ * READ (opcode 6):
+ *   partition: int
+ *   key: string
+ *   -> responds:
+ *        long responseLen (1 + dataLen)
+ *        byte successFlag (1 found / 0 not found)
+ *        data bytes (if found)
+ *
+ * DELETE (opcode 2):
+ *   partition: int
+ *   key: string
+ *   -> responds 1 byte: 1 ok / 0 fail
+ */
 final class FakeStorageNodeServer implements Closeable {
 
-    private static final int NODE_PUT_SHARD = 1;
-    private static final int NODE_GET_SHARD = 6;
+    private static final int OP_STORE = 1;
+    private static final int OP_DELETE = 2;
+    private static final int OP_READ = 6;
 
     private final ServerSocket server;
     private final Thread acceptThread;
 
-    // key: bucket|key|partition  value: shard bytes
+    // key = partition|key (key already includes bucket prefix)
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
 
-    // Flip this to simulate a node going “down” without freeing the port
+    // Toggle to simulate node failure without killing port
     private volatile boolean enabled = true;
 
     FakeStorageNodeServer() throws IOException {
@@ -32,10 +57,6 @@ final class FakeStorageNodeServer implements Closeable {
 
     void setEnabled(boolean enabled) {
         this.enabled = enabled;
-    }
-
-    boolean isEnabled() {
-        return enabled;
     }
 
     private void acceptLoop() {
@@ -53,96 +74,101 @@ final class FakeStorageNodeServer implements Closeable {
     }
 
     private void handle(Socket s) throws IOException {
+        s.setTcpNoDelay(true);
+
         DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
         DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
 
-        // If “down”, immediately respond error and close connection cleanly.
+        int opcode;
+        try {
+            opcode = in.readInt();
+        } catch (EOFException eof) {
+            return;
+        }
+
         if (!enabled) {
-            int opcode;
-            try {
-                opcode = in.readInt(); // consume
-            } catch (IOException e) {
-                return;
+            // For STORE/DELETE: send ack=0
+            // For READ: send "not found" frame
+            if (opcode == OP_READ) {
+                out.writeLong(1L);
+                out.writeByte(0);
+                out.flush();
+            } else {
+                out.writeByte(0);
+                out.flush();
             }
-            out.writeInt(503);
-            writeUtf8String(out, "node down");
-            // for GET, worker expects a shardLength only if status==0, so we stop here
+            return;
+        }
+
+        if (opcode == OP_STORE) {
+            String requestId = readString(in); // consumed, not used
+            int partition = in.readInt();
+            String key = readString(in);
+
+            // Data is "rest of stream" until client half-closes output or closes socket.
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[64 * 1024];
+            while (true) {
+                int r = in.read(buf);
+                if (r == -1) break;
+                baos.write(buf, 0, r);
+            }
+
+            store.put(k(partition, key), baos.toByteArray());
+
+            out.writeByte(1); // ack ok
             out.flush();
             return;
         }
 
-        int opcode = in.readInt();
-
-        if (opcode == NODE_PUT_SHARD) {
-            String bucket = readUtf8String(in);
-            String key = readUtf8String(in);
+        if (opcode == OP_READ) {
             int partition = in.readInt();
-            long shardLength = in.readLong();
+            String key = readString(in);
 
-            if (shardLength < 0 || shardLength > (1L << 31)) {
-                out.writeInt(400);
-                writeUtf8String(out, "bad shardLength");
-                out.flush();
-                return;
-            }
-
-            byte[] data = in.readNBytes((int) shardLength);
-            if (data.length != (int) shardLength) {
-                out.writeInt(500);
-                writeUtf8String(out, "short read");
-                out.flush();
-                return;
-            }
-
-            store.put(k(bucket, key, partition), data);
-
-            out.writeInt(0);
-            writeUtf8String(out, "ok");
-            out.flush();
-            return;
-        }
-
-        if (opcode == NODE_GET_SHARD) {
-            String bucket = readUtf8String(in);
-            String key = readUtf8String(in);
-            int partition = in.readInt();
-
-            byte[] data = store.get(k(bucket, key, partition));
+            byte[] data = store.get(k(partition, key));
             if (data == null) {
-                out.writeInt(404);
-                writeUtf8String(out, "missing");
+                out.writeLong(1L);     // responseLen = 1 (only success byte)
+                out.writeByte(0);      // not found
                 out.flush();
                 return;
             }
 
-            out.writeInt(0);
-            writeUtf8String(out, "ok");
-            out.writeLong(data.length); // shardLength includes the first 8 bytes
+            out.writeLong(1L + data.length);
+            out.writeByte(1);
             out.write(data);
             out.flush();
             return;
         }
 
-        out.writeInt(400);
-        writeUtf8String(out, "bad opcode");
+        if (opcode == OP_DELETE) {
+            int partition = in.readInt();
+            String key = readString(in);
+            store.remove(k(partition, key));
+            out.writeByte(1);
+            out.flush();
+            return;
+        }
+
+        // Unknown opcode => fail
+        out.writeByte(0);
         out.flush();
     }
 
-    private static String k(String bucket, String key, int partition) {
-        return bucket + "|" + key + "|" + partition;
+    private static String k(int partition, String key) {
+        return partition + "|" + key;
     }
 
-    private static void writeUtf8String(DataOutputStream out, String s) throws IOException {
+    private static void writeString(DataOutputStream out, String s) throws IOException {
         byte[] b = s.getBytes(StandardCharsets.UTF_8);
         out.writeInt(b.length);
         out.write(b);
     }
 
-    private static String readUtf8String(DataInputStream in) throws IOException {
+    private static String readString(DataInputStream in) throws IOException {
         int n = in.readInt();
         if (n < 0 || n > (1 << 20)) throw new IOException("Bad string length: " + n);
-        byte[] b = new byte[n];
-        in.readFully(b);
+        byte[] b = in.readNBytes(n);
+        if (b.length != n) throw new EOFException("Short read string");
         return new String(b, StandardCharsets.UTF_8);
     }
 
