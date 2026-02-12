@@ -75,6 +75,13 @@ public final class StorageWorker{
 
     private final List<InetSocketAddress> set1, set2, set3;
 
+    public StorageWorker(){
+        //empty for now
+        set1 = List.of();
+        set2 = List.of();
+        set3 = List.of();
+    }
+
     public StorageWorker(List<InetSocketAddress> set1,
                                     List<InetSocketAddress> set2,
                                     List<InetSocketAddress> set3) {

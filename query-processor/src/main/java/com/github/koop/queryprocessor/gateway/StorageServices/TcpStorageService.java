@@ -46,7 +46,7 @@ public class TcpStorageService implements StorageService {
      * [FrameLen (8)] [Opcode=1 (4)] [ReqID_Str] [Partition (4)] [Key_Str] [Data_Bytes]
      */
     @Override
-    public void putObject(String bucket, String key, InputStream data) throws Exception {
+    public void putObject(String bucket, String key, InputStream data, long length) throws Exception {
         //Data has to be buffered in memory to calculate the frame length before sending
         //per current protocol, but will need to discuss
 
