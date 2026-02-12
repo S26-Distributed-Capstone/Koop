@@ -8,6 +8,6 @@ RUN mvn clean package -DskipTests
 # --- Stage 2: Runtime ---
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /app/target/query-processor-*.jar app.jar
+COPY --from=build /app/target/storage-node-*.jar app.jar
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
