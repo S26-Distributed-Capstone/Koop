@@ -1,4 +1,4 @@
-package com.github.koop.queryprocessor.gateway;
+package com.github.koop.queryprocessor.gateway.StorageServices;
 
 import java.io.InputStream;
 import java.nio.file.*;
@@ -17,7 +17,7 @@ public class LocalFileStorage implements StorageService {
     }
 
     @Override
-    public void putObject(String bucket, String key, InputStream data) throws Exception {
+    public void putObject(String bucket, String key, InputStream data, long length) throws Exception {
         Path bucketPath = rootDir.resolve(bucket);
         Files.createDirectories(bucketPath);
         Path dest = bucketPath.resolve(key);

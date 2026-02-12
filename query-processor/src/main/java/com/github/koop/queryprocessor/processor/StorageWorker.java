@@ -32,7 +32,16 @@ public final class StorageWorker {
     private final List<InetSocketAddress> set2;
     private final List<InetSocketAddress> set3;
 
-    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
+    public StorageWorker(){
+        //empty for now
+        set1 = List.of();
+        set2 = List.of();
+        set3 = List.of();
+    }
+
+    public StorageWorker(List<InetSocketAddress> set1,
+                                    List<InetSocketAddress> set2,
+                                    List<InetSocketAddress> set3) {
         if (set1.size() != TOTAL || set2.size() != TOTAL || set3.size() != TOTAL) {
             throw new IllegalArgumentException("Each set must have exactly " + TOTAL + " nodes");
         }
