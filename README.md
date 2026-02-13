@@ -264,7 +264,9 @@ This project is part of the S26 Distributed Systems Capstone. For contributions:
 This project is developed as part of the S26 Distributed Systems Capstone program.
 
 ### Core Team
-- **Michael Kupferstein** ([@MichaelKupferstein](https://github.com/MichaelKupferstein)) - Project Lead & Developer
+- **Michael Kupferstein** ([@MichaelKupferstein](https://github.com/MichaelKupferstein))
+- **Yonatan Ginsburg** ([@ygins](https://github.com/ygins))
+- **Eitan Leitner** ([@EitanLeit23](https://github.com/EitanLeit23))
 
 ## License
 
