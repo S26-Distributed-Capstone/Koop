@@ -179,12 +179,12 @@ This configuration tolerates up to 3 simultaneous node failures. Data is striped
 Objects are distributed across 3 erasure sets using consistent hashing:
 ```
 hash(key) % 100:
-  0-33   → Set 1
-  34-66  → Set 2
-  67-99  → Set 3
+  0-33   → Set 1 (34 values)
+  34-66  → Set 2 (33 values)
+  67-99  → Set 3 (33 values)
 ```
 
-Each set contains 9 storage nodes (6 data + 3 parity).
+Each set contains 9 storage nodes (6 data + 3 parity). Note: Set 1 receives slightly more keys due to the 0-33 range inclusive.
 
 ## Development
 
@@ -194,14 +194,14 @@ Each set contains 9 storage nodes (6 data + 3 parity).
 ```bash
 cd query-processor
 mvn clean package
-java -jar target/query-processor-1.jar
+java -jar target/query-processor-1-jar-with-dependencies.jar
 ```
 
 **Storage Node**:
 ```bash
 cd storage-node
 mvn clean package
-java -jar target/storage-node-1.0.0-SNAPSHOT.jar
+java -jar target/storage-node-1.0.0-SNAPSHOT-jar-with-dependencies.jar
 ```
 
 ### Running Tests
@@ -242,7 +242,7 @@ Koop/
 
 ## Deployment
 
-The system deploys 12 containers via Docker Compose:
+The system deploys 13 containers via Docker Compose:
 - 3 Query Processor replicas
 - 6 Storage Node replicas
 - 3 etcd nodes (cluster quorum)
