@@ -29,7 +29,7 @@ The system uses Reed-Solomon erasure coding (6+3 configuration) to provide fault
          │ Custom Binary Protocol (TCP)
          ▼
 ┌──────────────────┐
-│  Storage Nodes   │ (6 nodes in 3 sets)
+│  Storage Nodes   │ (6 replicas currently; designed for 27 nodes in 3 sets)
 │  - Disk I/O      │
 │  - Versioning    │
 │  - Partitioning  │
@@ -166,13 +166,15 @@ The binary protocol uses 8-byte length-prefixed frames:
 
 ## Erasure Coding
 
-KoopDB uses Reed-Solomon erasure coding with parameters:
+KoopDB is designed to use Reed-Solomon erasure coding with parameters:
 - **K (Data Shards)**: 6
 - **M (Parity Shards)**: 3
 - **Total Shards**: 9
 - **Shard Size**: 1 MB
 
 This configuration tolerates up to 3 simultaneous node failures. Data is striped across shards with each stripe containing 6 MB of real data plus 3 MB of parity data.
+
+**Current Status**: The erasure coding implementation is present in the codebase but not yet fully wired up in the Docker Compose deployment. The current deployment uses 6 storage nodes with basic storage functionality. Full erasure coding deployment would require 27 nodes (9 nodes × 3 sets).
 
 ### Routing Strategy
 
@@ -184,7 +186,7 @@ hash(key) % 100:
   67-99  → Set 3 (33 values)
 ```
 
-Each set contains 9 storage nodes (6 data + 3 parity). Note: Set 1 receives slightly more keys due to the 0-33 range inclusive.
+Each erasure set is designed to contain 9 storage nodes (6 data + 3 parity). Note: Set 1 receives slightly more keys due to the 0-33 range inclusive.
 
 ## Development
 
