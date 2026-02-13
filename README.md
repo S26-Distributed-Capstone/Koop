@@ -259,6 +259,13 @@ This project is part of the S26 Distributed Systems Capstone. For contributions:
 2. Make your changes
 3. Submit a pull request with reviewers
 
+## Contributors
+
+This project is developed as part of the S26 Distributed Systems Capstone program.
+
+### Core Team
+- **Michael Kupferstein** ([@MichaelKupferstein](https://github.com/MichaelKupferstein)) - Project Lead & Developer
+
 ## License
 
 [Add license information]
