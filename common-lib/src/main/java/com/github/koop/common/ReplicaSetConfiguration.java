@@ -3,13 +3,9 @@ package com.github.koop.common;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
-public class Metadata {
-
+public class ReplicaSetConfiguration {
     @JsonProperty("replica_sets")
     private List<ReplicaSet> replicaSets;
-
-    @JsonProperty("partition_spread")
-    private List<PartitionSpread> partitionSpread;
 
     public List<ReplicaSet> getReplicaSets() {
         return replicaSets;
@@ -17,14 +13,6 @@ public class Metadata {
 
     public void setReplicaSets(List<ReplicaSet> replicaSets) {
         this.replicaSets = replicaSets;
-    }
-
-    public List<PartitionSpread> getPartitionSpread() {
-        return partitionSpread;
-    }
-
-    public void setPartitionSpread(List<PartitionSpread> partitionSpread) {
-        this.partitionSpread = partitionSpread;
     }
 
     public static class ReplicaSet {
@@ -66,29 +54,6 @@ public class Metadata {
 
         public void setPort(int port) {
             this.port = port;
-        }
-    }
-
-    public static class PartitionSpread {
-        private List<Integer> partitions;
-        
-        @JsonProperty("erasure_set")
-        private String erasureSet;
-
-        public List<Integer> getPartitions() {
-            return partitions;
-        }
-
-        public void setPartitions(List<Integer> partitions) {
-            this.partitions = partitions;
-        }
-
-        public String getErasureSet() {
-            return erasureSet;
-        }
-
-        public void setErasureSet(String erasureSet) {
-            this.erasureSet = erasureSet;
         }
     }
 }

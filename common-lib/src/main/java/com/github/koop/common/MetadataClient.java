@@ -22,12 +22,16 @@ public class MetadataClient implements AutoCloseable {
     private final KV kvClient;
     private final Watch watchClient;
     private final ObjectMapper objectMapper;
-    private final ByteSequence key;
+    private final ByteSequence replicaSetKey;
+    private final ByteSequence partitionSpreadKey;
     
-    private volatile Metadata metadata;
-    private Watch.Watcher watcher;
+    private volatile ReplicaSetConfiguration replicaSetConfiguration;
+    private volatile PartitionSpreadConfiguration partitionSpreadConfiguration;
+    
+    private Watch.Watcher replicaSetWatcher;
+    private Watch.Watcher partitionSpreadWatcher;
 
-    public MetadataClient(String metadataKey) {
+    public MetadataClient(String replicaSetKey, String partitionSpreadKey) {
         String etcdUrl = System.getenv("ETCD_URL");
         if (etcdUrl == null || etcdUrl.isEmpty()) {
             throw new IllegalStateException("ETCD_URL environment variable is not set");
@@ -36,84 +40,145 @@ public class MetadataClient implements AutoCloseable {
         this.kvClient = client.getKVClient();
         this.watchClient = client.getWatchClient();
         this.objectMapper = new ObjectMapper();
-        this.key = ByteSequence.from(metadataKey, StandardCharsets.UTF_8);
+        this.replicaSetKey = ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8);
+        this.partitionSpreadKey = ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8);
     }
 
-    public MetadataClient(Client client, String metadataKey) {
+    public MetadataClient(Client client, String replicaSetKey, String partitionSpreadKey) {
         this.client = client;
         this.kvClient = client.getKVClient();
         this.watchClient = client.getWatchClient();
         this.objectMapper = new ObjectMapper();
-        this.key = ByteSequence.from(metadataKey, StandardCharsets.UTF_8);
+        this.replicaSetKey = ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8);
+        this.partitionSpreadKey = ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8);
     }
 
     public void start() {
         try {
             // 1. Initial Synchronous Fetch
-            updateMetadataFromStore();
+            updateReplicaSetConfigurationFromStore();
+            updatePartitionSpreadConfigurationFromStore();
 
-            // 2. Setup Asynchronous Watch
-            this.watcher = watchClient.watch(key, new Watch.Listener() {
+            // 2. Setup Asynchronous Watch for ReplicaSetConfiguration
+            this.replicaSetWatcher = watchClient.watch(replicaSetKey, new Watch.Listener() {
                 @Override
                 public void onNext(WatchResponse response) {
                     for (WatchEvent event : response.getEvents()) {
                         if (event.getEventType() == WatchEvent.EventType.PUT) {
-                            LOGGER.info("Metadata update detected in etcd.");
-                            parseAndSetMetadata(event.getKeyValue().getValue());
+                            LOGGER.info("ReplicaSetConfiguration update detected in etcd.");
+                            parseAndSetReplicaSetConfiguration(event.getKeyValue().getValue());
                         } else if (event.getEventType() == WatchEvent.EventType.DELETE) {
-                            LOGGER.warning("Metadata key deleted from etcd.");
-                            metadata = null;
+                            LOGGER.warning("ReplicaSetConfiguration key deleted from etcd.");
+                            replicaSetConfiguration = null;
                         }
                     }
                 }
 
                 @Override
                 public void onError(Throwable throwable) {
-                    LOGGER.log(Level.SEVERE, "Error watching metadata", throwable);
+                    LOGGER.log(Level.SEVERE, "Error watching replicaSetConfiguration", throwable);
                 }
 
                 @Override
                 public void onCompleted() {
-                    LOGGER.info("Metadata watch completed.");
+                    LOGGER.info("ReplicaSetConfiguration watch completed.");
                 }
             });
+
+            // 3. Setup Asynchronous Watch for PartitionSpreadConfiguration
+            this.partitionSpreadWatcher = watchClient.watch(partitionSpreadKey, new Watch.Listener() {
+                @Override
+                public void onNext(WatchResponse response) {
+                    for (WatchEvent event : response.getEvents()) {
+                        if (event.getEventType() == WatchEvent.EventType.PUT) {
+                            LOGGER.info("PartitionSpreadConfiguration update detected in etcd.");
+                            parseAndSetPartitionSpreadConfiguration(event.getKeyValue().getValue());
+                        } else if (event.getEventType() == WatchEvent.EventType.DELETE) {
+                            LOGGER.warning("PartitionSpreadConfiguration key deleted from etcd.");
+                            partitionSpreadConfiguration = null;
+                        }
+                    }
+                }
+
+                @Override
+                public void onError(Throwable throwable) {
+                    LOGGER.log(Level.SEVERE, "Error watching partitionSpreadConfiguration", throwable);
+                }
+
+                @Override
+                public void onCompleted() {
+                    LOGGER.info("PartitionSpreadConfiguration watch completed.");
+                }
+            });
+
         } catch (Exception e) {
             throw new RuntimeException("Failed to start metadata client", e);
         }
     }
 
-    private void updateMetadataFromStore() {
+    private void updateReplicaSetConfigurationFromStore() {
         try {
-            CompletableFuture<GetResponse> getFuture = kvClient.get(key);
+            CompletableFuture<GetResponse> getFuture = kvClient.get(replicaSetKey);
             GetResponse response = getFuture.get();
             if (response.getKvs().isEmpty()) {
-                LOGGER.warning("No metadata found for key: " + key.toString(StandardCharsets.UTF_8));
+                LOGGER.warning("No replicaSetConfiguration found for key: " + replicaSetKey.toString(StandardCharsets.UTF_8));
                 return;
             }
-            parseAndSetMetadata(response.getKvs().get(0).getValue());
+            parseAndSetReplicaSetConfiguration(response.getKvs().get(0).getValue());
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to fetch initial metadata", e);
+            LOGGER.log(Level.SEVERE, "Failed to fetch initial replicaSetConfiguration", e);
         }
     }
 
-    private void parseAndSetMetadata(ByteSequence bs) {
+    private void updatePartitionSpreadConfigurationFromStore() {
+        try {
+            CompletableFuture<GetResponse> getFuture = kvClient.get(partitionSpreadKey);
+            GetResponse response = getFuture.get();
+            if (response.getKvs().isEmpty()) {
+                LOGGER.warning("No partitionSpreadConfiguration found for key: " + partitionSpreadKey.toString(StandardCharsets.UTF_8));
+                return;
+            }
+            parseAndSetPartitionSpreadConfiguration(response.getKvs().get(0).getValue());
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "Failed to fetch initial partitionSpreadConfiguration", e);
+        }
+    }
+
+    private void parseAndSetReplicaSetConfiguration(ByteSequence bs) {
         try {
             String json = bs.toString(StandardCharsets.UTF_8);
-            this.metadata = objectMapper.readValue(json, Metadata.class);
-            LOGGER.info("Metadata updated successfully.");
+            this.replicaSetConfiguration = objectMapper.readValue(json, ReplicaSetConfiguration.class);
+            LOGGER.info("ReplicaSetConfiguration updated successfully.");
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Failed to parse metadata JSON", e);
+            LOGGER.log(Level.SEVERE, "Failed to parse replicaSetConfiguration JSON", e);
         }
     }
 
-    public Metadata getMetadata() {
-        return metadata;
+    private void parseAndSetPartitionSpreadConfiguration(ByteSequence bs) {
+        try {
+            String json = bs.toString(StandardCharsets.UTF_8);
+            this.partitionSpreadConfiguration = objectMapper.readValue(json, PartitionSpreadConfiguration.class);
+            LOGGER.info("PartitionSpreadConfiguration updated successfully.");
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Failed to parse partitionSpreadConfiguration JSON", e);
+        }
+    }
+
+    public ReplicaSetConfiguration getReplicaSetConfiguration() {
+        return replicaSetConfiguration;
+    }
+
+    public PartitionSpreadConfiguration getPartitionSpreadConfiguration() {
+        return partitionSpreadConfiguration;
     }
 
     @Override
     public void close() {
-        if (watcher != null) {
-            watcher.close();
+        if (replicaSetWatcher != null) {
+            replicaSetWatcher.close();
+        }
+        if (partitionSpreadWatcher != null) {
+            partitionSpreadWatcher.close();
         }
         if (client != null) {
             client.close();
