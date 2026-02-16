@@ -2,93 +2,107 @@ package com.github.koop.common;
 
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
-import io.etcd.jetcd.test.EtcdClusterExtension;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.RegisterExtension;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@Testcontainers
 class MetadataClientTest {
 
-    @RegisterExtension
-    public static final EtcdClusterExtension cluster = EtcdClusterExtension.builder()
-            .withNodes(1)
-            .build();
+    @Container
+    public static GenericContainer<?> etcd = new GenericContainer<>("quay.io/coreos/etcd:v3.5.12")
+            .withExposedPorts(2379)
+            .withCommand(
+                    "/usr/local/bin/etcd",
+                    "--advertise-client-urls", "http://0.0.0.0:2379",
+                    "--listen-client-urls", "http://0.0.0.0:2379",
+                    "--initial-advertise-peer-urls", "http://0.0.0.0:2380",
+                    "--listen-peer-urls", "http://0.0.0.0:2380",
+                    "--initial-cluster", "default=http://0.0.0.0:2380"
+            )
+            .waitingFor(Wait.forLogMessage(".*ready to serve client requests.*\\n", 1));
 
     @Test
     void testMetadataFetchAndWatch() throws Exception {
-        // 1. Prepare raw client to seed data into the cluster
-        Client rawClient = Client.builder().endpoints(cluster.clientEndpoints()).build();
-        String replicaSetKeyStr = "/config/replica_sets";
-        String partitionSpreadKeyStr = "/config/partition_spread";
+        String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
         
-        String initialReplicaSetsJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
-        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"erasure_set\": \"es1\", \"partitions\": [1, 2, 3]}]}";
-        
-        ByteSequence replicaSetKey = ByteSequence.from(replicaSetKeyStr, StandardCharsets.UTF_8);
-        ByteSequence partitionSpreadKey = ByteSequence.from(partitionSpreadKeyStr, StandardCharsets.UTF_8);
-        
-        // Seed initial data
-        rawClient.getKVClient().put(replicaSetKey, ByteSequence.from(initialReplicaSetsJson, StandardCharsets.UTF_8)).get();
-        rawClient.getKVClient().put(partitionSpreadKey, ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)).get();
+        // Define separate keys for the two configurations
+        String replicaSetKey = "/config/replica_sets";
+        String partitionSpreadKey = "/config/partition_spread";
 
-        // 2. Initialize the MetadataClient pointing to the test cluster
-        // We create a new Client instance for the application to simulate a real scenario
-        Client appClient = Client.builder().endpoints(cluster.clientEndpoints()).build();
-        
-        try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKeyStr, partitionSpreadKeyStr)) {
-            metadataClient.start();
+        String initialReplicaSetJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
+        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [1, 2, 3], \"erasure_set\": \"A\"}]}";
 
-            // 3. Verify Initial Fetch
-            ReplicaSetConfiguration replicaConfig = metadataClient.getReplicaSetConfiguration();
-            PartitionSpreadConfiguration partitionConfig = metadataClient.getPartitionSpreadConfiguration();
-            
-            assertNotNull(replicaConfig, "ReplicaSetConfiguration should not be null after start");
-            assertEquals(1, replicaConfig.getReplicaSets().size());
-            assertEquals("10.0.0.1", replicaConfig.getReplicaSets().get(0).getMachines().get(0).getIp());
-            
-            assertNotNull(partitionConfig, "PartitionSpreadConfiguration should not be null after start");
-            assertEquals(1, partitionConfig.getPartitionSpread().size());
-            assertEquals("es1", partitionConfig.getPartitionSpread().get(0).getErasureSet());
+        try (Client rawClient = Client.builder().endpoints(endpoint).build()) {
+            // Seed initial data for both keys
+            rawClient.getKVClient().put(
+                    ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
+                    ByteSequence.from(initialReplicaSetJson, StandardCharsets.UTF_8)
+            ).get();
 
-            // 4. Verify Watch functionality
-            // Update ReplicaSet in etcd
-            String updatedReplicaJson = "{\"replica_sets\": [{\"number\": 99, \"machines\": [{\"ip\": \"192.168.1.1\", \"port\": 9000}]}]}";
-            rawClient.getKVClient().put(replicaSetKey, ByteSequence.from(updatedReplicaJson, StandardCharsets.UTF_8)).get();
+            rawClient.getKVClient().put(
+                    ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
+                    ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)
+            ).get();
+
+            // Initialize app client with the test container endpoint
+            Client appClient = Client.builder().endpoints(endpoint).build();
             
-            // Wait for watch trigger (polling)
-            boolean updatedReplica = false;
-            for (int i = 0; i < 20; i++) {
-                ReplicaSetConfiguration m = metadataClient.getReplicaSetConfiguration();
-                if (m != null && !m.getReplicaSets().isEmpty() && m.getReplicaSets().get(0).getNumber() == 99) {
-                    updatedReplica = true;
-                    assertEquals("192.168.1.1", m.getReplicaSets().get(0).getMachines().get(0).getIp());
-                    break;
+            try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
+                metadataClient.start();
+
+                // 1. Verify Initial Fetch for both configurations
+                ReplicaSetConfiguration rsConfig = metadataClient.getReplicaSetConfiguration();
+                assertNotNull(rsConfig);
+                assertEquals(1, rsConfig.getReplicaSets().get(0).getNumber());
+                assertEquals("10.0.0.1", rsConfig.getReplicaSets().get(0).getMachines().get(0).getIp());
+
+                PartitionSpreadConfiguration psConfig = metadataClient.getPartitionSpreadConfiguration();
+                assertNotNull(psConfig);
+                assertEquals("A", psConfig.getPartitionSpread().get(0).getErasureSet());
+
+                // 2. Verify Watch Updates
+                String updatedReplicaSetJson = "{\"replica_sets\": [{\"number\": 99, \"machines\": [{\"ip\": \"192.168.1.1\", \"port\": 9000}]}]}";
+                String updatedPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [4, 5, 6], \"erasure_set\": \"B\"}]}";
+                
+                rawClient.getKVClient().put(
+                        ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
+                        ByteSequence.from(updatedReplicaSetJson, StandardCharsets.UTF_8)
+                ).get();
+
+                rawClient.getKVClient().put(
+                        ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
+                        ByteSequence.from(updatedPartitionSpreadJson, StandardCharsets.UTF_8)
+                ).get();
+
+                // Poll for updates (Wait up to 5 seconds)
+                boolean replicaUpdated = false;
+                boolean partitionUpdated = false;
+
+                for (int i = 0; i < 50; i++) {
+                    ReplicaSetConfiguration rsc = metadataClient.getReplicaSetConfiguration();
+                    if (rsc != null && rsc.getReplicaSets().get(0).getNumber() == 99) {
+                        replicaUpdated = true;
+                    }
+
+                    PartitionSpreadConfiguration psc = metadataClient.getPartitionSpreadConfiguration();
+                    if (psc != null && "B".equals(psc.getPartitionSpread().get(0).getErasureSet())) {
+                        partitionUpdated = true;
+                    }
+
+                    if (replicaUpdated && partitionUpdated) break;
+                    Thread.sleep(100);
                 }
-                Thread.sleep(100);
-            }
-            assertTrue(updatedReplica, "MetadataClient should have updated ReplicaSetConfiguration via Watch");
 
-            // Update PartitionSpread in etcd
-            String updatedPartitionJson = "{\"partition_spread\": []}";
-            rawClient.getKVClient().put(partitionSpreadKey, ByteSequence.from(updatedPartitionJson, StandardCharsets.UTF_8)).get();
-            
-            // Wait for watch trigger (polling)
-            boolean updatedPartition = false;
-            for (int i = 0; i < 20; i++) {
-                PartitionSpreadConfiguration p = metadataClient.getPartitionSpreadConfiguration();
-                // We check if it is empty list
-                if (p != null && p.getPartitionSpread() != null && p.getPartitionSpread().isEmpty()) {
-                    updatedPartition = true;
-                    break;
-                }
-                Thread.sleep(100);
+                assertTrue(replicaUpdated, "ReplicaSetConfiguration should have updated via Watch");
+                assertTrue(partitionUpdated, "PartitionSpreadConfiguration should have updated via Watch");
             }
-            assertTrue(updatedPartition, "MetadataClient should have updated PartitionSpreadConfiguration via Watch");
         }
-        
-        rawClient.close();
     }
 }
