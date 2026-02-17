@@ -11,7 +11,10 @@ import io.etcd.jetcd.watch.WatchResponse;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -24,12 +27,15 @@ public class MetadataClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final ByteSequence replicaSetKey;
     private final ByteSequence partitionSpreadKey;
-    
+
     private volatile ReplicaSetConfiguration replicaSetConfiguration;
     private volatile PartitionSpreadConfiguration partitionSpreadConfiguration;
-    
+
     private Watch.Watcher replicaSetWatcher;
     private Watch.Watcher partitionSpreadWatcher;
+
+    private final Set<BiConsumer<ReplicaSetConfiguration, ReplicaSetConfiguration>> replicaSetUpdateListeners;
+    private final Set<BiConsumer<PartitionSpreadConfiguration, PartitionSpreadConfiguration>> partitionSpreadUpdateListeners;
 
     public MetadataClient(String etcdUrl, String replicaSetKey, String partitionSpreadKey) {
         if (etcdUrl == null || etcdUrl.isEmpty()) {
@@ -41,9 +47,11 @@ public class MetadataClient implements AutoCloseable {
         this.objectMapper = new ObjectMapper();
         this.replicaSetKey = ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8);
         this.partitionSpreadKey = ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8);
+        this.replicaSetUpdateListeners = new CopyOnWriteArraySet<>();
+        this.partitionSpreadUpdateListeners = new CopyOnWriteArraySet<>();
     }
 
-    public MetadataClient(String replicaSetKey, String partitionSpreadKey){
+    public MetadataClient(String replicaSetKey, String partitionSpreadKey) {
         this(System.getenv("ETCD_URL"), replicaSetKey, partitionSpreadKey);
     }
 
@@ -54,6 +62,17 @@ public class MetadataClient implements AutoCloseable {
         this.objectMapper = new ObjectMapper();
         this.replicaSetKey = ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8);
         this.partitionSpreadKey = ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8);
+        this.replicaSetUpdateListeners = new CopyOnWriteArraySet<>();
+        this.partitionSpreadUpdateListeners = new CopyOnWriteArraySet<>();
+    }
+
+    public void addReplicaSetUpdateListener(BiConsumer<ReplicaSetConfiguration, ReplicaSetConfiguration> listener) {
+        this.replicaSetUpdateListeners.add(listener);
+    }
+
+    public void addPartitionSpreadUpdateListener(
+            BiConsumer<PartitionSpreadConfiguration, PartitionSpreadConfiguration> listener) {
+        this.partitionSpreadUpdateListeners.add(listener);
     }
 
     public void start() {
@@ -67,12 +86,21 @@ public class MetadataClient implements AutoCloseable {
                 @Override
                 public void onNext(WatchResponse response) {
                     for (WatchEvent event : response.getEvents()) {
-                        if (event.getEventType() == WatchEvent.EventType.PUT) {
+                        var prev = replicaSetConfiguration;
+                        if(event.getEventType() == WatchEvent.EventType.PUT) {
                             LOGGER.info("ReplicaSetConfiguration update detected in etcd.");
                             parseAndSetReplicaSetConfiguration(event.getKeyValue().getValue());
-                        } else if (event.getEventType() == WatchEvent.EventType.DELETE) {
+                        }else if(event.getEventType() == WatchEvent.EventType.DELETE) {
                             LOGGER.warning("ReplicaSetConfiguration key deleted from etcd.");
                             replicaSetConfiguration = null;
+                        }
+                        var newConfig = replicaSetConfiguration;
+                        for (var listener : replicaSetUpdateListeners) {
+                            try {
+                                listener.accept(prev, newConfig);
+                            } catch (Exception e) {
+                                LOGGER.log(Level.SEVERE, "Error in replicaSet update listener", e);
+                            }
                         }
                     }
                 }
@@ -93,12 +121,21 @@ public class MetadataClient implements AutoCloseable {
                 @Override
                 public void onNext(WatchResponse response) {
                     for (WatchEvent event : response.getEvents()) {
-                        if (event.getEventType() == WatchEvent.EventType.PUT) {
+                        var prev = partitionSpreadConfiguration;
+                        if(event.getEventType() == WatchEvent.EventType.PUT) {
                             LOGGER.info("PartitionSpreadConfiguration update detected in etcd.");
                             parseAndSetPartitionSpreadConfiguration(event.getKeyValue().getValue());
-                        } else if (event.getEventType() == WatchEvent.EventType.DELETE) {
+                        }else if(event.getEventType() == WatchEvent.EventType.DELETE) {
                             LOGGER.warning("PartitionSpreadConfiguration key deleted from etcd.");
                             partitionSpreadConfiguration = null;
+                        }
+                        var newConfig = partitionSpreadConfiguration;
+                        for (var listener : partitionSpreadUpdateListeners) {
+                            try {
+                                listener.accept(prev, newConfig);
+                            } catch (Exception e) {
+                                LOGGER.log(Level.SEVERE, "Error in partition_spread update listener", e);
+                            }
                         }
                     }
                 }
@@ -119,12 +156,20 @@ public class MetadataClient implements AutoCloseable {
         }
     }
 
+    public void registerReplicaSetUpdateListener(Watch.Listener listener) {
+        if (replicaSetWatcher != null) {
+            replicaSetWatcher.close();
+        }
+        this.replicaSetWatcher = watchClient.watch(replicaSetKey, listener);
+    }
+
     private void updateReplicaSetConfigurationFromStore() {
         try {
             CompletableFuture<GetResponse> getFuture = kvClient.get(replicaSetKey);
             GetResponse response = getFuture.get();
             if (response.getKvs().isEmpty()) {
-                LOGGER.warning("No replicaSetConfiguration found for key: " + replicaSetKey.toString(StandardCharsets.UTF_8));
+                LOGGER.warning(
+                        "No replicaSetConfiguration found for key: " + replicaSetKey.toString(StandardCharsets.UTF_8));
                 return;
             }
             parseAndSetReplicaSetConfiguration(response.getKvs().get(0).getValue());
@@ -138,7 +183,8 @@ public class MetadataClient implements AutoCloseable {
             CompletableFuture<GetResponse> getFuture = kvClient.get(partitionSpreadKey);
             GetResponse response = getFuture.get();
             if (response.getKvs().isEmpty()) {
-                LOGGER.warning("No partitionSpreadConfiguration found for key: " + partitionSpreadKey.toString(StandardCharsets.UTF_8));
+                LOGGER.warning("No partitionSpreadConfiguration found for key: "
+                        + partitionSpreadKey.toString(StandardCharsets.UTF_8));
                 return;
             }
             parseAndSetPartitionSpreadConfiguration(response.getKvs().get(0).getValue());
