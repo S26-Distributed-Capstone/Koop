@@ -31,8 +31,7 @@ public class MetadataClient implements AutoCloseable {
     private Watch.Watcher replicaSetWatcher;
     private Watch.Watcher partitionSpreadWatcher;
 
-    public MetadataClient(String replicaSetKey, String partitionSpreadKey) {
-        String etcdUrl = System.getenv("ETCD_URL");
+    public MetadataClient(String etcdUrl, String replicaSetKey, String partitionSpreadKey) {
         if (etcdUrl == null || etcdUrl.isEmpty()) {
             throw new IllegalStateException("ETCD_URL environment variable is not set");
         }
@@ -42,6 +41,10 @@ public class MetadataClient implements AutoCloseable {
         this.objectMapper = new ObjectMapper();
         this.replicaSetKey = ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8);
         this.partitionSpreadKey = ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8);
+    }
+
+    public MetadataClient(String replicaSetKey, String partitionSpreadKey){
+        this(System.getenv("ETCD_URL"), replicaSetKey, partitionSpreadKey);
     }
 
     public MetadataClient(Client client, String replicaSetKey, String partitionSpreadKey) {
