@@ -11,4 +11,14 @@
         <module>query-processor</module>
         <module>storage-node</module>
     </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.github.koop</groupId>
+                <artifactId>common-lib</artifactId>
+                <version>1.0-SNAPSHOT</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 </project>
