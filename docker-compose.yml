@@ -1,7 +1,9 @@
 services:
   # --- 6 Storage Nodes ---
   storage-node:
-    build: ./storage-node
+    build:
+      context: .
+      dockerfile: storage-node/Dockerfile
     deploy:
       replicas: 6
     ports:
@@ -16,7 +18,9 @@ services:
 
   # --- 3 Query Processors ---
   query-processor:
-    build: ./query-processor
+    build:
+      context: .
+      dockerfile: query-processor/Dockerfile
     deploy:
       replicas: 3
     ports:

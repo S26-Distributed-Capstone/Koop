@@ -1,16 +1,17 @@
-# --- Stage 1: Build ---
-FROM maven:3.9.6-eclipse-temurin-21 AS build
+FROM maven:3.9.6-eclipse-temurin-21 AS builder
+
+WORKDIR /build
+
+# copy whole project (needed for multi-module build)
+COPY . .
+
+# build only service-1 + its dependencies
+RUN mvn -pl storage-node -am clean package -DskipTests
+
+# ---- Runtime stage ----
+FROM eclipse-temurin:21-jdk
 WORKDIR /app
-COPY pom.xml .
-COPY src ./src
 
-RUN mvn clean package -DskipTests && \
-    mv target/*-jar-with-dependencies.jar target/app.jar
+COPY --from=builder /build/storage-node/target/storage-node-*-jar-with-dependencies.jar app.jar
 
-# --- Stage 2: Runtime ---
-FROM eclipse-temurin:21-jre
-WORKDIR /app
-
-COPY --from=build /app/target/app.jar app.jar
-
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java","-jar","/app/app.jar"]

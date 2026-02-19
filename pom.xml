@@ -9,10 +9,21 @@
   <packaging>pom</packaging>
 
   <modules>
+    <module>common-lib</module>
     <module>query-processor</module>
     <module>storage-node</module>
     <module>system-tests</module>
   </modules>
+
+  <dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>com.github.koop</groupId>
+            <artifactId>common-lib</artifactId>
+            <version>1.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
