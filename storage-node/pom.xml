@@ -4,14 +4,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>koop</groupId>
+        <groupId>com.github.koop</groupId>
         <artifactId>koop-system</artifactId>
-        <version>1.0-SNAPSHOT</version>
+        <version>1.0</version>
     </parent>
 
-    <groupId>com.github.koop</groupId>
     <artifactId>storage-node</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -21,7 +19,6 @@
     </properties>
 
     <dependencies>
-        <!-- JUnit Jupiter for testing -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -31,13 +28,12 @@
         <dependency>
             <groupId>com.github.koop</groupId>
             <artifactId>common-lib</artifactId>
-            <version>1.0.0</version>
+            <version>${project.version}</version>
         </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <!-- Compiler plugin for Java 21 -->
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
@@ -46,7 +42,6 @@
                     <target>21</target>
                 </configuration>
             </plugin>
-            <!-- Surefire plugin for running tests -->
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
