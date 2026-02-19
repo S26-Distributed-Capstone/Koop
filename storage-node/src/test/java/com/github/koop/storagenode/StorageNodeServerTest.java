@@ -52,10 +52,11 @@ class StorageNodeServerTest {
             byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            // Total Length: Opcode(4) + ReqIdLen(4) + ReqIdBytes + Partition(4) + KeyLen(4) + KeyBytes + DataBytes
-            long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+            // frameLength EXCLUDES opcode
+            // frameLength = ReqIdLen(4) + ReqIdBytes + Partition(4) + KeyLen(4) + KeyBytes + DataBytes
+            long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
 
-            writeLong(out, totalLength);    // FIXED: Write frame length as Long
+            writeLong(out, putLen);
             writeInt(out, 1);               // Opcode (PUT)
             writeString(out, reqId);        // ReqID
             writeInt(out, partition);       // Partition
@@ -63,27 +64,31 @@ class StorageNodeServerTest {
             out.write(data);                // Data
             out.flush();
 
-            // Read PUT Response
-            consumeResponseLength(in);      // FIXED: Consume 8-byte response length
-            int status = in.read();         // Status (1 byte)
+            // Read PUT Response: server writes long(1) then byte(1/0)
+            consumeResponseLength(in);
+            int status = in.read();
             assertEquals(1, status, "PUT should return success (1)");
 
             // --- GET Request ---
-            // Length: Opcode(4) + Partition(4) + KeyLen(4) + KeyBytes
-            long getLength = 4 + 4 + 4 + keyBytes.length;
+            // frameLength EXCLUDES opcode
+            // frameLength = Partition(4) + KeyLen(4) + KeyBytes
+            long getLen = 4L + 4L + keyBytes.length;
 
-            writeLong(out, getLength);      // FIXED: Write frame length as Long
+            writeLong(out, getLen);
             writeInt(out, 6);               // Opcode (GET)
             writeInt(out, partition);       // Partition
             writeString(out, key);          // Key
             out.flush();
 
-            // Read GET Response
-            consumeResponseLength(in);      // FIXED: Consume 8-byte response length
-            int found = in.read();          // Status (1 byte)
+            // Read GET Response: long(responseLen) then byte(found) then data
+            long responseLen = consumeResponseLength(in);
+            int found = in.read();
             assertEquals(1, found, "GET should return found (1)");
 
-            byte[] responseData = in.readNBytes(data.length);
+            // responseLen includes 1 byte found flag + data bytes
+            int dataLen = (int) (responseLen - 1);
+            byte[] responseData = in.readNBytes(dataLen);
+
             assertEquals("Hello Server", new String(responseData, StandardCharsets.UTF_8));
         }
     }
@@ -93,7 +98,7 @@ class StorageNodeServerTest {
         try (Socket socket = new Socket("localhost", PORT);
              OutputStream out = socket.getOutputStream();
              InputStream in = socket.getInputStream()) {
-             
+
             // Setup: Store a file first
             String reqId = "del-req";
             int partition = 2;
@@ -102,30 +107,32 @@ class StorageNodeServerTest {
             byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            long putLen = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+            // frameLength EXCLUDES opcode
+            long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
 
-            writeLong(out, putLen);         // FIXED: Long
+            writeLong(out, putLen);
             writeInt(out, 1); // PUT
             writeString(out, reqId);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data);
             out.flush();
-            
-            consumeResponseLength(in);      // FIXED
+
+            consumeResponseLength(in);
             in.read(); // consume success
 
             // --- DELETE Request ---
-            long delLen = 4 + 4 + 4 + keyBytes.length;
+            // frameLength EXCLUDES opcode
+            // frameLength = Partition(4) + KeyLen(4) + KeyBytes
+            long delLen = 4L + 4L + keyBytes.length;
 
-            writeLong(out, delLen);         // FIXED: Long
+            writeLong(out, delLen);
             writeInt(out, 2); // DELETE
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
-            // Check Result
-            consumeResponseLength(in);      // FIXED
+            consumeResponseLength(in);
             int deleted = in.read();
             assertEquals(1, deleted, "DELETE should return success (1)");
         }
@@ -136,50 +143,40 @@ class StorageNodeServerTest {
         int clientCount = 5;
         Thread[] threads = new Thread[clientCount];
         String[] keys = new String[clientCount];
-        String[] values = new String[clientCount];
 
         for (int i = 0; i < clientCount; i++) {
+            keys[i] = "key-" + i;
+            String value = "value-" + i;
             final int idx = i;
-            keys[i] = "key-" + idx;
-            values[i] = "value-" + idx;
+
             threads[i] = new Thread(() -> {
                 try (Socket socket = new Socket("localhost", PORT);
                      OutputStream out = socket.getOutputStream();
                      InputStream in = socket.getInputStream()) {
 
-                    String reqId = "req-" + idx;
-                    int partition = 1;
+                    String reqId = "mc-" + idx;
+                    int partition = idx;
+                    String key = keys[idx];
+
                     byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
-                    byte[] keyBytes = keys[idx].getBytes(StandardCharsets.UTF_8);
-                    byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
+                    byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+                    byte[] data = value.getBytes(StandardCharsets.UTF_8);
 
-                    long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+                    // frameLength EXCLUDES opcode
+                    long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
 
-                    writeLong(out, totalLength); // FIXED: Long
+                    writeLong(out, putLen);
                     writeInt(out, 1); // PUT
                     writeString(out, reqId);
                     writeInt(out, partition);
-                    writeString(out, keys[idx]);
+                    writeString(out, key);
                     out.write(data);
                     out.flush();
 
-                    consumeResponseLength(in);   // FIXED
+                    consumeResponseLength(in);
                     int status = in.read();
                     assertEquals(1, status, "PUT should return success (1)");
 
-                    // GET
-                    long getLength = 4 + 4 + 4 + keyBytes.length;
-                    writeLong(out, getLength);   // FIXED: Long
-                    writeInt(out, 6); // GET
-                    writeInt(out, partition);
-                    writeString(out, keys[idx]);
-                    out.flush();
-
-                    consumeResponseLength(in);   // FIXED
-                    int found = in.read();
-                    assertEquals(1, found, "GET should return found (1)");
-                    byte[] responseData = in.readNBytes(data.length);
-                    assertEquals(values[idx], new String(responseData, StandardCharsets.UTF_8));
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -188,66 +185,102 @@ class StorageNodeServerTest {
 
         for (Thread t : threads) t.start();
         for (Thread t : threads) t.join();
+
+        // Verify each key
+        for (int i = 0; i < clientCount; i++) {
+            try (Socket socket = new Socket("localhost", PORT);
+                 OutputStream out = socket.getOutputStream();
+                 InputStream in = socket.getInputStream()) {
+
+                int partition = i;
+                String key = keys[i];
+                byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+
+                // frameLength EXCLUDES opcode
+                long getLen = 4L + 4L + keyBytes.length;
+
+                writeLong(out, getLen);
+                writeInt(out, 6); // GET
+                writeInt(out, partition);
+                writeString(out, key);
+                out.flush();
+
+                long respLen = consumeResponseLength(in);
+                int found = in.read();
+                assertEquals(1, found, "GET should return found (1)");
+
+                int dataLen = (int) (respLen - 1);
+                byte[] responseData = in.readNBytes(dataLen);
+
+                assertEquals("value-" + i, new String(responseData, StandardCharsets.UTF_8));
+            }
+        }
     }
 
     @Test
-    void testPutOverwriteSameKey() throws IOException {
+    void testOverwritePutSameKey() throws IOException {
         try (Socket socket = new Socket("localhost", PORT);
              OutputStream out = socket.getOutputStream();
              InputStream in = socket.getInputStream()) {
 
-            String reqId1 = "req-1";
-            String reqId2 = "req-2";
-            int partition = 3;
+            int partition = 1;
             String key = "overwrite-key";
-            byte[] data1 = "FirstValue".getBytes(StandardCharsets.UTF_8);
-            byte[] data2 = "SecondValue".getBytes(StandardCharsets.UTF_8);
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
             // First PUT
+            String reqId1 = "ow-1";
             byte[] reqIdBytes1 = reqId1.getBytes(StandardCharsets.UTF_8);
-            long putLen1 = 4 + 4 + reqIdBytes1.length + 4 + 4 + keyBytes.length + data1.length;
+            byte[] data1 = "FirstValue".getBytes(StandardCharsets.UTF_8);
 
-            writeLong(out, putLen1); // FIXED: Long
+            long putLen1 = 4L + reqIdBytes1.length + 4L + 4L + keyBytes.length + data1.length;
+
+            writeLong(out, putLen1);
             writeInt(out, 1); // PUT
             writeString(out, reqId1);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data1);
             out.flush();
-            
-            consumeResponseLength(in); // FIXED
+
+            consumeResponseLength(in);
             int status1 = in.read();
             assertEquals(1, status1, "First PUT should return success (1)");
 
             // Second PUT (overwrite)
+            String reqId2 = "ow-2";
             byte[] reqIdBytes2 = reqId2.getBytes(StandardCharsets.UTF_8);
-            long putLen2 = 4 + 4 + reqIdBytes2.length + 4 + 4 + keyBytes.length + data2.length;
+            byte[] data2 = "SecondValue".getBytes(StandardCharsets.UTF_8);
 
-            writeLong(out, putLen2); // FIXED: Long
+            long putLen2 = 4L + reqIdBytes2.length + 4L + 4L + keyBytes.length + data2.length;
+
+            writeLong(out, putLen2);
             writeInt(out, 1); // PUT
             writeString(out, reqId2);
             writeInt(out, partition);
             writeString(out, key);
             out.write(data2);
             out.flush();
-            
-            consumeResponseLength(in); // FIXED
+
+            consumeResponseLength(in);
             int status2 = in.read();
             assertEquals(1, status2, "Second PUT should return success (1)");
 
             // GET
-            long getLen = 4 + 4 + 4 + keyBytes.length;
-            writeLong(out, getLen); // FIXED: Long
+            long getLen = 4L + 4L + keyBytes.length;
+
+            writeLong(out, getLen);
             writeInt(out, 6); // GET
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
-            consumeResponseLength(in); // FIXED
+            long respLen = consumeResponseLength(in);
             int found = in.read();
             assertEquals(1, found, "GET after overwrite should return found (1)");
-            byte[] responseData = in.readNBytes(data2.length);
+
+            int dataLen = (int) (respLen - 1);
+            byte[] responseData = in.readNBytes(dataLen);
+
             assertEquals("SecondValue", new String(responseData, StandardCharsets.UTF_8));
         }
     }
@@ -273,9 +306,10 @@ class StorageNodeServerTest {
                     byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
                     byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
 
-                    long totalLength = 4 + 4 + reqIdBytes.length + 4 + 4 + keyBytes.length + data.length;
+                    // frameLength EXCLUDES opcode
+                    long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
 
-                    writeLong(out, totalLength); // FIXED: Long
+                    writeLong(out, putLen);
                     writeInt(out, 1); // PUT
                     writeString(out, reqId);
                     writeInt(out, partition);
@@ -283,7 +317,7 @@ class StorageNodeServerTest {
                     out.write(data);
                     out.flush();
 
-                    consumeResponseLength(in); // FIXED
+                    consumeResponseLength(in);
                     int status = in.read();
                     assertEquals(1, status, "PUT should return success (1)");
                 } catch (IOException e) {
@@ -295,59 +329,55 @@ class StorageNodeServerTest {
         for (Thread t : threads) t.start();
         for (Thread t : threads) t.join();
 
-        // GET verification
+        // GET verification: should be one of the values
         try (Socket socket = new Socket("localhost", PORT);
              OutputStream out = socket.getOutputStream();
              InputStream in = socket.getInputStream()) {
 
             byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-            long getLen = 4 + 4 + 4 + keyBytes.length;
-            
-            writeLong(out, getLen); // FIXED: Long
+            long getLen = 4L + 4L + keyBytes.length;
+
+            writeLong(out, getLen);
             writeInt(out, 6); // GET
             writeInt(out, partition);
             writeString(out, key);
             out.flush();
 
-            consumeResponseLength(in); // FIXED
+            long respLen = consumeResponseLength(in);
             int found = in.read();
-            assertEquals(1, found, "GET after concurrent PUTs should return found (1)");
+            assertEquals(1, found, "GET should return found (1)");
 
-            // Read the value (16 bytes)
-            byte[] responseData = in.readNBytes(16);
-            String candidate = new String(responseData, StandardCharsets.UTF_8);
-            
-            boolean foundMatch = false;
-            for (String expected : values) {
-                if (candidate.equals(expected)) {
-                    foundMatch = true;
-                    break;
-                }
+            int dataLen = (int) (respLen - 1);
+            String got = new String(in.readNBytes(dataLen), StandardCharsets.UTF_8);
+
+            boolean matches = false;
+            for (String v : values) {
+                if (v.equals(got)) { matches = true; break; }
             }
-            assertEquals(true, foundMatch, "GET result should be one of the concurrently written values");
+            assertEquals(true, matches, "GET should return one of the concurrently written values");
         }
     }
 
-    private void writeInt(OutputStream out, int v) throws IOException {
-        out.write(ByteBuffer.allocate(4).putInt(v).array());
-    }
-    
-    // New Helper for Protocol Compliance
-    private void writeLong(OutputStream out, long v) throws IOException {
-        out.write(ByteBuffer.allocate(8).putLong(v).array());
+    // ---------- Helper Methods ----------
+
+    private static void writeInt(OutputStream out, int val) throws IOException {
+        out.write(ByteBuffer.allocate(4).putInt(val).array());
     }
 
-    private void writeString(OutputStream out, String s) throws IOException {
-        byte[] b = s.getBytes(StandardCharsets.UTF_8);
-        writeInt(out, b.length);
-        out.write(b);
+    private static void writeLong(OutputStream out, long val) throws IOException {
+        out.write(ByteBuffer.allocate(8).putLong(val).array());
     }
-    
-    // New Helper to consume the 8-byte response length
-    private void consumeResponseLength(InputStream in) throws IOException {
-        byte[] b = in.readNBytes(8);
-        if (b.length < 8) {
-             throw new EOFException("Unexpected EOF while reading response length");
-        }
+
+    private static void writeString(OutputStream out, String s) throws IOException {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        writeInt(out, bytes.length);
+        out.write(bytes);
+    }
+
+    /** Reads and returns the 8-byte response length the server always sends first. */
+    private static long consumeResponseLength(InputStream in) throws IOException {
+        byte[] buf = in.readNBytes(8);
+        if (buf.length != 8) throw new EOFException("Expected 8-byte response length");
+        return ByteBuffer.wrap(buf).getLong();
     }
 }

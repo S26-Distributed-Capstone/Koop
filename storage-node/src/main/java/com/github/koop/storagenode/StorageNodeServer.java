@@ -34,36 +34,36 @@ public class StorageNodeServer {
     }
 
     public static void main(String[] args) {
-    // 1. Read configuration from Environment Variables
-    String envPort = System.getenv("PORT");
-    String envDir = System.getenv("STORAGE_DIR");
+        // 1. Read configuration from Environment Variables
+        String envPort = System.getenv("PORT");
+        String envDir = System.getenv("STORAGE_DIR");
 
-    // 2. Set defaults if environment variables are missing
-    int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
-    Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
+        // 2. Set defaults if environment variables are missing
+        int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
+        Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
 
-    // 3. Ensure the storage directory exists
-    try {
-        java.nio.file.Files.createDirectories(storagePath);
-    } catch (IOException e) {
-        System.err.println("Failed to create storage directory: " + storagePath);
-        System.exit(1);
+        // 3. Ensure the storage directory exists
+        try {
+            java.nio.file.Files.createDirectories(storagePath);
+        } catch (IOException e) {
+            System.err.println("Failed to create storage directory: " + storagePath);
+            System.exit(1);
+        }
+
+        // 4. Initialize and start the server
+        StorageNodeServer server = new StorageNodeServer(port, storagePath);
+
+        System.out.println("Storage Node starting on port: " + port);
+        System.out.println("Storage directory: " + storagePath.toAbsolutePath());
+
+        // Add a shutdown hook to close the server gracefully on Ctrl+C
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("Shutting down server...");
+            server.stop();
+        }));
+
+        server.start();
     }
-
-    // 4. Initialize and start the server
-    StorageNodeServer server = new StorageNodeServer(port, storagePath);
-    
-    System.out.println("Storage Node starting on port: " + port);
-    System.out.println("Storage directory: " + storagePath.toAbsolutePath());
-
-    // Add a shutdown hook to close the server gracefully on Ctrl+C
-    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-        System.out.println("Shutting down server...");
-        server.stop();
-    }));
-
-    server.start();
-}
 
     private void registerHandlers() {
         this.handlers.put(OPCODE_PUT, this::handlePut);
@@ -93,14 +93,15 @@ public class StorageNodeServer {
         var partition = readInt(socketChannel);
         var keyBytes = readBytes(socketChannel);
         var key = new String(keyBytes);
-        // Calculate payload: Total frame length - (Opcode=4 is already subtracted)
-        // We must subtract: ReqIDLen(4) + ReqID + Partition(4) + KeyLen(4) + Key
+
+        // Calculate payload:
+        // length here is the client-provided frameLength that EXCLUDES opcode.
+        // We subtract: ReqIDLen(4) + ReqID + Partition(4) + KeyLen(4) + Key
         long headerOverhead = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length;
         long payloadLength = length - headerOverhead;
 
-        // Use the updated StorageNode API (accepts ReadableByteChannel)
         this.storageNode.store(partition, reqId, key, socketChannel, payloadLength);
-        
+
         socketChannel.write(length(1));
         socketChannel.write(succeeded(true));
     }
@@ -109,7 +110,7 @@ public class StorageNodeServer {
         var partition = readInt(socketChannel);
         var key = readString(socketChannel);
         var data = this.storageNode.retrieve(partition, key);
-        
+
         if (data.isEmpty()) {
             socketChannel.write(length(1));
             socketChannel.write(succeeded(false)); // not found
@@ -140,33 +141,30 @@ public class StorageNodeServer {
         try {
             this.serverSocketChannel = ServerSocketChannel.open();
             this.serverSocketChannel.bind(new InetSocketAddress(port));
-            
+
             while (this.serverSocketChannel.isOpen() && !Thread.currentThread().isInterrupted()) {
                 SocketChannel clientChannel;
                 try {
                     clientChannel = this.serverSocketChannel.accept();
                 } catch (ClosedByInterruptException e) {
-                    // Server is stopping (likely triggered by test tearDown)
                     break;
                 }
 
                 if (!this.serverSocketChannel.isOpen()) {
                     break;
                 }
-                
+
                 executor.submit(() -> {
                     try (clientChannel) {
                         while (clientChannel.isConnected()) {
-                            // 1. Read Frame Length (Check for EOF here)
+                            // 1. Read Frame Length
                             ByteBuffer lenBuf = ByteBuffer.allocate(8);
                             int read = clientChannel.read(lenBuf);
-                            
-                            // If client disconnected gracefully, read returns -1
+
                             if (read == -1) {
-                                break; 
+                                break;
                             }
-                            
-                            // If we got partial bytes, finish reading the 8-byte header
+
                             while (lenBuf.hasRemaining()) {
                                 if (clientChannel.read(lenBuf) == -1) {
                                     throw new EOFException("Unexpected EOF inside length header");
@@ -174,26 +172,26 @@ public class StorageNodeServer {
                             }
                             lenBuf.flip();
                             long length = lenBuf.getLong();
-                            
+
                             if (length <= 0) break;
 
-                            // 2. Read Opcode
+                            // 2. Read Opcode (opcode is NOT counted in "length")
                             int opcode = readInt(clientChannel);
-                            
+
                             // 3. Dispatch
                             var handler = this.handlers.get(opcode);
                             if (handler != null) {
-                                // subtract 4 bytes (Opcode) from the remaining length
-                                handler.handle(clientChannel, length - 4);
+                                // ✅ FIX: DO NOT subtract 4 here
+                                // Client's frameLength excludes opcode already.
+                                handler.handle(clientChannel, length);
                             } else {
                                 System.err.println("Unknown opcode: " + opcode);
-                                break; // disconnect invalid client
+                                break;
                             }
                         }
                     } catch (EOFException e) {
-                        // Client closed connection during a read (Normal behavior)
+                        // normal disconnect
                     } catch (IOException e) {
-                        // Only print real errors (not connection resets during shutdown)
                         if (e.getMessage() != null && !e.getMessage().contains("Connection reset")) {
                             e.printStackTrace();
                         }
@@ -201,7 +199,6 @@ public class StorageNodeServer {
                 });
             }
         } catch (IOException e) {
-            // Check if we are stopping before printing stack trace
             if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
                 e.printStackTrace();
             }

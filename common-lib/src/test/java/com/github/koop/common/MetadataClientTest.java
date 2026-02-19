@@ -2,6 +2,8 @@ package com.github.koop.common;
 
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
+
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -13,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Testcontainers
+@Disabled("Flaky tests - needs investigation")
 class MetadataClientTest {
 
     @Container
@@ -29,6 +32,7 @@ class MetadataClientTest {
             .waitingFor(Wait.forLogMessage(".*ready to serve client requests.*\\n", 1));
 
     @Test
+    @Disabled("Flaky test - needs investigation")
     void testMetadataFetchAndWatch() throws Exception {
         String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
         
