@@ -29,4 +29,26 @@
     <maven.compiler.release>21</maven.compiler.release>
     <junit.version>5.10.2</junit.version>
   </properties>
+
+  <build>
+    <pluginManagement>
+        <plugins>
+            <plugin>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.2.0</version>
+                <configuration>
+                    <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                    <filesets>
+                        <fileset>
+                            <directory>target</directory>
+                            <includes>
+                                <include>**/*</include>
+                            </includes>
+                        </fileset>
+                    </filesets>
+                </configuration>
+            </plugin>
+        </plugins>
+    </pluginManagement>
+</build>
 </project>

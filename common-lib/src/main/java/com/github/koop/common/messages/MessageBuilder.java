@@ -49,13 +49,13 @@ public class MessageBuilder {
     }
     
 
-    public void writeLargePayload(int length, InputStream data){
+    public void writeLargePayload(long length, InputStream data){
         this.length+=length;
         this.largePayloadDataInputStream = data;
         this.payloadLength = length;
     }
 
-    public void writeLargePayload(int length, ReadableByteChannel channel){
+    public void writeLargePayload(long length, ReadableByteChannel channel){
         this.length += length;
         this.largePayloadDataChannel = channel;
         this.payloadLength = length;
