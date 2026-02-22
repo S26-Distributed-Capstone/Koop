@@ -1,13 +1,15 @@
 package com.github.koop.common.messages;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 
 public abstract class MessageReader {
     protected long remainingLength;
-    private final int opcode;
+    private int opcode;
     
-    public MessageReader() throws IOException{
+    public MessageReader() {
+    }
+
+    protected void init() throws IOException {
         this.remainingLength = readLong();
         this.opcode = readInt();
     }

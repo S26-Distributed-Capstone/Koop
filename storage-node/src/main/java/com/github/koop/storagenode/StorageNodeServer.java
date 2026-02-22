@@ -99,6 +99,7 @@ public class StorageNodeServer {
         var messageBuilder = new MessageBuilder(Opcode.SN_GET);
         if (data.isEmpty()) {
             messageBuilder.writeByte((byte)0);//not found
+            messageBuilder.writeToChannel(socketChannel);
         } else {
             try (var dataChannel = data.get()) {
                 var size = dataChannel.size();

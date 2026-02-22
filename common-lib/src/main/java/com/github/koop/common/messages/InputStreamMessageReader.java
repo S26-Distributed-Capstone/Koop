@@ -9,7 +9,9 @@ public class InputStreamMessageReader extends MessageReader {
     private final InputStream in;
     
     public InputStreamMessageReader(InputStream in) throws IOException{
+        super();
         this.in = in;
+        init(); // Call after initialization
     }
 
     @Override

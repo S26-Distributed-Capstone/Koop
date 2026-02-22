@@ -11,6 +11,7 @@ public class ChannelMessageReader extends MessageReader {
     public ChannelMessageReader(ReadableByteChannel channel) throws IOException {
         super();
         this.channel = channel;
+        init(); // Call after initialization
     }
 
     @Override
@@ -25,6 +26,7 @@ public class ChannelMessageReader extends MessageReader {
             bytesRead += read;
         }
         buffer.flip();
+        super.remainingLength -= length; // Deduct length!
         return buffer;
     }
     

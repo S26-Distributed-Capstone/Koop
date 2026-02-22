@@ -14,9 +14,13 @@ public class MessageBuilder {
     private InputStream largePayloadDataInputStream;
     private ReadableByteChannel largePayloadDataChannel;
     private long payloadLength;
+
+    public MessageBuilder() {
+        this.buffer = ByteBuffer.allocate(1024);
+    }
     
     public MessageBuilder(Opcode opcode) {
-        this.buffer = ByteBuffer.allocate(1024); // Initial size, can be adjusted
+        this();
         this.buffer.putInt(opcode.getCode()); // Write opcode first
         this.length+=4; // Account for the opcode length
     }
