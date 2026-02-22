@@ -1,21 +1,18 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.backblaze.erasure.ReedSolomon;
+import com.github.koop.common.messages.InputStreamMessageReader;
+import com.github.koop.common.messages.MessageBuilder;
+import com.github.koop.common.messages.Opcode;
 
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
 public final class StorageWorker {
-
-    // Storage-node opcodes (must match StorageNodeServer)
-    private static final int OP_STORE  = 1;
-    private static final int OP_DELETE = 2;
-    private static final int OP_READ   = 6;
 
     // Erasure coding parameters
     private static final int K = 6;
@@ -75,18 +72,8 @@ public final class StorageWorker {
         DataOutputStream[] outs = new DataOutputStream[TOTAL];
         InputStream[] ins = new InputStream[TOTAL];
 
-        // frameLength EXCLUDES opcode (matches server after our StorageNodeServer fix)
-        byte[] reqIdBytes = requestID.toString().getBytes(StandardCharsets.UTF_8);
-        byte[] keyBytes   = storageKey.getBytes(StandardCharsets.UTF_8);
-
-        long frameLength =
-                4L + reqIdBytes.length +   // reqIdLen + reqIdBytes
-                        4L +                        // partition
-                        4L + keyBytes.length +      // keyLen + keyBytes
-                        payloadLength;              // streamed payload bytes
-
         try {
-            // Connect and send STORE headers (with frame length first)
+            // Connect and send STORE headers
             for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
 
                 Socket s = new Socket();
@@ -97,12 +84,15 @@ public final class StorageWorker {
                 outs[shardIndex] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
                 ins[shardIndex]  = new BufferedInputStream(s.getInputStream());
 
-                outs[shardIndex].writeLong(frameLength);
-                outs[shardIndex].writeInt(OP_STORE);
-                writeString(outs[shardIndex], requestID.toString());
-                outs[shardIndex].writeInt(partition);
-                writeString(outs[shardIndex], storageKey);
-                outs[shardIndex].flush();
+                MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+                putMsg.writeString(requestID.toString());
+                putMsg.writeInt(partition);
+                putMsg.writeString(storageKey);
+                
+                // Hack to increase the total Frame Length inside the builder 
+                // so we can stream the payload manually after the header
+                putMsg.writeLargePayload(payloadLength, (InputStream) null); 
+                putMsg.writeToOutputStream(outs[shardIndex]);
             }
 
             // Send original length into the payload stream (counts toward payloadLength)
@@ -146,12 +136,11 @@ public final class StorageWorker {
                 sockets[i].shutdownOutput(); // end payload stream cleanly
             }
 
-            // Server responds with: long(1) then byte success
+            // Server responds with Success message
             for (int i = 0; i < TOTAL; i++) {
-                DataInputStream din = new DataInputStream(ins[i]);
-                long respLen = din.readLong();
-                int ok = din.read();
-                if (respLen != 1L || ok != 1) return false;
+                InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
+                if (reader.getOpcode() != Opcode.SN_PUT.getCode()) return false;
+                if (reader.readByte() != 1) return false;
             }
 
             return true;
@@ -207,11 +196,6 @@ public final class StorageWorker {
         DataOutputStream[] outs = new DataOutputStream[TOTAL];
         InputStream[] ins = new InputStream[TOTAL];
 
-        byte[] keyBytes = storageKey.getBytes(StandardCharsets.UTF_8);
-
-        // frameLength EXCLUDES opcode
-        long frameLength = 4L + 4L + keyBytes.length; // partition + (keyLen + keyBytes)
-
         try {
             for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
                 Socket s = new Socket();
@@ -222,20 +206,19 @@ public final class StorageWorker {
                 outs[shardIndex] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
                 ins[shardIndex]  = new BufferedInputStream(s.getInputStream());
 
-                outs[shardIndex].writeLong(frameLength);
-                outs[shardIndex].writeInt(OP_DELETE);
-                outs[shardIndex].writeInt(partition);
-                writeString(outs[shardIndex], storageKey);
+                MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
+                delMsg.writeInt(partition);
+                delMsg.writeString(storageKey);
+                delMsg.writeToOutputStream(outs[shardIndex]);
                 outs[shardIndex].flush();
                 s.shutdownOutput();
             }
 
-            // Server responds with: long(1) then byte success
+            // Server responds with Success message
             for (int i = 0; i < TOTAL; i++) {
-                DataInputStream din = new DataInputStream(ins[i]);
-                long respLen = din.readLong();
-                int ok = din.read();
-                if (respLen != 1L || ok != 1) return false;
+                InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
+                if (reader.getOpcode() != Opcode.SN_DELETE.getCode()) return false;
+                if (reader.readByte() != 1) return false;
             }
             return true;
 
@@ -252,11 +235,6 @@ public final class StorageWorker {
         DataInputStream[] ins = new DataInputStream[TOTAL];
         boolean[] present = new boolean[TOTAL];
 
-        byte[] keyBytes = storageKey.getBytes(StandardCharsets.UTF_8);
-
-        // frameLength EXCLUDES opcode
-        long frameLength = 4L + 4L + keyBytes.length; // partition + (keyLen + keyBytes)
-
         // Request shards
         for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
             try {
@@ -269,17 +247,17 @@ public final class StorageWorker {
                 DataOutputStream nodeOut = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
                 ins[shardIndex] = new DataInputStream(new BufferedInputStream(s.getInputStream()));
 
-                nodeOut.writeLong(frameLength);
-                nodeOut.writeInt(OP_READ);
-                nodeOut.writeInt(partition);
-                writeString(nodeOut, storageKey);
+                MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
+                getMsg.writeInt(partition);
+                getMsg.writeString(storageKey);
+                getMsg.writeToOutputStream(nodeOut);
                 nodeOut.flush();
                 s.shutdownOutput();
 
-                long respLen = ins[shardIndex].readLong();
-                if (respLen < 1) { present[shardIndex] = false; continue; }
+                InputStreamMessageReader reader = new InputStreamMessageReader(ins[shardIndex]);
+                if (reader.getOpcode() != Opcode.SN_GET.getCode()) { present[shardIndex] = false; continue; }
 
-                int ok = ins[shardIndex].readUnsignedByte();
+                int ok = reader.readByte();
                 if (ok == 0) { present[shardIndex] = false; continue; }
 
                 present[shardIndex] = true;
@@ -341,12 +319,6 @@ public final class StorageWorker {
             case 2 -> set2;
             default -> set3;
         };
-    }
-
-    private static void writeString(DataOutputStream out, String s) throws IOException {
-        byte[] b = s.getBytes(StandardCharsets.UTF_8);
-        out.writeInt(b.length);
-        out.write(b);
     }
 
     private static void readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
