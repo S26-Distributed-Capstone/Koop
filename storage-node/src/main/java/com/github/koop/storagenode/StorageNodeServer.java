@@ -156,7 +156,11 @@ public class StorageNodeServer {
                     } catch (EOFException e) {
                         // normal disconnect
                     } catch (IOException e) {
-                        if (e.getMessage() != null && !e.getMessage().contains("Connection reset")) {
+                        // Ignore standard client disconnect errors
+                        if (e.getMessage() != null && 
+                           !e.getMessage().contains("Connection reset") && 
+                           !e.getMessage().contains("Broken pipe")) {
+                            
                             e.printStackTrace();
                         }
                     }

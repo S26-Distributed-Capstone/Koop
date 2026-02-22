@@ -1,5 +1,6 @@
 package com.github.koop.common.messages;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -115,19 +116,29 @@ public class MessageBuilder {
         }
     }
 
-    private long transferAll(FileChannel src, WritableByteChannel dest, long count) throws IOException {
+private long transferAll(FileChannel src, WritableByteChannel dest, long count) throws IOException {
         long transferred = 0;
         long initialPosition = src.position();
+        
         while (transferred < count) {
             long n = src.transferTo(initialPosition + transferred, count - transferred, dest);
-            if (n <= 0) {
-                break;
+            if (n == 0) {
+                // The TCP buffer is full. Sleep for 1ms to let it drain.
+                // Because we are on a Virtual Thread, this is extremely cheap and does not block OS threads.
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Transfer interrupted", e);
+                }
+            } else if (n < 0) {
+                throw new EOFException("Unexpected EOF during zero-copy transfer");
+            } else {
+                transferred += n;
             }
-            transferred += n;
         }
         return transferred;
     }
-
     public void writeToChannel(WritableByteChannel channel) throws IOException {
         // First, write the total length (excluding the length field itself)
         ByteBuffer lengthBuffer = ByteBuffer.allocate(8);
