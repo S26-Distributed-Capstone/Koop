@@ -36,7 +36,17 @@ public abstract class MessageReader {
         return new String(byteBuf.array(), byteBuf.position(), byteBuf.remaining());
     }
 
+    public byte[] readBytes() throws IOException{
+        int length = readInt();
+        var byteBuf = readBytes(length);
+        return byteBuf.array();
+    }
+
     public long getRemainingLength() {
         return remainingLength;
+    }
+
+    public int getOpcode(){
+        return this.opcode;
     }
 }
