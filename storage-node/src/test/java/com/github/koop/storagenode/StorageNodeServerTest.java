@@ -1,5 +1,8 @@
 package com.github.koop.storagenode;
 
+import com.github.koop.common.messages.InputStreamMessageReader;
+import com.github.koop.common.messages.MessageBuilder;
+import com.github.koop.common.messages.Opcode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -7,13 +10,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.*;
 import java.net.Socket;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StorageNodeServerTest {
 
@@ -49,44 +52,36 @@ class StorageNodeServerTest {
             int partition = 5;
             String key = "my-key";
             byte[] data = "Hello Server".getBytes(StandardCharsets.UTF_8);
-            byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            // frameLength EXCLUDES opcode
-            // frameLength = ReqIdLen(4) + ReqIdBytes + Partition(4) + KeyLen(4) + KeyBytes + DataBytes
-            long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
-
-            writeLong(out, putLen);
-            writeInt(out, 1);               // Opcode (PUT)
-            writeString(out, reqId);        // ReqID
-            writeInt(out, partition);       // Partition
-            writeString(out, key);          // Key
-            out.write(data);                // Data
+            MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+            putMsg.writeString(reqId);
+            putMsg.writeInt(partition);
+            putMsg.writeString(key);
+            putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
+            putMsg.writeToOutputStream(out);
             out.flush();
 
-            // Read PUT Response: server writes long(1) then byte(1/0)
-            consumeResponseLength(in);
-            int status = in.read();
+            // Read PUT Response
+            InputStreamMessageReader putResp = new InputStreamMessageReader(in);
+            assertEquals(Opcode.SN_PUT.getCode(), putResp.getOpcode(), "Response should have correct opcode");
+            int status = putResp.readByte();
             assertEquals(1, status, "PUT should return success (1)");
 
             // --- GET Request ---
-            // frameLength EXCLUDES opcode
-            // frameLength = Partition(4) + KeyLen(4) + KeyBytes
-            long getLen = 4L + 4L + keyBytes.length;
-
-            writeLong(out, getLen);
-            writeInt(out, 6);               // Opcode (GET)
-            writeInt(out, partition);       // Partition
-            writeString(out, key);          // Key
+            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
+            getMsg.writeInt(partition);
+            getMsg.writeString(key);
+            getMsg.writeToOutputStream(out);
             out.flush();
 
-            // Read GET Response: long(responseLen) then byte(found) then data
-            long responseLen = consumeResponseLength(in);
-            int found = in.read();
+            // Read GET Response
+            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
+            assertEquals(Opcode.SN_GET.getCode(), getResp.getOpcode(), "Response should have correct opcode");
+            int found = getResp.readByte();
             assertEquals(1, found, "GET should return found (1)");
 
-            // responseLen includes 1 byte found flag + data bytes
-            int dataLen = (int) (responseLen - 1);
+            // Read remaining bytes for the payload directly from the InputStream
+            int dataLen = (int) getResp.getRemainingLength();
             byte[] responseData = in.readNBytes(dataLen);
 
             assertEquals("Hello Server", new String(responseData, StandardCharsets.UTF_8));
@@ -104,36 +99,29 @@ class StorageNodeServerTest {
             int partition = 2;
             String key = "del-key";
             byte[] data = "ToBeDeleted".getBytes(StandardCharsets.UTF_8);
-            byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-            // frameLength EXCLUDES opcode
-            long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
-
-            writeLong(out, putLen);
-            writeInt(out, 1); // PUT
-            writeString(out, reqId);
-            writeInt(out, partition);
-            writeString(out, key);
-            out.write(data);
+            MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+            putMsg.writeString(reqId);
+            putMsg.writeInt(partition);
+            putMsg.writeString(key);
+            putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
+            putMsg.writeToOutputStream(out);
             out.flush();
 
-            consumeResponseLength(in);
-            in.read(); // consume success
+            InputStreamMessageReader putResp = new InputStreamMessageReader(in);
+            int status = putResp.readByte(); // consume success
+            assertEquals(1, status, "Setup PUT should succeed");
 
             // --- DELETE Request ---
-            // frameLength EXCLUDES opcode
-            // frameLength = Partition(4) + KeyLen(4) + KeyBytes
-            long delLen = 4L + 4L + keyBytes.length;
-
-            writeLong(out, delLen);
-            writeInt(out, 2); // DELETE
-            writeInt(out, partition);
-            writeString(out, key);
+            MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
+            delMsg.writeInt(partition);
+            delMsg.writeString(key);
+            delMsg.writeToOutputStream(out);
             out.flush();
 
-            consumeResponseLength(in);
-            int deleted = in.read();
+            InputStreamMessageReader delResp = new InputStreamMessageReader(in);
+            assertEquals(Opcode.SN_DELETE.getCode(), delResp.getOpcode(), "Response should have correct opcode");
+            int deleted = delResp.readByte();
             assertEquals(1, deleted, "DELETE should return success (1)");
         }
     }
@@ -157,24 +145,18 @@ class StorageNodeServerTest {
                     String reqId = "mc-" + idx;
                     int partition = idx;
                     String key = keys[idx];
-
-                    byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
-                    byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
                     byte[] data = value.getBytes(StandardCharsets.UTF_8);
 
-                    // frameLength EXCLUDES opcode
-                    long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
-
-                    writeLong(out, putLen);
-                    writeInt(out, 1); // PUT
-                    writeString(out, reqId);
-                    writeInt(out, partition);
-                    writeString(out, key);
-                    out.write(data);
+                    MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+                    putMsg.writeString(reqId);
+                    putMsg.writeInt(partition);
+                    putMsg.writeString(key);
+                    putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
+                    putMsg.writeToOutputStream(out);
                     out.flush();
 
-                    consumeResponseLength(in);
-                    int status = in.read();
+                    InputStreamMessageReader putResp = new InputStreamMessageReader(in);
+                    int status = putResp.readByte();
                     assertEquals(1, status, "PUT should return success (1)");
 
                 } catch (IOException e) {
@@ -194,22 +176,18 @@ class StorageNodeServerTest {
 
                 int partition = i;
                 String key = keys[i];
-                byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-                // frameLength EXCLUDES opcode
-                long getLen = 4L + 4L + keyBytes.length;
-
-                writeLong(out, getLen);
-                writeInt(out, 6); // GET
-                writeInt(out, partition);
-                writeString(out, key);
+                MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
+                getMsg.writeInt(partition);
+                getMsg.writeString(key);
+                getMsg.writeToOutputStream(out);
                 out.flush();
 
-                long respLen = consumeResponseLength(in);
-                int found = in.read();
+                InputStreamMessageReader getResp = new InputStreamMessageReader(in);
+                int found = getResp.readByte();
                 assertEquals(1, found, "GET should return found (1)");
 
-                int dataLen = (int) (respLen - 1);
+                int dataLen = (int) getResp.getRemainingLength();
                 byte[] responseData = in.readNBytes(dataLen);
 
                 assertEquals("value-" + i, new String(responseData, StandardCharsets.UTF_8));
@@ -225,60 +203,51 @@ class StorageNodeServerTest {
 
             int partition = 1;
             String key = "overwrite-key";
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
             // First PUT
             String reqId1 = "ow-1";
-            byte[] reqIdBytes1 = reqId1.getBytes(StandardCharsets.UTF_8);
             byte[] data1 = "FirstValue".getBytes(StandardCharsets.UTF_8);
 
-            long putLen1 = 4L + reqIdBytes1.length + 4L + 4L + keyBytes.length + data1.length;
-
-            writeLong(out, putLen1);
-            writeInt(out, 1); // PUT
-            writeString(out, reqId1);
-            writeInt(out, partition);
-            writeString(out, key);
-            out.write(data1);
+            MessageBuilder putMsg1 = new MessageBuilder(Opcode.SN_PUT);
+            putMsg1.writeString(reqId1);
+            putMsg1.writeInt(partition);
+            putMsg1.writeString(key);
+            putMsg1.writeLargePayload(data1.length, new ByteArrayInputStream(data1));
+            putMsg1.writeToOutputStream(out);
             out.flush();
 
-            consumeResponseLength(in);
-            int status1 = in.read();
+            InputStreamMessageReader putResp1 = new InputStreamMessageReader(in);
+            int status1 = putResp1.readByte();
             assertEquals(1, status1, "First PUT should return success (1)");
 
             // Second PUT (overwrite)
             String reqId2 = "ow-2";
-            byte[] reqIdBytes2 = reqId2.getBytes(StandardCharsets.UTF_8);
             byte[] data2 = "SecondValue".getBytes(StandardCharsets.UTF_8);
 
-            long putLen2 = 4L + reqIdBytes2.length + 4L + 4L + keyBytes.length + data2.length;
-
-            writeLong(out, putLen2);
-            writeInt(out, 1); // PUT
-            writeString(out, reqId2);
-            writeInt(out, partition);
-            writeString(out, key);
-            out.write(data2);
+            MessageBuilder putMsg2 = new MessageBuilder(Opcode.SN_PUT);
+            putMsg2.writeString(reqId2);
+            putMsg2.writeInt(partition);
+            putMsg2.writeString(key);
+            putMsg2.writeLargePayload(data2.length, new ByteArrayInputStream(data2));
+            putMsg2.writeToOutputStream(out);
             out.flush();
 
-            consumeResponseLength(in);
-            int status2 = in.read();
+            InputStreamMessageReader putResp2 = new InputStreamMessageReader(in);
+            int status2 = putResp2.readByte();
             assertEquals(1, status2, "Second PUT should return success (1)");
 
             // GET
-            long getLen = 4L + 4L + keyBytes.length;
-
-            writeLong(out, getLen);
-            writeInt(out, 6); // GET
-            writeInt(out, partition);
-            writeString(out, key);
+            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
+            getMsg.writeInt(partition);
+            getMsg.writeString(key);
+            getMsg.writeToOutputStream(out);
             out.flush();
 
-            long respLen = consumeResponseLength(in);
-            int found = in.read();
+            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
+            int found = getResp.readByte();
             assertEquals(1, found, "GET after overwrite should return found (1)");
 
-            int dataLen = (int) (respLen - 1);
+            int dataLen = (int) getResp.getRemainingLength();
             byte[] responseData = in.readNBytes(dataLen);
 
             assertEquals("SecondValue", new String(responseData, StandardCharsets.UTF_8));
@@ -302,23 +271,18 @@ class StorageNodeServerTest {
                      InputStream in = socket.getInputStream()) {
 
                     String reqId = "req-" + idx;
-                    byte[] reqIdBytes = reqId.getBytes(StandardCharsets.UTF_8);
-                    byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
                     byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
 
-                    // frameLength EXCLUDES opcode
-                    long putLen = 4L + reqIdBytes.length + 4L + 4L + keyBytes.length + data.length;
-
-                    writeLong(out, putLen);
-                    writeInt(out, 1); // PUT
-                    writeString(out, reqId);
-                    writeInt(out, partition);
-                    writeString(out, key);
-                    out.write(data);
+                    MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+                    putMsg.writeString(reqId);
+                    putMsg.writeInt(partition);
+                    putMsg.writeString(key);
+                    putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
+                    putMsg.writeToOutputStream(out);
                     out.flush();
 
-                    consumeResponseLength(in);
-                    int status = in.read();
+                    InputStreamMessageReader putResp = new InputStreamMessageReader(in);
+                    int status = putResp.readByte();
                     assertEquals(1, status, "PUT should return success (1)");
                 } catch (IOException e) {
                     throw new RuntimeException(e);
@@ -334,50 +298,24 @@ class StorageNodeServerTest {
              OutputStream out = socket.getOutputStream();
              InputStream in = socket.getInputStream()) {
 
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-            long getLen = 4L + 4L + keyBytes.length;
-
-            writeLong(out, getLen);
-            writeInt(out, 6); // GET
-            writeInt(out, partition);
-            writeString(out, key);
+            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
+            getMsg.writeInt(partition);
+            getMsg.writeString(key);
+            getMsg.writeToOutputStream(out);
             out.flush();
 
-            long respLen = consumeResponseLength(in);
-            int found = in.read();
+            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
+            int found = getResp.readByte();
             assertEquals(1, found, "GET should return found (1)");
 
-            int dataLen = (int) (respLen - 1);
+            int dataLen = (int) getResp.getRemainingLength();
             String got = new String(in.readNBytes(dataLen), StandardCharsets.UTF_8);
 
             boolean matches = false;
             for (String v : values) {
                 if (v.equals(got)) { matches = true; break; }
             }
-            assertEquals(true, matches, "GET should return one of the concurrently written values");
+            assertTrue(matches, "GET should return one of the concurrently written values");
         }
-    }
-
-    // ---------- Helper Methods ----------
-
-    private static void writeInt(OutputStream out, int val) throws IOException {
-        out.write(ByteBuffer.allocate(4).putInt(val).array());
-    }
-
-    private static void writeLong(OutputStream out, long val) throws IOException {
-        out.write(ByteBuffer.allocate(8).putLong(val).array());
-    }
-
-    private static void writeString(OutputStream out, String s) throws IOException {
-        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
-        writeInt(out, bytes.length);
-        out.write(bytes);
-    }
-
-    /** Reads and returns the 8-byte response length the server always sends first. */
-    private static long consumeResponseLength(InputStream in) throws IOException {
-        byte[] buf = in.readNBytes(8);
-        if (buf.length != 8) throw new EOFException("Expected 8-byte response length");
-        return ByteBuffer.wrap(buf).getLong();
     }
 }

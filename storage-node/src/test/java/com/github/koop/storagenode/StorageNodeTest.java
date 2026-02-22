@@ -49,7 +49,7 @@ class StorageNodeTest {
             fileChannel.read(buffer);
             buffer.flip();
             String retrievedContent = StandardCharsets.UTF_8.decode(buffer).toString();
-            
+
             assertEquals(content, retrievedContent, "Retrieved content should match stored content");
         }
     }
@@ -72,7 +72,7 @@ class StorageNodeTest {
         // Retrieve (Should get latest)
         Optional<FileChannel> result = node.retrieve(partition, key);
         assertTrue(result.isPresent());
-        
+
         try (FileChannel fileChannel = result.get()) {
             ByteBuffer buffer = ByteBuffer.allocate((int) fileChannel.size());
             fileChannel.read(buffer);
@@ -83,31 +83,38 @@ class StorageNodeTest {
     }
 
     @Test
-    void testDelete() throws IOException {
+    void testDelete() throws IOException, InterruptedException {
         StorageNode node = new StorageNode(tempDir);
         String key = "del-key";
         int partition = 1;
         String reqId = "req1";
         String content = "delete me";
-        
+
         // Store initial data
         node.store(partition, reqId, key, createChannel(content), content.length());
-        
+
         // Pre-check: Ensure it exists
         assertTrue(node.retrieve(partition, key).isPresent());
 
         // Perform Delete
         boolean deleted = node.delete(partition, key);
         assertTrue(deleted, "Delete should return true");
-        
+
         // Verify Logical Delete (Retrieve returns empty)
         assertTrue(node.retrieve(partition, key).isEmpty(), "Retrieve should return empty after delete");
 
         // Verify Physical Delete (File is actually gone from disk)
         Path path = tempDir.resolve("partition_" + partition)
-                           .resolve(key)
-                           .resolve(reqId)
-                           .resolve("data.dat");
+                .resolve(key)
+                .resolve(reqId)
+                .resolve("data.dat");
+
+        // Wait for the asynchronous background deletion to complete (up to 5 seconds)
+        long deadline = System.currentTimeMillis() + 5000;
+        while (Files.exists(path) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+
         assertFalse(Files.exists(path), "Physical file should be deleted");
     }
 }

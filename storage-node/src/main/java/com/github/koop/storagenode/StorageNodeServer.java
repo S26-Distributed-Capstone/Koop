@@ -25,10 +25,6 @@ public class StorageNodeServer {
     private final Map<Integer, Handler> handlers;
     private final StorageNode storageNode;
 
-    private static final int OPCODE_PUT = 1;
-    private static final int OPCODE_GET = 6;
-    private static final int OPCODE_DELETE = 2;
-
     private ServerSocketChannel serverSocketChannel;
 
     public StorageNodeServer(int port, Path dir) {
@@ -71,9 +67,9 @@ public class StorageNodeServer {
     }
 
     private void registerHandlers() {
-        this.handlers.put(OPCODE_PUT, this::handlePut);
-        this.handlers.put(OPCODE_GET, this::handleGet);
-        this.handlers.put(OPCODE_DELETE, this::handleDelete);
+        this.handlers.put(Opcode.SN_PUT.getCode(), this::handlePut);
+        this.handlers.put(Opcode.SN_GET.getCode(), this::handleGet);
+        this.handlers.put(Opcode.SN_DELETE.getCode(), this::handleDelete);
     }
 
     // --- Handlers ---
