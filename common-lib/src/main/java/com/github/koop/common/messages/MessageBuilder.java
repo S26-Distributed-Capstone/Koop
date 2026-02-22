@@ -8,54 +8,76 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 
 public class MessageBuilder {
     private long length;
-    private final ByteBuffer buffer;
+    private ByteBuffer buffer; // Removed 'final' so we can resize it
     private InputStream largePayloadDataInputStream;
     private ReadableByteChannel largePayloadDataChannel;
     private long payloadLength;
 
     public MessageBuilder() {
-        this.buffer = ByteBuffer.allocate(1024);
+        this.buffer = ByteBuffer.allocate(64); // Start small to save memory and GC pressure
     }
-    
+
     public MessageBuilder(Opcode opcode) {
         this();
         this.buffer.putInt(opcode.getCode()); // Write opcode first
-        this.length+=4; // Account for the opcode length
+        this.length += 4; // Account for the opcode length
+    }
+
+    /**
+     * Ensures the buffer has enough capacity for the upcoming write.
+     * If not, it doubles the capacity until it fits.
+     */
+    private void ensureCapacity(int neededBytes) {
+        if (buffer.remaining() < neededBytes) {
+            int newCapacity = buffer.capacity();
+            while (newCapacity - buffer.position() < neededBytes) {
+                newCapacity *= 2;
+            }
+            ByteBuffer newBuffer = ByteBuffer.allocate(newCapacity);
+            buffer.flip();
+            newBuffer.put(buffer);
+            buffer = newBuffer;
+        }
     }
 
     public void writeInt(int value) {
+        ensureCapacity(4);
         buffer.putInt(value);
         length += 4;
     }
 
     public void writeLong(long value) {
+        ensureCapacity(8);
         buffer.putLong(value);
         length += 8;
     }
 
     public void writeShort(short value) {
+        ensureCapacity(2);
         buffer.putShort(value);
         length += 2;
     }
 
     public void writeByte(byte value) {
+        ensureCapacity(1);
         buffer.put(value);
         length += 1;
     }
 
     public void writeString(String value) {
-        byte[] strBytes = value.getBytes();
+        byte[] strBytes = value.getBytes(StandardCharsets.UTF_8);
+        ensureCapacity(4 + strBytes.length);
         buffer.putInt(strBytes.length); // Write length of the string first
         buffer.put(strBytes); // Write the string bytes
         length += 4 + strBytes.length; // Account for length and string bytes
     }
-    
 
     public void writeLargePayload(long length, InputStream data){
-        this.length+=length;
+        this.length += length;
         this.largePayloadDataInputStream = data;
         this.payloadLength = length;
     }
@@ -65,7 +87,6 @@ public class MessageBuilder {
         this.largePayloadDataChannel = channel;
         this.payloadLength = length;
     }
-
 
     public void writeToOutputStream(OutputStream out) throws IOException {
         // First, write the total length (excluding the length field itself)
@@ -116,10 +137,9 @@ public class MessageBuilder {
         }
     }
 
-private long transferAll(FileChannel src, WritableByteChannel dest, long count) throws IOException {
+    private long transferAll(FileChannel src, WritableByteChannel dest, long count) throws IOException {
         long transferred = 0;
         long initialPosition = src.position();
-        
         while (transferred < count) {
             long n = src.transferTo(initialPosition + transferred, count - transferred, dest);
             if (n == 0) {
@@ -139,6 +159,7 @@ private long transferAll(FileChannel src, WritableByteChannel dest, long count) 
         }
         return transferred;
     }
+
     public void writeToChannel(WritableByteChannel channel) throws IOException {
         // First, write the total length (excluding the length field itself)
         ByteBuffer lengthBuffer = ByteBuffer.allocate(8);
@@ -181,7 +202,7 @@ private long transferAll(FileChannel src, WritableByteChannel dest, long count) 
                         break;
                     }
                     if (n == 0) {
-                        continue; // or handle blocking? But here we assume it will eventually read or end.
+                        continue; 
                     }
 
                     copyBuffer.flip();
@@ -193,8 +214,4 @@ private long transferAll(FileChannel src, WritableByteChannel dest, long count) 
             }
         }
     }
-
-
-
-
 }
