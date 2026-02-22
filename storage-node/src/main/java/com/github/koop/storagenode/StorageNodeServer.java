@@ -181,7 +181,6 @@ public class StorageNodeServer {
                             // 3. Dispatch
                             var handler = this.handlers.get(opcode);
                             if (handler != null) {
-                                // ✅ FIX: DO NOT subtract 4 here
                                 // Client's frameLength excludes opcode already.
                                 handler.handle(clientChannel, length);
                             } else {
