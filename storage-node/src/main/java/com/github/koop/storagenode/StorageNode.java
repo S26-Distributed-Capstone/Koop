@@ -132,7 +132,7 @@ public class StorageNode {
         Path path = getObjectFile(partition, requestID, key);
         Files.createDirectories(path.getParent());
 
-        try (FileChannel fc = FileChannel.open(
+try (FileChannel fc = FileChannel.open(
                 path,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
@@ -141,12 +141,19 @@ public class StorageNode {
             long written = 0;
             while (written < length) {
                 long n = fc.transferFrom(data, written, length - written);
-                if (n <= 0) {
-                     // Check for unexpected EOF
-                     if (written < length) throw new EOFException("Unexpected EOF reading payload");
-                     break;
+                if (n == 0) {
+                    // TCP buffer is empty (waiting on network). Sleep 1ms to yield the Virtual Thread.
+                    try {
+                        Thread.sleep(1);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Transfer interrupted", e);
+                    }
+                } else if (n < 0) {
+                    throw new EOFException("Unexpected EOF reading payload");
+                } else {
+                    written += n;
                 }
-                written += n;
             }
         }
 

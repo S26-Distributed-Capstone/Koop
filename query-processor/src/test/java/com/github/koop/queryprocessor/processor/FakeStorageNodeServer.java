@@ -1,50 +1,20 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.messages.InputStreamMessageReader;
+import com.github.koop.common.messages.MessageBuilder;
+import com.github.koop.common.messages.Opcode;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Fake storage node server that matches the REAL StorageNodeServer wire protocol:
- *
- * REQUEST:
- *   long frameLen   // counts bytes AFTER opcode (server passes this to handler)
- *   int opcode
- *   ... opcode fields ...
- *
- * STORE (opcode=1):
- *   requestId: string (int len + bytes)
- *   partition: int
- *   key: string
- *   payload: rest of stream (until EOF)
- * RESPONSE:
- *   long 1
- *   byte 1 on success, 0 on failure
- *
- * READ (opcode=6):
- *   partition: int
- *   key: string
- * RESPONSE:
- *   long (1 + dataLen) if found, else 1
- *   byte 1 if found else 0
- *   bytes data (if found)
- *
- * DELETE (opcode=2):
- *   partition: int
- *   key: string
- * RESPONSE:
- *   long 1
- *   byte 1 on success, 0 on failure
+ * Fake storage node server that matches the REAL StorageNodeServer wire protocol using common-lib messages
  */
 public final class FakeStorageNodeServer implements Closeable {
-
-    private static final int OP_STORE  = 1;
-    private static final int OP_DELETE = 2;
-    private static final int OP_READ   = 6;
 
     private final ServerSocket server;
     private final Thread acceptThread;
@@ -85,81 +55,77 @@ public final class FakeStorageNodeServer implements Closeable {
     private void handle(Socket s) throws IOException {
         s.setTcpNoDelay(true);
 
-        DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
-        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+        InputStream in = new BufferedInputStream(s.getInputStream());
+        OutputStream out = new BufferedOutputStream(s.getOutputStream());
 
-        // ✅ NEW framing: read frame length first, then opcode
-        long frameLen;
-        int opcode;
+        InputStreamMessageReader reader;
         try {
-            frameLen = in.readLong();   // not enforced; just aligns stream
-            opcode = in.readInt();
+            reader = new InputStreamMessageReader(in);
         } catch (EOFException eof) {
             return;
         }
 
+        int opcode = reader.getOpcode();
+
         if (!enabled) {
             // simulate node failure but keep protocol correct
-            if (opcode == OP_READ) {
-                out.writeLong(1L);
-                out.writeByte(0);
-            } else {
-                out.writeLong(1L);
-                out.writeByte(0);
+            Opcode op = getOpcodeByCode(opcode);
+            if (op != null) {
+                MessageBuilder err = new MessageBuilder(op);
+                err.writeByte((byte) 0);
+                err.writeToOutputStream(out);
+                out.flush();
             }
-            out.flush();
             return;
         }
 
-        switch (opcode) {
-            case OP_STORE -> {
-                String requestId = readString(in); // unused in fake
-                int partition = in.readInt();
-                String key = readString(in);
+        if (opcode == Opcode.SN_PUT.getCode()) {
+            String requestId = reader.readString();
+            int partition = reader.readInt();
+            String key = reader.readString();
 
-                // payload is rest of stream until EOF
-                byte[] payload = readAllToEof(in);
+            // payload is rest of stream until EOF
+            byte[] payload = readAllToEof(in);
 
-                store.put(mapKey(partition, key), payload);
+            store.put(mapKey(partition, key), payload);
 
-                out.writeLong(1L);
-                out.writeByte(1);
-                out.flush();
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_PUT);
+            resp.writeByte((byte) 1);
+            resp.writeToOutputStream(out);
+            out.flush();
+
+        } else if (opcode == Opcode.SN_GET.getCode()) {
+            int partition = reader.readInt();
+            String key = reader.readString();
+
+            byte[] data = store.get(mapKey(partition, key));
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
+            if (data == null) {
+                resp.writeByte((byte) 0);
+            } else {
+                resp.writeByte((byte) 1);
+                resp.writeLargePayload(data.length, new ByteArrayInputStream(data));
             }
+            resp.writeToOutputStream(out);
+            out.flush();
 
-            case OP_READ -> {
-                int partition = in.readInt();
-                String key = readString(in);
+        } else if (opcode == Opcode.SN_DELETE.getCode()) {
+            int partition = reader.readInt();
+            String key = reader.readString();
 
-                byte[] data = store.get(mapKey(partition, key));
-                if (data == null) {
-                    out.writeLong(1L);
-                    out.writeByte(0);
-                    out.flush();
-                } else {
-                    out.writeLong(1L + data.length);
-                    out.writeByte(1);
-                    out.write(data);
-                    out.flush();
-                }
-            }
+            store.remove(mapKey(partition, key));
 
-            case OP_DELETE -> {
-                int partition = in.readInt();
-                String key = readString(in);
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_DELETE);
+            resp.writeByte((byte) 1);
+            resp.writeToOutputStream(out);
+            out.flush();
 
-                store.remove(mapKey(partition, key));
-
-                out.writeLong(1L);
-                out.writeByte(1);
-                out.flush();
-            }
-
-            default -> {
-                out.writeLong(1L);
-                out.writeByte(0);
-                out.flush();
-            }
+        } else {
+            // Unrecognized opcode
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
+            resp.writeByte((byte) 0);
+            resp.writeToOutputStream(out);
+            out.flush();
         }
     }
 
@@ -178,12 +144,11 @@ public final class FakeStorageNodeServer implements Closeable {
         return baos.toByteArray();
     }
 
-    private static String readString(DataInputStream in) throws IOException {
-        int n = in.readInt();
-        if (n < 0 || n > (1 << 20)) throw new IOException("Bad string length: " + n);
-        byte[] b = in.readNBytes(n);
-        if (b.length != n) throw new EOFException("Short read string");
-        return new String(b, StandardCharsets.UTF_8);
+    private Opcode getOpcodeByCode(int code) {
+        for (Opcode op : Opcode.values()) {
+            if (op.getCode() == code) return op;
+        }
+        return null;
     }
 
     @Override
