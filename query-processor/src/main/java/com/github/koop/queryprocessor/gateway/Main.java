@@ -8,20 +8,19 @@ import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerServi
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
 public class Main {
-    public static void main(String[] args) {
-        // 1. Initialize the StorageWorker
-        StorageWorker storageWorker = new StorageWorker();
-        
-        // 2. Initialize the Service (Dependency Injection)
-        StorageService storage = new StorageWorkerService(storageWorker);
 
+    /**
+     * Creates and configures the Javalin app with all S3-compatible routes.
+     * Accepts a StorageService so tests can inject a mock.
+     */
+    public static Javalin createApp(StorageService storage) {
         var app = Javalin.create(config -> {
             config.useVirtualThreads = true;
-        }).start(8080);
+        });
 
         app.get("/health", ctx -> ctx.result("API Gateway is healthy!"));
 
-        // GET
+        // GET /{bucket}/{key}
         app.get("/{bucket}/{key}", ctx -> {
             String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
@@ -35,7 +34,6 @@ public class Main {
                     ctx.header("ETag", "\"dummy-etag-12345\"");
                     ctx.result(data);
                 } else {
-                    // S3 Compatibility: XML Error for Missing File
                     ctx.status(404);
                     ctx.header("Content-Type", "application/xml");
                     ctx.result(buildS3ErrorXml("NoSuchKey", "The specified key does not exist.", resourcePath));
@@ -48,24 +46,19 @@ public class Main {
             }
         });
 
-        // PUT
+        // PUT /{bucket}/{key}
         app.put("/{bucket}/{key}", ctx -> {
             String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
             long contentLength = ctx.contentLength();
             String resourcePath = "/" + bucket + "/" + key;
 
-
             try {
-                // S3 Compatibility Fix 1: Do NOT use try-with-resources. 
-                // Let Javalin close the stream when the request lifecycle ends.
                 InputStream is = ctx.bodyInputStream();
                 storage.putObject(bucket, key, is, contentLength);
-                
-                // S3 Compatibility Fix 2: Empty body, 200 OK, and ETag header
                 ctx.status(200);
-                ctx.header("ETag", "\"dummy-etag-12345\""); // ETags must be wrapped in double quotes
-                ctx.result(""); // strictly empty string
+                ctx.header("ETag", "\"dummy-etag-12345\"");
+                ctx.result("");
             } catch (Exception e) {
                 e.printStackTrace();
                 ctx.status(500);
@@ -74,7 +67,7 @@ public class Main {
             }
         });
 
-        // DELETE
+        // DELETE /{bucket}/{key}
         app.delete("/{bucket}/{key}", ctx -> {
             String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
@@ -90,10 +83,18 @@ public class Main {
                 ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
             }
         });
+
+        return app;
+    }
+
+    public static void main(String[] args) {
+        StorageWorker storageWorker = new StorageWorker();
+        StorageService storage = new StorageWorkerService(storageWorker);
+        createApp(storage).start(8080);
     }
 
     // Helper method to generate S3-compliant XML error responses
-    private static String buildS3ErrorXml(String code, String message, String resource) {
+    static String buildS3ErrorXml(String code, String message, String resource) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                "<Error>\n" +
                "  <Code>" + code + "</Code>\n" +
