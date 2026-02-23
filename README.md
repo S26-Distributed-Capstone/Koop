@@ -1,18 +1,25 @@
 # KoopDB
 
-KoopDB is a distributed object storage system designed for high-performance video streaming applications. It provides S3-compatible API endpoints with erasure coding for reliability and efficient storage.
+KoopDB is a distributed object storage system designed for high-performance video streaming, offering S3-compatible API endpoints, zero-copy streaming, and strong reliability through erasure coding. This project is an ongoing capstone for the S26 Distributed Systems program.
+
+---
 
 ## Overview
 
-KoopDB implements a distributed storage architecture with two main components:
-- **Query Processor**: API Gateway providing RESTful HTTP interface for object storage operations
-- **Storage Node**: Backend storage server handling binary protocol and disk persistence
+KoopDB implements a scalable architecture with the following core components:
 
-The system uses Reed-Solomon erasure coding (6+3 configuration) to provide fault tolerance, allowing up to 3 node failures while maintaining data availability.
+- **Query Processor (API Gateway)**: Exposes RESTful S3-like HTTP interfaces, handles request hashing, routes data, and orchestrates erasure coding and streaming.
+- **Storage Node**: Backend storage servers running a custom binary protocol, responsible for persistent storage, partitioning, versioning, and fault tolerance.
+- **Common Libraries**: Shared classes and configurations for partition placement, replica sets, and protocol definitions, facilitating cluster expansion.
+- **Cluster Coordination**: Uses etcd (for membership/discovery) and Redis (as a low-latency cache).
+
+The system is engineered around Reed-Solomon erasure coding (default 6 data + 3 parity shards) for strong fault tolerance, supporting up to 3 concurrent node failures.
+
+---
 
 ## Architecture
 
-### System Components
+### System Diagram
 
 ```
 ┌──────────────┐
@@ -20,186 +27,152 @@ The system uses Reed-Solomon erasure coding (6+3 configuration) to provide fault
 └──────┬───────┘
        │ HTTP (S3-compatible)
        ▼
-┌──────────────────┐
-│ Query Processor  │ (3 replicas)
-│  - API Gateway   │
-│  - Erasure Codec │
-│  - Load Balancer │
-└────────┬─────────┘
-         │ Custom Binary Protocol (TCP)
+┌─────────────────────┐
+│  Query Processor    │ (3+ replicas)
+│  - REST API         │
+│  - Erasure Codec    │
+│  - Routing, Hashing │
+└────────┬────────────┘
+         │ Binary Protocol (TCP)
          ▼
-┌──────────────────┐
-│  Storage Nodes   │ (6 replicas currently; designed for 27 nodes in 3 sets)
-│  - Disk I/O      │
-│  - Versioning    │
-│  - Partitioning  │
-└────────┬─────────┘
+┌─────────────────────┐
+│   Storage Nodes     │ (6+ replicas, 3 erasure sets possible)
+│   - Disk I/O        │
+│   - Versioning      │
+│   - Partitioning    │
+└────────┬────────────┘
          │
-    ┌────┴────┬────────┐
-    ▼         ▼        ▼
-  ETCD     Redis    Storage
-(Cluster)  (Cache)    (Disk)
+   ┌─────┴──────┬───────┐
+   ▼            ▼       ▼        
+ ETCD      Redis      Disk    
+ Cluster   Cache     Storage
 ```
 
-### Key Features
+### Design Features
 
-- **S3-Compatible API**: Standard PUT, GET, DELETE operations with S3-style XML error responses
-- **Erasure Coding**: Reed-Solomon (6,3) encoding for data redundancy and fault tolerance
-- **Zero-Copy Streaming**: Efficient data transfer without buffering entire files in memory
-- **Virtual Threads**: Java 21 virtual threads for high concurrency
-- **Consistent Hashing**: Automatic key distribution across storage sets using CRC32
-- **Versioning**: Atomic updates with version tracking for concurrent access safety
-- **Docker-Ready**: Multi-stage Dockerfiles and Docker Compose orchestration
+- **S3-Compatible API**: PUT, GET, DELETE with standard error responses.
+- **Erasure Coding**: Reed-Solomon encoding (6 data + 3 parity shards; configurable) for data durability and efficiency.
+- **Partition & Erasure Set Configs**: Uses configurable partition spreading and replica sets (`common-lib`) for sharding and cluster expansion.
+- **Zero-Copy Streaming**: Serves large objects with high throughput (Java 21 virtual threads).
+- **Service Discovery & Orchestration**: Automatic discovery, scaling friendly.
+- **Dockerized**: Fast startup with Docker Compose for local or production environments.
+
+---
 
 ## Technology Stack
 
 - **Language**: Java 21
-- **Web Framework**: Javalin (Query Processor)
-- **Erasure Coding**: Backblaze Reed-Solomon
-- **Orchestration**: Docker Compose
-- **Service Discovery**: etcd (3-node cluster)
-- **Caching**: Redis
-- **Build Tool**: Maven
+- **Framework**: Javalin (API Gateway/Query Processor)
+- **Erasure Coding**: Backblaze Reed-Solomon Java implementation
+- **Build**: Maven
+- **Containerization**: Docker, Docker Compose
+- **Coordination**: etcd (cluster discovery), Redis (cache)
+
+---
 
 ## Getting Started
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- Java 21 JDK (for local development)
-- Maven 3.9+ (for local development)
+- Java 21 JDK (for local or test/dev)
+- Maven 3.9+ (for dev builds)
 
 ### Quick Start with Docker Compose
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/S26-Distributed-Capstone/Koop.git
-   cd Koop
-   ```
-
-2. **Start the cluster**:
-   ```bash
-   docker-compose up --build
-   ```
-
-3. **Verify services are running**:
-   ```bash
-   curl http://localhost:9001/health
-   # Output: API Gateway is healthy!
-   ```
-
-### Service Ports
-
-- **Query Processors**: 9001, 9002, 9003 (HTTP)
-- **Storage Nodes**: 8001-8006 (TCP Binary Protocol)
-- **Redis**: 6379
-- **etcd**: 2379 (client), 2380 (peer)
-
-## API Usage
-
-KoopDB provides an S3-compatible REST API for object storage operations.
-
-### Store an Object (PUT)
-
 ```bash
-curl -X PUT -T ./video.mp4 http://localhost:9001/videos/movie.mp4
+git clone https://github.com/S26-Distributed-Capstone/Koop.git
+cd Koop
+docker-compose up --build
 ```
 
-### Retrieve an Object (GET)
-
-```bash
-curl -O http://localhost:9001/videos/movie.mp4
-```
-
-### Delete an Object (DELETE)
-
-```bash
-curl -X DELETE http://localhost:9001/videos/movie.mp4
-```
-
-### Health Check
+### Verifying Cluster Health
 
 ```bash
 curl http://localhost:9001/health
+# Output: API Gateway is healthy!
 ```
+
+### Service Ports (default)
+
+- Query Processor HTTP: 9001, 9002, 9003
+- Storage Node TCP: 8001–8006 (expandable)
+- Redis: 6379
+- etcd: 2379 (client), 2380 (peer)
+
+---
+
+## API Usage
+
+| Operation     | Example                                                           |
+|---------------|-------------------------------------------------------------------|
+| PUT           | `curl -X PUT -T ./video.mp4 http://localhost:9001/videos/movie.mp4` |
+| GET           | `curl -O http://localhost:9001/videos/movie.mp4`                  |
+| DELETE        | `curl -X DELETE http://localhost:9001/videos/movie.mp4`           |
+| Health Check  | `curl http://localhost:9001/health`                               |
+
+See `query-processor/README.md` for more endpoint and protocol details.
+
+---
 
 ## Components
 
 ### Query Processor
 
-The Query Processor serves as the API Gateway and implements:
-- RESTful HTTP endpoints (S3-compatible)
-- Erasure coding/decoding using Reed-Solomon algorithm
-- Request routing based on consistent hashing (CRC32)
-- Protocol translation (HTTP → Binary TCP)
-- Stripe-based data distribution (1MB shard size)
+Implements:
+- S3-compatible REST endpoints (PUT/GET/DELETE)
+- Reed-Solomon erasure coding (encoding/decoding)
+- Consistent hashing and smart routing
+- Protocol bridging (HTTP REST ↔ Custom Binary TCP)
+- Stripe-based distribution (1 MB shards)
 
-**Configuration** (Environment Variables):
+**Main environment variables:**
 - `APP_PORT`: HTTP port (default: 8080)
-- `ETCD_ENDPOINTS`: etcd cluster addresses
-- `STORAGE_NODE_URL`: Storage node service URL
+- `ETCD_ENDPOINTS`: etcd endpoints
+- `STORAGE_NODE_URL`: storage node URL(s)
 
 ### Storage Node
 
-The Storage Node handles:
-- Binary protocol over TCP (custom framing)
+Handles:
+- Custom binary protocol over TCP (length-prefixed frames, opcodes)
 - Disk-based object storage with versioning
-- Partition-based organization
-- Atomic version updates with retry logic
-- Asynchronous garbage collection
+- Partition organization & atomic updates (with retry logic)
+- Periodic garbage collection
 
-**Configuration** (Environment Variables):
+**Main environment variables:**
 - `PORT`: TCP port (default: 8080)
-- `STORAGE_DIR`: Data directory path (default: ./storage)
-- `ETCD_ENDPOINTS`: etcd cluster addresses
-- `REDIS_URL`: Redis connection URL
+- `STORAGE_DIR`: Storage path (default: ./storage)
+- `ETCD_ENDPOINTS`, `REDIS_URL`
 
-### Storage Protocol
+### Common Libraries
 
-The binary protocol uses 8-byte length-prefixed frames:
+- Partition/erasure set configs—expand cluster or rebalance with configs (`common-lib`).
+- Modern objects for partition/replica spread and configuration management.
 
-| Component       | Size      | Description                    |
-|-----------------|-----------|--------------------------------|
-| Frame Length    | 8 bytes   | Total payload + opcode length  |
-| Opcode          | 4 bytes   | 1=PUT, 2=DELETE, 6=GET        |
-| Payload         | Variable  | Operation-specific data        |
+---
 
-## Erasure Coding
+## Erasure Coding & Cluster Scaling
 
-KoopDB is designed to use Reed-Solomon erasure coding with parameters:
-- **K (Data Shards)**: 6
-- **M (Parity Shards)**: 3
-- **Total Shards**: 9
-- **Shard Size**: 1 MB
+- **Default setup:** 6 storage nodes with striping.
+- **Full deployment:** Configure 9-node erasure sets × 3 for maximum durability and capacity. Easily adjust with `ReplicaSetConfiguration` and `PartitionSpreadConfiguration`.
+- Cluster can expand/shrink by updating configs and restarting services.
 
-This configuration tolerates up to 3 simultaneous node failures. Data is striped across shards with each stripe containing 6 MB of real data plus 3 MB of parity data.
-
-**Current Status**: The erasure coding implementation is present in the codebase but not yet fully wired up in the Docker Compose deployment. The current deployment uses 6 storage nodes with basic storage functionality. Full erasure coding deployment would require 27 nodes (9 nodes × 3 sets).
-
-### Routing Strategy
-
-Objects are distributed across 3 erasure sets using consistent hashing:
-```
-hash(key) % 100:
-  0-33   → Set 1 (34 values)
-  34-66  → Set 2 (33 values)
-  67-99  → Set 3 (33 values)
-```
-
-Each erasure set is designed to contain 9 storage nodes (6 data + 3 parity). Note: Set 1 receives slightly more keys due to the 0-33 range inclusive.
+---
 
 ## Development
 
 ### Building Locally
 
-**Query Processor**:
+**Query Processor**
+
 ```bash
 cd query-processor
 mvn clean package
 java -jar target/query-processor-1-jar-with-dependencies.jar
 ```
 
-**Storage Node**:
+**Storage Node**
+
 ```bash
 cd storage-node
 mvn clean package
@@ -209,69 +182,62 @@ java -jar target/storage-node-1.0.0-SNAPSHOT-jar-with-dependencies.jar
 ### Running Tests
 
 ```bash
-# Query Processor tests
-cd query-processor
-mvn test
-
-# Storage Node tests
-cd storage-node
-mvn test
+cd query-processor && mvn test
+cd storage-node && mvn test
 ```
 
 ### Directory Structure
 
 ```
 Koop/
-├── docker-compose.yml        # Orchestration config
-├── query-processor/          # API Gateway component
+├── docker-compose.yml           # Orchestration config
+├── common-lib/                  # Shared code (partition, replica, config)
+│   └── src/main/java/com/github/koop/common/
+├── query-processor/             # API Gateway/Query Processor
 │   ├── Dockerfile
 │   ├── pom.xml
 │   └── src/
 │       ├── main/java/com/github/koop/queryprocessor/
-│       │   ├── gateway/      # HTTP endpoints
-│       │   └── processor/    # Erasure coding logic
 │       └── test/
-└── storage-node/             # Storage backend component
-    ├── Dockerfile
-    ├── pom.xml
-    └── src/
-        ├── main/java/com/github/koop/storagenode/
-        │   ├── StorageNode.java       # Core storage logic
-        │   ├── StorageNodeServer.java # TCP server
-        │   └── Handler.java           # Protocol handlers
-        └── test/
+├── storage-node/                # Storage backend
+│   ├── Dockerfile
+│   └── src/
+│       ├── main/java/com/github/koop/storagenode/
+│       └── test/
 ```
+
+---
 
 ## Deployment
 
-The system deploys 13 containers via Docker Compose:
-- 3 Query Processor replicas
-- 6 Storage Node replicas
-- 3 etcd nodes (cluster quorum)
+Deployed via Docker Compose with service discovery:
+
+- 3 Query Processor replicas (default)
+- 6 Storage Node replicas (expandable up to 27 with config changes)
+- 3-node etcd quorum
 - 1 Redis instance
 
-All containers are networked and configured to discover each other via etcd.
+You may expand node count and replica sets by modifying configs in `common-lib/`.
 
-## Contributing
-
-This project is part of the S26 Distributed Systems Capstone. For contributions:
-1. Create a feature branch
-2. Make your changes
-3. Submit a pull request with reviewers
+---
 
 ## Contributors
 
-This project is developed as part of the S26 Distributed Systems Capstone program.
+Developed as part of the S26 Distributed Systems Capstone.
 
-### Core Team
-- **Michael Kupferstein** ([@MichaelKupferstein](https://github.com/MichaelKupferstein))
-- **Yonatan Ginsburg** ([@ygins](https://github.com/ygins))
-- **Eitan Leitner** ([@EitanLeit23](https://github.com/EitanLeit23))
+**Core Team**
+- Michael Kupferstein ([@MichaelKupferstein](https://github.com/MichaelKupferstein))
+- Yonatan Ginsburg ([@ygins](https://github.com/ygins))
+- Eitan Leitner ([@EitanLeit23](https://github.com/EitanLeit23))
+
+---
 
 ## License
 
-[Add license information]
+[Project license to be added or specified.]
+
+---
 
 ## Project Status
 
-Active development - This is an ongoing distributed systems capstone project focused on building a scalable object storage system for video streaming applications.
+**Active development** – KoopDB is being actively built and maintained as a demonstration of advanced distributed storage concepts. Expect rapid changes and ongoing improvements as capstone features are completed.
