@@ -25,7 +25,6 @@ jobs:
           distribution: 'temurin' # Adoptium's Temurin is a solid standard
           cache: maven # Automatically caches ~/.m2 dependencies to speed up future runs
 
-      # Step 3: Run the Maven build and test lifecycle
-      - name: Run Tests
-        # This will compile all modules and run Surefire/Failsafe plugins
-        run: mvn clean test
+      # 3. Compile, package, and run ALL tests (Unit + Integration)
+      - name: Run Maven Verify
+        run: mvn clean verify
