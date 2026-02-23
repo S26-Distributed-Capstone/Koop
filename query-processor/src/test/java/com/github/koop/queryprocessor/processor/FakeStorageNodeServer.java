@@ -1,61 +1,37 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.messages.InputStreamMessageReader;
+import com.github.koop.common.messages.MessageBuilder;
+import com.github.koop.common.messages.Opcode;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Mock storage node matching the protocol:
- *
- * STORE (opcode 1):
- *   requestId: string
- *   partition: int
- *   key: string  (bucket-key)
- *   data: rest of stream (until EOF)
- *   -> responds 1 byte: 1 ok / 0 fail
- *
- * READ (opcode 6):
- *   partition: int
- *   key: string
- *   -> responds:
- *        long responseLen (1 + dataLen)
- *        byte successFlag (1 found / 0 not found)
- *        data bytes (if found)
- *
- * DELETE (opcode 2):
- *   partition: int
- *   key: string
- *   -> responds 1 byte: 1 ok / 0 fail
+ * Fake storage node server that matches the REAL StorageNodeServer wire protocol using common-lib messages
  */
-final class FakeStorageNodeServer implements Closeable {
-
-    private static final int OP_STORE = 1;
-    private static final int OP_DELETE = 2;
-    private static final int OP_READ = 6;
+public final class FakeStorageNodeServer implements Closeable {
 
     private final ServerSocket server;
     private final Thread acceptThread;
 
-    // key = partition|key (key already includes bucket prefix)
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
-
-    // Toggle to simulate node failure without killing port
     private volatile boolean enabled = true;
 
-    FakeStorageNodeServer() throws IOException {
-        this.server = new ServerSocket(0); // ephemeral port
+    public FakeStorageNodeServer() throws IOException {
+        this.server = new ServerSocket(0);
         this.acceptThread = Thread.ofVirtual().start(this::acceptLoop);
     }
 
-    InetSocketAddress address() {
+    public InetSocketAddress address() {
         return new InetSocketAddress("127.0.0.1", server.getLocalPort());
     }
 
-    void setEnabled(boolean enabled) {
+    public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
@@ -64,8 +40,11 @@ final class FakeStorageNodeServer implements Closeable {
             try {
                 Socket s = server.accept();
                 Thread.startVirtualThread(() -> {
-                    try (s) { handle(s); }
-                    catch (Exception ignored) {}
+                    try (s) {
+                        handle(s);
+                    } catch (IOException ignored) {
+                        // swallow in fake server
+                    }
                 });
             } catch (IOException e) {
                 if (server.isClosed()) return;
@@ -76,104 +55,105 @@ final class FakeStorageNodeServer implements Closeable {
     private void handle(Socket s) throws IOException {
         s.setTcpNoDelay(true);
 
-        DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
-        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+        InputStream in = new BufferedInputStream(s.getInputStream());
+        OutputStream out = new BufferedOutputStream(s.getOutputStream());
 
-        int opcode;
+        InputStreamMessageReader reader;
         try {
-            opcode = in.readInt();
+            reader = new InputStreamMessageReader(in);
         } catch (EOFException eof) {
             return;
         }
 
+        int opcode = reader.getOpcode();
+
         if (!enabled) {
-            // For STORE/DELETE: send ack=0
-            // For READ: send "not found" frame
-            if (opcode == OP_READ) {
-                out.writeLong(1L);
-                out.writeByte(0);
-                out.flush();
-            } else {
-                out.writeByte(0);
+            // simulate node failure but keep protocol correct
+            Opcode op = getOpcodeByCode(opcode);
+            if (op != null) {
+                MessageBuilder err = new MessageBuilder(op);
+                err.writeByte((byte) 0);
+                err.writeToOutputStream(out);
                 out.flush();
             }
             return;
         }
 
-        if (opcode == OP_STORE) {
-            String requestId = readString(in); // consumed, not used
-            int partition = in.readInt();
-            String key = readString(in);
+        if (opcode == Opcode.SN_PUT.getCode()) {
+            String requestId = reader.readString();
+            int partition = reader.readInt();
+            String key = reader.readString();
 
-            // Data is "rest of stream" until client half-closes output or closes socket.
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buf = new byte[64 * 1024];
-            while (true) {
-                int r = in.read(buf);
-                if (r == -1) break;
-                baos.write(buf, 0, r);
-            }
+            // payload is rest of stream until EOF
+            byte[] payload = readAllToEof(in);
 
-            store.put(k(partition, key), baos.toByteArray());
+            store.put(mapKey(partition, key), payload);
 
-            out.writeByte(1); // ack ok
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_PUT);
+            resp.writeByte((byte) 1);
+            resp.writeToOutputStream(out);
             out.flush();
-            return;
-        }
 
-        if (opcode == OP_READ) {
-            int partition = in.readInt();
-            String key = readString(in);
+        } else if (opcode == Opcode.SN_GET.getCode()) {
+            int partition = reader.readInt();
+            String key = reader.readString();
 
-            byte[] data = store.get(k(partition, key));
+            byte[] data = store.get(mapKey(partition, key));
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
             if (data == null) {
-                out.writeLong(1L);     // responseLen = 1 (only success byte)
-                out.writeByte(0);      // not found
-                out.flush();
-                return;
+                resp.writeByte((byte) 0);
+            } else {
+                resp.writeByte((byte) 1);
+                resp.writeLargePayload(data.length, new ByteArrayInputStream(data));
             }
-
-            out.writeLong(1L + data.length);
-            out.writeByte(1);
-            out.write(data);
+            resp.writeToOutputStream(out);
             out.flush();
-            return;
-        }
 
-        if (opcode == OP_DELETE) {
-            int partition = in.readInt();
-            String key = readString(in);
-            store.remove(k(partition, key));
-            out.writeByte(1);
+        } else if (opcode == Opcode.SN_DELETE.getCode()) {
+            int partition = reader.readInt();
+            String key = reader.readString();
+
+            store.remove(mapKey(partition, key));
+
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_DELETE);
+            resp.writeByte((byte) 1);
+            resp.writeToOutputStream(out);
             out.flush();
-            return;
-        }
 
-        // Unknown opcode => fail
-        out.writeByte(0);
-        out.flush();
+        } else {
+            // Unrecognized opcode
+            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
+            resp.writeByte((byte) 0);
+            resp.writeToOutputStream(out);
+            out.flush();
+        }
     }
 
-    private static String k(int partition, String key) {
+    private static String mapKey(int partition, String key) {
         return partition + "|" + key;
     }
 
-    private static void writeString(DataOutputStream out, String s) throws IOException {
-        byte[] b = s.getBytes(StandardCharsets.UTF_8);
-        out.writeInt(b.length);
-        out.write(b);
+    private static byte[] readAllToEof(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[64 * 1024];
+        while (true) {
+            int r = in.read(buf);
+            if (r == -1) break;
+            baos.write(buf, 0, r);
+        }
+        return baos.toByteArray();
     }
 
-    private static String readString(DataInputStream in) throws IOException {
-        int n = in.readInt();
-        if (n < 0 || n > (1 << 20)) throw new IOException("Bad string length: " + n);
-        byte[] b = in.readNBytes(n);
-        if (b.length != n) throw new EOFException("Short read string");
-        return new String(b, StandardCharsets.UTF_8);
+    private Opcode getOpcodeByCode(int code) {
+        for (Opcode op : Opcode.values()) {
+            if (op.getCode() == code) return op;
+        }
+        return null;
     }
 
     @Override
     public void close() throws IOException {
         server.close();
+        // acceptThread will exit when server closes
     }
 }
