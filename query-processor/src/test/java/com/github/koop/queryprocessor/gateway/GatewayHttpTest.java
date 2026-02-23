@@ -1,7 +1,6 @@
 package com.github.koop.queryprocessor.gateway;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
-import io.javalin.Javalin;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
