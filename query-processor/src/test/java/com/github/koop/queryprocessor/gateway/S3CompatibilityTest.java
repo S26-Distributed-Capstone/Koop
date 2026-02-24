@@ -20,6 +20,8 @@ import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
+
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -50,6 +52,16 @@ class S3CompatibilityTest {
     private static final String KEY = "test-object.txt";
     private static final String CONTENT = "Hello from S3 SDK!";
     private static final byte[] CONTENT_BYTES = CONTENT.getBytes(StandardCharsets.UTF_8);
+
+    static {
+        java.util.logging.Logger logger = java.util.logging.Logger.getLogger(com.github.koop.queryprocessor.gateway.Main.class.getName());
+        logger.setLevel(java.util.logging.Level.OFF);
+        java.util.logging.Logger rootLogger = java.util.logging.Logger.getLogger("");
+        rootLogger.setLevel(java.util.logging.Level.WARNING);
+        for (java.util.logging.Handler handler : rootLogger.getHandlers()) {
+            handler.setLevel(java.util.logging.Level.WARNING);
+        }
+    }
 
     @BeforeEach
     void setUp() {

@@ -54,8 +54,9 @@ public class StorageNodeServer {
         // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
-        System.out.println("Storage Node starting on port: " + port);
-        System.out.println("Storage directory: " + storagePath.toAbsolutePath());
+        //Maybe add some logging here about the server starting and the configuration it is using.
+        //System.out.println("Storage Node starting on port: " + port); 
+        //System.out.println("Storage directory: " + storagePath.toAbsolutePath());
 
         // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
