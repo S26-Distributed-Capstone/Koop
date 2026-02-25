@@ -2,12 +2,16 @@ package com.github.koop.queryprocessor.gateway;
 
 import io.javalin.Javalin;
 import java.io.InputStream;
+import java.util.logging.Logger;
+import java.util.logging.Level;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
 public class Main {
+
+    private static final Logger logger = Logger.getLogger(Main.class.getName());
 
     /**
      * Creates and configures the Javalin app with all S3-compatible routes.
@@ -39,7 +43,7 @@ public class Main {
                     ctx.result(buildS3ErrorXml("NoSuchKey", "The specified key does not exist.", resourcePath));
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                logger.log(Level.SEVERE, String.format("Error in GET /%s/%s", bucket, key), e);
                 ctx.status(500);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
@@ -60,7 +64,7 @@ public class Main {
                 ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result("");
             } catch (Exception e) {
-                e.printStackTrace();
+                logger.log(Level.SEVERE, String.format("Error in PUT /%s/%s", bucket, key), e);
                 ctx.status(500);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
@@ -77,7 +81,7 @@ public class Main {
                 storage.deleteObject(bucket, key);
                 ctx.status(204);
             } catch (Exception e) {
-                e.printStackTrace();
+                logger.log(Level.SEVERE, String.format("Error in DELETE /%s/%s", bucket, key), e);
                 ctx.status(500);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));

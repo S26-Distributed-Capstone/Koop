@@ -29,7 +29,7 @@ class TcpStorageServiceTest {
         // Use Port 0 to let the OS pick a free port (Avoids VS Code collisions)
         serverSocket = new ServerSocket(0);
         ephemeralPort = serverSocket.getLocalPort();
-        System.out.println("TEST: Mock Server listening on port " + ephemeralPort);
+        //System.out.println("TEST: Mock Server listening on port " + ephemeralPort);
 
         service = new TcpStorageService("localhost", ephemeralPort);
         serverExecutor = Executors.newSingleThreadExecutor();
@@ -54,13 +54,13 @@ class TcpStorageServiceTest {
                 DataInputStream in = new DataInputStream(client.getInputStream());
                 DataOutputStream out = new DataOutputStream(client.getOutputStream());
 
-                System.out.println("SERVER: Client connected");
+                //System.out.println("SERVER: Client connected");
 
                 // --- VERIFY PROTOCOL ---
                 
                 // A. Frame Length
                 long frameLength = in.readLong();
-                System.out.println("SERVER: Read Frame Length: " + frameLength);
+                //System.out.println("SERVER: Read Frame Length: " + frameLength);
                 assertTrue(frameLength > 0, "Should send valid frame length");
 
                 long bytesReadFromPayload = 0;
@@ -68,7 +68,7 @@ class TcpStorageServiceTest {
                 // B. Opcode
                 int opcode = in.readInt();
                 bytesReadFromPayload += 4;
-                System.out.println("SERVER: Read Opcode: " + opcode);
+                //System.out.println("SERVER: Read Opcode: " + opcode);
                 assertEquals(1, opcode, "Opcode should be 1 (PUT)");
 
                 // C. Request ID
@@ -77,12 +77,12 @@ class TcpStorageServiceTest {
                 byte[] reqIdBytes = in.readNBytes(reqIdLen);
                 bytesReadFromPayload += reqIdLen;
                 String reqId = new String(reqIdBytes, StandardCharsets.UTF_8);
-                System.out.println("SERVER: Read ReqID: " + reqId);
+                //System.out.println("SERVER: Read ReqID: " + reqId);
                 
                 // D. Partition
                 int partition = in.readInt();
                 bytesReadFromPayload += 4;
-                System.out.println("SERVER: Read Partition: " + partition);
+                //System.out.println("SERVER: Read Partition: " + partition);
 
                 // E. Key
                 int keyLen = in.readInt();
@@ -90,21 +90,21 @@ class TcpStorageServiceTest {
                 byte[] keyBytes = in.readNBytes(keyLen);
                 bytesReadFromPayload += keyLen;
                 String key = new String(keyBytes, StandardCharsets.UTF_8);
-                System.out.println("SERVER: Read Key: " + key);
+                //System.out.println("SERVER: Read Key: " + key);
                 assertEquals("my-test-key", key);
 
                 // F. Data
                 // Calculate EXACT remaining size
                 int dataSize = (int) (frameLength - bytesReadFromPayload);
-                System.out.println("SERVER: Expecting Data Bytes: " + dataSize);
+                //System.out.println("SERVER: Expecting Data Bytes: " + dataSize);
                 
                 byte[] data = in.readNBytes(dataSize);
                 String content = new String(data, StandardCharsets.UTF_8);
-                System.out.println("SERVER: Read Content: " + content);
+                //System.out.println("SERVER: Read Content: " + content);
                 assertEquals("Hello World", content);
 
                 // --- SEND RESPONSE ---
-                System.out.println("SERVER: Sending Success Response");
+                //System.out.println("SERVER: Sending Success Response");
                 out.writeLong(1); 
                 out.write(1); // Success
                 out.flush();
@@ -120,9 +120,9 @@ class TcpStorageServiceTest {
         String content = "Hello World";
         ByteArrayInputStream data = new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
         
-        System.out.println("CLIENT: Sending PUT request...");
+        //System.out.println("CLIENT: Sending PUT request...");
         service.putObject("my-bucket", key, data, content.length());
-        System.out.println("CLIENT: PUT request finished");
+        //System.out.println("CLIENT: PUT request finished");
 
         // Ensure server finished cleanly
         serverTask.get(2, TimeUnit.SECONDS);
@@ -136,19 +136,19 @@ class TcpStorageServiceTest {
                 DataInputStream in = new DataInputStream(client.getInputStream());
                 DataOutputStream out = new DataOutputStream(client.getOutputStream());
 
-                System.out.println("SERVER: Client connected for GET");
+                //System.out.println("SERVER: Client connected for GET");
 
                 // --- VERIFY REQUEST ---
                 long frameLength = in.readLong();
                 int opcode = in.readInt();
-                System.out.println("SERVER: Opcode: " + opcode);
+                //System.out.println("SERVER: Opcode: " + opcode);
                 assertEquals(6, opcode, "Opcode should be 6 (GET)");
                 
                 in.readInt(); // Skip partition
                 
                 int keyLen = in.readInt();
                 String key = new String(in.readNBytes(keyLen), StandardCharsets.UTF_8);
-                System.out.println("SERVER: Key: " + key);
+                //System.out.println("SERVER: Key: " + key);
                 assertEquals("get-key", key);
 
                 // --- SEND RESPONSE ---
@@ -163,11 +163,11 @@ class TcpStorageServiceTest {
             }
         });
 
-        System.out.println("CLIENT: Sending GET request...");
+        //System.out.println("CLIENT: Sending GET request...");
         InputStream result = service.getObject("bucket", "get-key");
         assertNotNull(result);
         String content = new String(result.readAllBytes(), StandardCharsets.UTF_8);
-        System.out.println("CLIENT: Received Content: " + content);
+        //System.out.println("CLIENT: Received Content: " + content);
         assertEquals("FoundIt", content);
         result.close();
         
