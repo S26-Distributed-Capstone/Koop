@@ -29,9 +29,9 @@ import java.util.Arrays;
  */
 public final class ErasureCoder {
 
-    public static final int K          = 6;
-    public static final int M          = 3;
-    public static final int TOTAL      = K + M;
+    public static final int K = 6;
+    public static final int M = 3;
+    public static final int TOTAL = K + M;
     public static final int SHARD_SIZE = 1 << 20; // 1 MB per shard per stripe
 
     private ErasureCoder() {}
@@ -54,16 +54,16 @@ public final class ErasureCoder {
      * @return array of {@value TOTAL} InputStreams, index 0..K-1 = data, K..TOTAL-1 = parity
      */
     public static InputStream[] shard(InputStream data, long length) throws IOException {
-        if (data   == null) throw new IllegalArgumentException("data is null");
-        if (length <  0)    throw new IllegalArgumentException("length < 0");
+        if (data == null) throw new IllegalArgumentException("data is null");
+        if (length < 0) throw new IllegalArgumentException("length < 0");
 
-        long numStripes   = (length + (long) K * SHARD_SIZE - 1) / ((long) K * SHARD_SIZE);
+        long numStripes = (length + (long) K * SHARD_SIZE - 1) / ((long) K * SHARD_SIZE);
         // Buffer enough for the whole file per shard so the encoder never blocks
         // For large files this could be huge; cap at 8 stripes and rely on concurrent reads.
         int pipeBuffer = (int) Math.min(8L * SHARD_SIZE, numStripes * SHARD_SIZE + 8);
 
         PipedOutputStream[] pos = new PipedOutputStream[TOTAL];
-        PipedInputStream[]  pis = new PipedInputStream[TOTAL];
+        PipedInputStream[] pis = new PipedInputStream[TOTAL];
         for (int i = 0; i < TOTAL; i++) {
             pos[i] = new PipedOutputStream();
             pis[i] = new PipedInputStream(pos[i], pipeBuffer);
@@ -76,10 +76,10 @@ public final class ErasureCoder {
                 writeLong(lenBytes, length);
                 for (int i = 0; i < TOTAL; i++) pos[i].write(lenBytes);
 
-                ReedSolomon rs        = ReedSolomon.create(K, M);
-                byte[]      stripeBuf = new byte[K * SHARD_SIZE];
-                byte[][]    shards    = new byte[TOTAL][SHARD_SIZE];
-                long        remaining = length;
+                ReedSolomon rs = ReedSolomon.create(K, M);
+                byte[] stripeBuf = new byte[K * SHARD_SIZE];
+                byte[][] shards    = new byte[TOTAL][SHARD_SIZE];
+                long remaining = length;
 
                 while (remaining > 0) {
                     int want = (int) Math.min((long) stripeBuf.length, remaining);
@@ -130,7 +130,7 @@ public final class ErasureCoder {
      * @return InputStream yielding exactly the original bytes
      */
     public static InputStream reconstruct(InputStream[] shards, boolean[] present) throws IOException {
-        if (shards  == null || shards.length  != TOTAL) throw new IllegalArgumentException("shards must have length "  + TOTAL);
+        if (shards  == null || shards.length  != TOTAL) throw new IllegalArgumentException("shards must have length " + TOTAL);
         if (present == null || present.length != TOTAL) throw new IllegalArgumentException("present must have length " + TOTAL);
 
         int count = 0;
@@ -143,7 +143,7 @@ public final class ErasureCoder {
         }
 
         PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream  pis = new PipedInputStream(pos, 4 * K * SHARD_SIZE);
+        PipedInputStream pis = new PipedInputStream(pos, 4 * K * SHARD_SIZE);
 
         final boolean[] pres = Arrays.copyOf(present, TOTAL);
 
@@ -157,9 +157,9 @@ public final class ErasureCoder {
                     if (pres[i] && i != first) dis[i].readLong();
                 }
 
-                ReedSolomon rs        = ReedSolomon.create(K, M);
-                byte[][]    stripe    = new byte[TOTAL][SHARD_SIZE];
-                long        remaining = originalLength;
+                ReedSolomon rs = ReedSolomon.create(K, M);
+                byte[][] stripe = new byte[TOTAL][SHARD_SIZE];
+                long remaining = originalLength;
 
                 while (remaining > 0) {
                     for (int i = 0; i < TOTAL; i++) {
@@ -169,7 +169,7 @@ public final class ErasureCoder {
                     rs.decodeMissing(stripe, pres, 0, SHARD_SIZE);
 
                     int toWrite = (int) Math.min((long) K * SHARD_SIZE, remaining);
-                    int left    = toWrite;
+                    int left = toWrite;
                     for (int i = 0; i < K && left > 0; i++) {
                         int n = Math.min(SHARD_SIZE, left);
                         pos.write(stripe[i], 0, n);
