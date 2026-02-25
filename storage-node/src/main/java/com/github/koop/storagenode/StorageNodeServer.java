@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 
 import com.github.koop.common.messages.ChannelMessageReader;
 import com.github.koop.common.messages.MessageBuilder;
@@ -24,6 +25,8 @@ public class StorageNodeServer {
     private int port;
     private final Map<Integer, Handler> handlers;
     private final StorageNode storageNode;
+    static Logger logger = Logger.getLogger(StorageNodeServer.class.getName());
+
 
     private ServerSocketChannel serverSocketChannel;
 
@@ -54,9 +57,9 @@ public class StorageNodeServer {
         // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
-        //Maybe add some logging here about the server starting and the configuration it is using.
-        //System.out.println("Storage Node starting on port: " + port); 
-        //System.out.println("Storage directory: " + storagePath.toAbsolutePath());
+        // Log server startup and configuration
+        logger.info("Storage Node starting on port: " + port);
+        logger.info("Storage directory: " + storagePath.toAbsolutePath());
 
         // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
