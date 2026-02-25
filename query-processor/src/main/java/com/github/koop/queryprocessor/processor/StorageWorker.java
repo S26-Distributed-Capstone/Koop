@@ -1,6 +1,6 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.backblaze.erasure.ReedSolomon;
+import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.InputStreamMessageReader;
 import com.github.koop.common.messages.MessageBuilder;
 import com.github.koop.common.messages.Opcode;
@@ -8,19 +8,14 @@ import com.github.koop.common.messages.Opcode;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static com.github.koop.common.erasure.ErasureCoder.TOTAL;
 
 public final class StorageWorker {
-
-    // Erasure coding parameters
-    private static final int K = 6;
-    private static final int M = 3;
-    private static final int TOTAL = K + M;
-
-    // Stripe block size
-    private static final int SHARD_SIZE = 1 << 20; // 1MB
 
     private static final int CONNECT_TIMEOUT_MS = 3000;
 
@@ -48,99 +43,95 @@ public final class StorageWorker {
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
 
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
-        if (data == null) throw new IllegalArgumentException("data is null");
-        if (length < 0) throw new IllegalArgumentException("length < 0");
+        if (bucket    == null) throw new IllegalArgumentException("bucket is null");
+        if (key       == null) throw new IllegalArgumentException("key is null");
+        if (data      == null) throw new IllegalArgumentException("data is null");
+        if (length     < 0)    throw new IllegalArgumentException("length < 0");
 
         String storageKey = bucket + "-" + key;
 
-        int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum = routing[0];
-        int partition = routing[1];
+        int[] routing   = ErasureRouting.setForKey(storageKey);
+        int   setNum    = routing[0];
+        int   partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
-        // Stripe math
-        long stripeDataBytes = (long) K * SHARD_SIZE;
-        long numStripes = (length + stripeDataBytes - 1) / stripeDataBytes;
+        // Shard the incoming stream. Each InputStream carries an 8-byte length prefix
+        // followed by ceil(length / K*SHARD_SIZE) * SHARD_SIZE bytes of shard data.
+        InputStream[] shardStreams = ErasureCoder.shard(data, length);
 
-        // Payload we stream after header = [8 bytes originalLength] + [numStripes * SHARD_SIZE]
-        long payloadLength = 8L + numStripes * SHARD_SIZE;
+        long stripeDataBytes = (long) ErasureCoder.K * ErasureCoder.SHARD_SIZE;
+        long numStripes      = (length + stripeDataBytes - 1) / stripeDataBytes;
+        long shardPayload    = 8L + numStripes * ErasureCoder.SHARD_SIZE;
 
-        Socket[] sockets = new Socket[TOTAL];
-        DataOutputStream[] outs = new DataOutputStream[TOTAL];
-        InputStream[] ins = new InputStream[TOTAL];
+        Socket[]           sockets = new Socket[TOTAL];
+        DataOutputStream[] outs    = new DataOutputStream[TOTAL];
+        InputStream[]      ins     = new InputStream[TOTAL];
 
         try {
             // Connect and send STORE headers
-            for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
-
+            for (int i = 0; i < TOTAL; i++) {
                 Socket s = new Socket();
-                s.connect(nodes.get(shardIndex), CONNECT_TIMEOUT_MS);
+                s.connect(nodes.get(i), CONNECT_TIMEOUT_MS);
                 s.setTcpNoDelay(true);
 
-                sockets[shardIndex] = s;
-                outs[shardIndex] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                ins[shardIndex]  = new BufferedInputStream(s.getInputStream());
+                sockets[i] = s;
+                outs[i]    = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+                ins[i]     = new BufferedInputStream(s.getInputStream());
 
                 MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
                 putMsg.writeString(requestID.toString());
                 putMsg.writeInt(partition);
                 putMsg.writeString(storageKey);
-                
-                // Hack to increase the total Frame Length inside the builder 
-                // so we can stream the payload manually after the header
-                putMsg.writeLargePayload(payloadLength, (InputStream) null); 
-                putMsg.writeToOutputStream(outs[shardIndex]);
+                putMsg.writeLargePayload(shardPayload, (InputStream) null);
+                putMsg.writeToOutputStream(outs[i]);
             }
 
-            // Send original length into the payload stream (counts toward payloadLength)
-            for (int i = 0; i < TOTAL; i++) {
-                outs[i].writeLong(length);
-            }
-
-            ReedSolomon rs = ReedSolomon.create(K, M);
-
-            byte[] stripeBuf = new byte[K * SHARD_SIZE];
-            byte[][] shards = new byte[TOTAL][SHARD_SIZE];
-
-            long remaining = length;
-
-            while (remaining > 0) {
-                int want = (int) Math.min((long) stripeBuf.length, remaining);
-                readFully(data, stripeBuf, 0, want);
-                remaining -= want;
-
-                if (want < stripeBuf.length) {
-                    Arrays.fill(stripeBuf, want, stripeBuf.length, (byte) 0);
-                }
-
-                for (int i = 0; i < K; i++) {
-                    System.arraycopy(stripeBuf, i * SHARD_SIZE, shards[i], 0, SHARD_SIZE);
-                }
-
-                for (int i = K; i < TOTAL; i++) {
-                    Arrays.fill(shards[i], (byte) 0);
-                }
-
-                rs.encodeParity(shards, 0, SHARD_SIZE);
-
-                for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
-                    outs[shardIndex].write(shards[shardIndex], 0, SHARD_SIZE);
-                }
-            }
+            // IMPORTANT: all shard streams must be drained concurrently.
+            // The ErasureCodec encoder runs in one virtual thread writing to 9 pipes.
+            // If we drain shards sequentially, shard[1..8]'s pipe buffers fill up while
+            // we're still reading shard[0], causing the encoder to block → deadlock.
+            // One virtual thread per shard fixes this.
+            AtomicBoolean anyFailed = new AtomicBoolean(false);
+            CountDownLatch latch    = new CountDownLatch(TOTAL);
 
             for (int i = 0; i < TOTAL; i++) {
-                outs[i].flush();
-                sockets[i].shutdownOutput(); // end payload stream cleanly
+                final int       idx    = i;
+                final InputStream src  = shardStreams[i];
+                final DataOutputStream dst = outs[i];
+                final Socket    sock   = sockets[i];
+
+                Thread.startVirtualThread(() -> {
+                    try {
+                        byte[] buf = new byte[64 * 1024];
+                        int n;
+                        while ((n = src.read(buf)) != -1) {
+                            dst.write(buf, 0, n);
+                        }
+                        dst.flush();
+                        sock.shutdownOutput();
+                    } catch (IOException e) {
+                        anyFailed.set(true);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
             }
 
-            // Server responds with Success message
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+
+            if (anyFailed.get()) return false;
+
+            // Wait for success acknowledgements from all nodes
             for (int i = 0; i < TOTAL; i++) {
                 InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
                 if (reader.getOpcode() != Opcode.SN_PUT.getCode()) return false;
-                if (reader.readByte() != 1) return false;
+                if (reader.readByte()  != 1)                        return false;
             }
 
             return true;
@@ -154,19 +145,19 @@ public final class StorageWorker {
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
+        if (bucket    == null) throw new IllegalArgumentException("bucket is null");
+        if (key       == null) throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
 
-        int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum = routing[0];
-        int partition = routing[1];
+        int[] routing   = ErasureRouting.setForKey(storageKey);
+        int   setNum    = routing[0];
+        int   partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
         PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
+        PipedInputStream  pis = new PipedInputStream(pos, 256 * 1024);
 
         Thread.startVirtualThread(() -> {
             try (pos) {
@@ -181,44 +172,43 @@ public final class StorageWorker {
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
+        if (bucket    == null) throw new IllegalArgumentException("bucket is null");
+        if (key       == null) throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
 
-        int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum = routing[0];
-        int partition = routing[1];
+        int[] routing   = ErasureRouting.setForKey(storageKey);
+        int   setNum    = routing[0];
+        int   partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
-        Socket[] sockets = new Socket[TOTAL];
-        DataOutputStream[] outs = new DataOutputStream[TOTAL];
-        InputStream[] ins = new InputStream[TOTAL];
+        Socket[]           sockets = new Socket[TOTAL];
+        DataOutputStream[] outs    = new DataOutputStream[TOTAL];
+        InputStream[]      ins     = new InputStream[TOTAL];
 
         try {
-            for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
+            for (int i = 0; i < TOTAL; i++) {
                 Socket s = new Socket();
-                s.connect(nodes.get(shardIndex), CONNECT_TIMEOUT_MS);
+                s.connect(nodes.get(i), CONNECT_TIMEOUT_MS);
                 s.setTcpNoDelay(true);
-                sockets[shardIndex] = s;
+                sockets[i] = s;
 
-                outs[shardIndex] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                ins[shardIndex]  = new BufferedInputStream(s.getInputStream());
+                outs[i] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+                ins[i]  = new BufferedInputStream(s.getInputStream());
 
                 MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
                 delMsg.writeInt(partition);
                 delMsg.writeString(storageKey);
-                delMsg.writeToOutputStream(outs[shardIndex]);
-                outs[shardIndex].flush();
+                delMsg.writeToOutputStream(outs[i]);
+                outs[i].flush();
                 s.shutdownOutput();
             }
 
-            // Server responds with Success message
             for (int i = 0; i < TOTAL; i++) {
                 InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
                 if (reader.getOpcode() != Opcode.SN_DELETE.getCode()) return false;
-                if (reader.readByte() != 1) return false;
+                if (reader.readByte()  != 1)                           return false;
             }
             return true;
 
@@ -229,23 +219,25 @@ public final class StorageWorker {
         }
     }
 
-    private void streamReconstruct(int partition, String storageKey, List<InetSocketAddress> nodes, OutputStream out) throws IOException {
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
 
-        Socket[] sockets = new Socket[TOTAL];
-        DataInputStream[] ins = new DataInputStream[TOTAL];
-        boolean[] present = new boolean[TOTAL];
+    private void streamReconstruct(int partition, String storageKey,
+                                   List<InetSocketAddress> nodes, OutputStream out) throws IOException {
 
-        // Request shards
-        for (int shardIndex = 0; shardIndex < TOTAL; shardIndex++) {
+        Socket[]      sockets = new Socket[TOTAL];
+        InputStream[] ins     = new InputStream[TOTAL];
+        boolean[]     present = new boolean[TOTAL];
+
+        for (int i = 0; i < TOTAL; i++) {
             try {
                 Socket s = new Socket();
-                s.connect(nodes.get(shardIndex), CONNECT_TIMEOUT_MS);
+                s.connect(nodes.get(i), CONNECT_TIMEOUT_MS);
                 s.setTcpNoDelay(true);
-
-                sockets[shardIndex] = s;
+                sockets[i] = s;
 
                 DataOutputStream nodeOut = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                ins[shardIndex] = new DataInputStream(new BufferedInputStream(s.getInputStream()));
 
                 MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
                 getMsg.writeInt(partition);
@@ -254,80 +246,42 @@ public final class StorageWorker {
                 nodeOut.flush();
                 s.shutdownOutput();
 
-                InputStreamMessageReader reader = new InputStreamMessageReader(ins[shardIndex]);
-                if (reader.getOpcode() != Opcode.SN_GET.getCode()) { present[shardIndex] = false; continue; }
+                ins[i] = new BufferedInputStream(s.getInputStream());
+                InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
+                if (reader.getOpcode() != Opcode.SN_GET.getCode() || reader.readByte() == 0) {
+                    present[i] = false;
+                    continue;
+                }
 
-                int ok = reader.readByte();
-                if (ok == 0) { present[shardIndex] = false; continue; }
-
-                present[shardIndex] = true;
+                present[i] = true;
 
             } catch (IOException e) {
-                present[shardIndex] = false;
+                present[i] = false;
             }
         }
 
-        int presentCount = 0;
-        for (boolean b : present) if (b) presentCount++;
-        if (presentCount < K) throw new IOException("lost too many shards mid-stream");
+        int count = 0;
+        for (boolean b : present) if (b) count++;
+        if (count < ErasureCoder.K) throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
 
-        // Each shard begins with 8 bytes original length
-        int first = -1;
-        for (int i = 0; i < TOTAL; i++) {
-            if (present[i]) { first = i; break; }
-        }
-        long originalLength = ins[first].readLong();
-        for (int i = 0; i < TOTAL; i++) {
-            if (present[i] && i != first) ins[i].readLong();
-        }
-
-        ReedSolomon rs = ReedSolomon.create(K, M);
-
-        byte[][] shards = new byte[TOTAL][SHARD_SIZE];
-        boolean[] shardPresent = Arrays.copyOf(present, present.length);
-
-        long remaining = originalLength;
-        while (remaining > 0) {
-
-            for (int i = 0; i < TOTAL; i++) {
-                if (!shardPresent[i]) continue;
-                readFully(ins[i], shards[i], 0, SHARD_SIZE);
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = reconstructed.read(buf)) != -1) {
+                out.write(buf, 0, n);
             }
-
-            rs.decodeMissing(shards, shardPresent, 0, SHARD_SIZE);
-
-            int toWrite = (int) Math.min((long) K * SHARD_SIZE, remaining);
-
-            int left = toWrite;
-            for (int i = 0; i < K && left > 0; i++) {
-                int n = Math.min(SHARD_SIZE, left);
-                out.write(shards[i], 0, n);
-                left -= n;
-            }
-
-            remaining -= toWrite;
         }
 
         out.flush();
-
         for (Socket s : sockets) if (s != null) closeQuietly(s);
     }
 
     private List<InetSocketAddress> nodesForKey(int setNum) {
         return switch (setNum) {
-            case 1 -> set1;
-            case 2 -> set2;
+            case 1  -> set1;
+            case 2  -> set2;
             default -> set3;
         };
-    }
-
-    private static void readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
-        int n = 0;
-        while (n < len) {
-            int r = in.read(buf, off + n, len - n);
-            if (r < 0) throw new EOFException("Unexpected EOF");
-            n += r;
-        }
     }
 
     private static void closeQuietly(Socket s) {
