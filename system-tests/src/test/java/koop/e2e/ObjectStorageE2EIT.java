@@ -1,6 +1,8 @@
 package koop.e2e;
 
 import io.restassured.http.ContentType;
+
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.security.SecureRandom;
@@ -146,6 +148,45 @@ class ObjectStorageE2EIT extends BaseE2EIT {
         assertArrayEquals(payload, retrieved,
             "Any Query Processor replica should be able to serve any object");
     }
+
+    @Test
+    @Disabled("TODO: Implement concurrency load test")
+    void concurrentPutAndGet_handlesHighLoadWithoutErrors() {
+        // 1. Create an ExecutorService with a large thread pool (e.g., 100 threads).
+        // 2. Submit 100 concurrent PUT requests with random keys.
+        // 3. Wait for all PUTs to complete and assert 200/201 status codes.
+        // 4. Submit 100 concurrent GET requests for those keys.
+        // 5. Verify no socket exhaustion, thread deadlocks, or 500 errors occur.
+    }
+
+    @Test
+    @Disabled("TODO: Implement mid-stream node failure test")
+    void nodeFailure_duringLargeFilePut_handlesPartialWriteGracefully() {
+        // 1. Begin a large streaming PUT request (e.g., 50MB).
+        // 2. Halfway through the stream, use a Docker client or Toxiproxy to abruptly kill a Storage Node.
+        // 3. Verify the system either successfully finishes the PUT (using parity) 
+        //    OR cleanly fails with a 500 error, without hanging the client connection indefinitely.
+    }
+
+    @Test
+    @Disabled("TODO: Implement cluster restart persistence test")
+    void clusterRestart_persistsDataCorrectly() {
+        // 1. PUT a known payload to a unique key.
+        // 2. Programmatically stop the storage nodes via docker-compose (e.g., `docker compose stop storage-node`).
+        // 3. Start the storage nodes back up (`docker compose start storage-node`).
+        // 4. Wait for the cluster to become healthy again.
+        // 5. GET the key and assert the payload matches, proving disk persistence across restarts.
+    }
+
+    @Test
+    @Disabled("TODO: Implement network chaos/latency test")
+    void networkLatency_doesNotCauseDataCorruptionOrDeadlocks() {
+        // 1. Use Toxiproxy or Pumba to inject 2-3 seconds of latency into the network of a specific storage node.
+        // 2. Execute a standard PUT and GET.
+        // 3. Verify that socket timeouts are respected and that slow nodes don't cause the Query Processor to block forever.
+    }
+
+    //etc more tests to cover edge cases, error handling, etc.
 
     // ---------------------------------------------------------------
     // Helpers
