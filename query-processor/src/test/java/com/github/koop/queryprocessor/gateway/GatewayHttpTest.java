@@ -244,6 +244,10 @@ class GatewayHttpTest {
             // GET again — should 404
             var getResp2 = client.get("/bucket/file.mp4");
             assertEquals(404, getResp2.code());
+            putResp.close();
+            getResp.close();
+            delResp.close();
+            getResp2.close();
         });
     }
 }
