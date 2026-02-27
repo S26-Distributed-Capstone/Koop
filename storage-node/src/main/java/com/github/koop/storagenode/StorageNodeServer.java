@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -27,6 +28,8 @@ public class StorageNodeServer {
     private int port;
     private final Map<Integer, Handler> handlers;
     private final StorageNode storageNode;
+    static Logger logger = Logger.getLogger(StorageNodeServer.class.getName());
+
 
     private ServerSocketChannel serverSocketChannel;
     
@@ -61,7 +64,9 @@ public class StorageNodeServer {
         // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
+        // Log server startup and configuration
         logger.info("Storage Node starting on port: " + port);
+        logger.info("Storage directory: " + storagePath.toAbsolutePath());
 
         // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
