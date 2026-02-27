@@ -72,7 +72,7 @@ public final class FakeStorageNodeServer implements Closeable {
 
         int opcode = reader.getOpcode();
 
-        if (enabled) {
+        if (!enabled) {
             // simulate node failure but keep protocol correct
             Opcode op = getOpcodeByCode(opcode);
             if (op == null) {

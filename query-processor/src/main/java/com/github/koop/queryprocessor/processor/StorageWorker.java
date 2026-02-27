@@ -114,8 +114,7 @@ public final class StorageWorker {
                     logger.debug("Closed connection to node {} for shard {}", nodes.get(index), index);
                 } catch (IOException e) {
                     logger.debug("IOException for shard {}: {}", index, e.getMessage());
-                    //ignore for now
-                    //anyFailed.set(true);
+                    anyFailed.set(true);
                     //Thread.currentThread().interrupt();
                 } finally {
                     logger.debug("Shard {} done, counting down latch", index);
