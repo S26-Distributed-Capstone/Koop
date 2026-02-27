@@ -89,8 +89,8 @@ public final class FakeStorageNodeServer implements Closeable {
             int partition = reader.readInt();
             String key = reader.readString();
 
-            // payload is rest of stream until EOF
-            byte[] payload = readAllToEof(in);
+            // payload is rest of stream
+            byte[] payload = in.readNBytes((int)reader.getRemainingLength());
 
             store.put(mapKey(partition, key), payload);
 
