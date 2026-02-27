@@ -13,8 +13,10 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.logging.log4j.LogManager;
@@ -85,13 +87,12 @@ public final class StorageWorker {
         // If we drain shards sequentially, shard[1..8]'s pipe buffers fill up while
         // we're still reading shard[0], causing the encoder to block → deadlock.
         // One virtual thread per shard fixes this.
-        AtomicBoolean anyFailed = new AtomicBoolean(false);
-        CountDownLatch latch = new CountDownLatch(TOTAL);
+        List<Callable<Boolean>> tasks = new LinkedList<>();
 
         // Connect and send STORE headers
         for (int i = 0; i < TOTAL; i++) {
             final int index = i;
-            executor.execute(() -> {
+            tasks.add(() -> {
                 try {
                     Socket s = new Socket();
                     s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
@@ -109,36 +110,46 @@ public final class StorageWorker {
                     out.flush();
                     logger.trace("Flushed PUT header for shard {} to node {}", index, nodes.get(index));
                     var reader = new InputStreamMessageReader(in);
-                    if (reader.getOpcode() != Opcode.SN_PUT.getCode()){
-                        logger.trace("Unexpected opcode {} in response for shard {} from node {}", reader.getOpcode(), index, nodes.get(index));
-                        anyFailed.set(true);
-                    }
-                    else if (reader.readByte() != 1){
+                    var opcode = reader.getOpcode();
+                    var success = reader.readByte();
+                    if (opcode != Opcode.SN_PUT.getCode()) {
+                        logger.trace("Unexpected opcode {} in response for shard {} from node {}", reader.getOpcode(),
+                                index, nodes.get(index));
+                        return false;
+                    } else if (success != 1) {
                         logger.trace("PUT failed for shard {} from node {}", index, nodes.get(index));
-                        anyFailed.set(true);
+                        return false;
                     }
                     logger.trace("Received response for shard {} from node {}", index, nodes.get(index));
                     closeQuietly(s);
                     logger.trace("Closed connection to node {} for shard {}", nodes.get(index), index);
                 } catch (IOException e) {
                     logger.trace("IOException for shard {}: {}", index, e.getMessage());
-                    anyFailed.set(true);
-                    //Thread.currentThread().interrupt();
+                    return false;
+                    // Thread.currentThread().interrupt();
                 } finally {
                     logger.trace("Shard {} done, counting down latch", index);
-                    latch.countDown();
                 }
+                return true;
             });
         }
+        long numWritten = -1;
         try {
             logger.trace("Waiting for all shard uploads to complete");
-            latch.await();
+            numWritten = executor.invokeAll(tasks).stream().map(t -> {
+                try {
+                    return t.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    logger.warn("Exception in shard upload task {}", e.getMessage());
+                    return false;
+                }
+            }).filter(it -> it).count();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
         }
-        logger.trace("All shard uploads completed, anyFailed={}", anyFailed.get());
-        return !anyFailed.get();
+        logger.trace("All shard uploads completed, wrote {} shards successfully", numWritten);
+        return numWritten >= ErasureCoder.K;
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
@@ -193,31 +204,31 @@ public final class StorageWorker {
         for (int i = 0; i < TOTAL; i++) {
             final int index = i;
             Callable<Boolean> task = () -> {
-            Socket s = new Socket();
-            try{
-                s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
-                s.setTcpNoDelay(true);
-                MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
-                delMsg.writeInt(partition);
-                delMsg.writeString(storageKey);
-                var out = new BufferedOutputStream(s.getOutputStream());
-                delMsg.writeToOutputStream(out);
-                out.flush();
-                InputStreamMessageReader reader = new InputStreamMessageReader(s.getInputStream());
-                var opcode = reader.getOpcode();
-                var successByte = reader.readByte();
-                if (opcode != Opcode.SN_DELETE.getCode())
+                Socket s = new Socket();
+                try {
+                    s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
+                    s.setTcpNoDelay(true);
+                    MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
+                    delMsg.writeInt(partition);
+                    delMsg.writeString(storageKey);
+                    var out = new BufferedOutputStream(s.getOutputStream());
+                    delMsg.writeToOutputStream(out);
+                    out.flush();
+                    InputStreamMessageReader reader = new InputStreamMessageReader(s.getInputStream());
+                    var opcode = reader.getOpcode();
+                    var successByte = reader.readByte();
+                    if (opcode != Opcode.SN_DELETE.getCode())
+                        return false;
+                    if (successByte != 1)
+                        return false;
+                } catch (IOException e) {
+                    logger.warn("IOException in delete task for node {}: {}", nodes.get(index), e.getMessage());
                     return false;
-                if (successByte != 1)
-                    return false;
-            }catch(IOException e){
-                logger.warn("IOException in delete task for node {}: {}", nodes.get(index), e.getMessage());
-                return false;
-            }finally{
-                closeQuietly(s);
-            }
-            return true;
-        };
+                } finally {
+                    closeQuietly(s);
+                }
+                return true;
+            };
             tasks.add(task);
         }
         boolean success;
