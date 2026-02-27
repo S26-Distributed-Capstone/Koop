@@ -11,6 +11,8 @@ import java.net.Socket;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.logging.log4j.LogManager;
@@ -28,10 +30,13 @@ public final class StorageWorker {
 
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
 
+    private final ExecutorService executor;
+
     public StorageWorker() {
         set1 = List.of();
         set2 = List.of();
         set3 = List.of();
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
@@ -41,6 +46,7 @@ public final class StorageWorker {
         this.set1 = set1;
         this.set2 = set2;
         this.set3 = set3;
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
@@ -83,12 +89,12 @@ public final class StorageWorker {
         // Connect and send STORE headers
         for (int i = 0; i < TOTAL; i++) {
             final int index = i;
-            Thread.startVirtualThread(() -> {
+            executor.execute(() -> {
                 try {
                     Socket s = new Socket();
                     s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
                     s.setTcpNoDelay(true);
-                    logger.debug("Connected to storage node {} for shard {}", nodes.get(index), index);
+                    logger.trace("Connected to storage node {} for shard {}", nodes.get(index), index);
                     var out = s.getOutputStream();
                     var in = s.getInputStream();
                     MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
@@ -96,40 +102,40 @@ public final class StorageWorker {
                     putMsg.writeInt(partition);
                     putMsg.writeString(storageKey);
                     putMsg.writeLargePayload(shardPayload, shardStreams[index]);
-                    logger.debug("Sent PUT header for shard {} to node {}", index, nodes.get(index));
+                    logger.trace("Sent PUT header for shard {} to node {}", index, nodes.get(index));
                     putMsg.writeToOutputStream(out);
                     out.flush();
-                    logger.debug("Flushed PUT header for shard {} to node {}", index, nodes.get(index));
+                    logger.trace("Flushed PUT header for shard {} to node {}", index, nodes.get(index));
                     var reader = new InputStreamMessageReader(in);
                     if (reader.getOpcode() != Opcode.SN_PUT.getCode()){
-                        logger.debug("Unexpected opcode {} in response for shard {} from node {}", reader.getOpcode(), index, nodes.get(index));
+                        logger.trace("Unexpected opcode {} in response for shard {} from node {}", reader.getOpcode(), index, nodes.get(index));
                         anyFailed.set(true);
                     }
                     else if (reader.readByte() != 1){
-                        logger.debug("PUT failed for shard {} from node {}", index, nodes.get(index));
+                        logger.trace("PUT failed for shard {} from node {}", index, nodes.get(index));
                         anyFailed.set(true);
                     }
-                    logger.debug("Received response for shard {} from node {}", index, nodes.get(index));
+                    logger.trace("Received response for shard {} from node {}", index, nodes.get(index));
                     closeQuietly(s);
-                    logger.debug("Closed connection to node {} for shard {}", nodes.get(index), index);
+                    logger.trace("Closed connection to node {} for shard {}", nodes.get(index), index);
                 } catch (IOException e) {
-                    logger.debug("IOException for shard {}: {}", index, e.getMessage());
+                    logger.trace("IOException for shard {}: {}", index, e.getMessage());
                     anyFailed.set(true);
                     //Thread.currentThread().interrupt();
                 } finally {
-                    logger.debug("Shard {} done, counting down latch", index);
+                    logger.trace("Shard {} done, counting down latch", index);
                     latch.countDown();
                 }
             });
         }
         try {
-            logger.debug("Waiting for all shard uploads to complete");
+            logger.trace("Waiting for all shard uploads to complete");
             latch.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
         }
-        logger.debug("All shard uploads completed, anyFailed={}", anyFailed.get());
+        logger.trace("All shard uploads completed, anyFailed={}", anyFailed.get());
         return !anyFailed.get();
     }
 
@@ -152,7 +158,7 @@ public final class StorageWorker {
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
-        Thread.startVirtualThread(() -> {
+        executor.execute(() -> {
             try (pos) {
                 streamReconstruct(partition, storageKey, nodes, pos);
             } catch (Exception e) {
@@ -222,6 +228,10 @@ public final class StorageWorker {
         }
     }
 
+    public void shutdown() {
+        executor.shutdownNow();
+    }
+
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
@@ -251,7 +261,9 @@ public final class StorageWorker {
 
                 ins[i] = new BufferedInputStream(s.getInputStream());
                 InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
-                if (reader.getOpcode() != Opcode.SN_GET.getCode() || reader.readByte() == 0) {
+                var opcode = reader.getOpcode();
+                var successByte = reader.readByte();
+                if (opcode != Opcode.SN_GET.getCode() || successByte == 0) {
                     present[i] = false;
                     continue;
                 }
