@@ -11,6 +11,9 @@ import java.net.Socket;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /**
  * Fake storage node server that matches the REAL StorageNodeServer wire protocol using common-lib messages
  */
@@ -21,6 +24,8 @@ public final class FakeStorageNodeServer implements Closeable {
 
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
     private volatile boolean enabled = true;
+
+    Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
 
     public FakeStorageNodeServer() throws IOException {
         this.server = new ServerSocket(0);
@@ -70,7 +75,7 @@ public final class FakeStorageNodeServer implements Closeable {
         if (!enabled) {
             // simulate node failure but keep protocol correct
             Opcode op = getOpcodeByCode(opcode);
-            if (op != null) {
+            if (op == null) {
                 MessageBuilder err = new MessageBuilder(op);
                 err.writeByte((byte) 0);
                 err.writeToOutputStream(out);
@@ -84,8 +89,8 @@ public final class FakeStorageNodeServer implements Closeable {
             int partition = reader.readInt();
             String key = reader.readString();
 
-            // payload is rest of stream until EOF
-            byte[] payload = readAllToEof(in);
+            // payload is rest of stream
+            byte[] payload = in.readNBytes((int)reader.getRemainingLength());
 
             store.put(mapKey(partition, key), payload);
 
