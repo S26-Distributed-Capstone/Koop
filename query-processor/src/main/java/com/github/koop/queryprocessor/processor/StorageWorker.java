@@ -13,6 +13,9 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import static com.github.koop.common.erasure.ErasureCoder.TOTAL;
 
 public final class StorageWorker {
@@ -22,6 +25,8 @@ public final class StorageWorker {
     private final List<InetSocketAddress> set1;
     private final List<InetSocketAddress> set2;
     private final List<InetSocketAddress> set3;
+
+    private static final Logger logger = LogManager.getLogger(StorageWorker.class);
 
     public StorageWorker() {
         set1 = List.of();
@@ -40,17 +45,22 @@ public final class StorageWorker {
 
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
 
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
-        if (data == null) throw new IllegalArgumentException("data is null");
-        if (length < 0) throw new IllegalArgumentException("length < 0");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (data == null)
+            throw new IllegalArgumentException("data is null");
+        if (length < 0)
+            throw new IllegalArgumentException("length < 0");
 
         String storageKey = bucket + "-" + key;
 
-        int[] routing   = ErasureRouting.setForKey(storageKey);
-        int   setNum    = routing[0];
-        int   partition = routing[1];
+        int[] routing = ErasureRouting.setForKey(storageKey);
+        int setNum = routing[0];
+        int partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
@@ -62,89 +72,75 @@ public final class StorageWorker {
         long numStripes = (length + stripeDataBytes - 1) / stripeDataBytes;
         long shardPayload = 8L + numStripes * ErasureCoder.SHARD_SIZE;
 
-        Socket[] sockets = new Socket[TOTAL];
-        DataOutputStream[] outs = new DataOutputStream[TOTAL];
-        InputStream[] ins = new InputStream[TOTAL];
+        // IMPORTANT: all shard streams must be drained concurrently.
+        // The ErasureCodec encoder runs in one virtual thread writing to 9 pipes.
+        // If we drain shards sequentially, shard[1..8]'s pipe buffers fill up while
+        // we're still reading shard[0], causing the encoder to block → deadlock.
+        // One virtual thread per shard fixes this.
+        AtomicBoolean anyFailed = new AtomicBoolean(false);
+        CountDownLatch latch = new CountDownLatch(TOTAL);
 
-        try {
-            // Connect and send STORE headers
-            for (int i = 0; i < TOTAL; i++) {
-                Socket s = new Socket();
-                s.connect(nodes.get(i), CONNECT_TIMEOUT_MS);
-                s.setTcpNoDelay(true);
-
-                sockets[i] = s;
-                outs[i] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                ins[i] = new BufferedInputStream(s.getInputStream());
-
-                MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
-                putMsg.writeString(requestID.toString());
-                putMsg.writeInt(partition);
-                putMsg.writeString(storageKey);
-                putMsg.writeLargePayload(shardPayload, (InputStream) null);
-                putMsg.writeToOutputStream(outs[i]);
-            }
-
-            // IMPORTANT: all shard streams must be drained concurrently.
-            // The ErasureCodec encoder runs in one virtual thread writing to 9 pipes.
-            // If we drain shards sequentially, shard[1..8]'s pipe buffers fill up while
-            // we're still reading shard[0], causing the encoder to block → deadlock.
-            // One virtual thread per shard fixes this.
-            AtomicBoolean anyFailed = new AtomicBoolean(false);
-            CountDownLatch latch = new CountDownLatch(TOTAL);
-
-            for (int i = 0; i < TOTAL; i++) {
-                final int idx = i;
-                final InputStream src = shardStreams[i];
-                final DataOutputStream dst = outs[i];
-                final Socket sock = sockets[i];
-
-                Thread.startVirtualThread(() -> {
-                    try {
-                        byte[] buf = new byte[64 * 1024];
-                        int n;
-                        while ((n = src.read(buf)) != -1) {
-                            dst.write(buf, 0, n);
-                        }
-                        dst.flush();
-                        sock.shutdownOutput();
-                    } catch (IOException e) {
+        // Connect and send STORE headers
+        for (int i = 0; i < TOTAL; i++) {
+            final int index = i;
+            Thread.startVirtualThread(() -> {
+                try {
+                    Socket s = new Socket();
+                    s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
+                    s.setTcpNoDelay(true);
+                    logger.debug("Connected to storage node {} for shard {}", nodes.get(index), index);
+                    var out = s.getOutputStream();
+                    var in = s.getInputStream();
+                    MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
+                    putMsg.writeString(requestID.toString());
+                    putMsg.writeInt(partition);
+                    putMsg.writeString(storageKey);
+                    putMsg.writeLargePayload(shardPayload, shardStreams[index]);
+                    logger.debug("Sent PUT header for shard {} to node {}", index, nodes.get(index));
+                    putMsg.writeToOutputStream(out);
+                    out.flush();
+                    logger.debug("Flushed PUT header for shard {} to node {}", index, nodes.get(index));
+                    var reader = new InputStreamMessageReader(in);
+                    if (reader.getOpcode() != Opcode.SN_PUT.getCode()){
+                        logger.debug("Unexpected opcode {} in response for shard {} from node {}", reader.getOpcode(), index, nodes.get(index));
                         anyFailed.set(true);
-                    } finally {
-                        latch.countDown();
                     }
-                });
-            }
-
-            try {
-                latch.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-
-            if (anyFailed.get()) return false;
-
-            // Wait for success acknowledgements from all nodes
-            for (int i = 0; i < TOTAL; i++) {
-                InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
-                if (reader.getOpcode() != Opcode.SN_PUT.getCode()) return false;
-                if (reader.readByte() != 1) return false;
-            }
-
-            return true;
-
-        } catch (IOException e) {
-            return false;
-        } finally {
-            for (Socket s : sockets) if (s != null) closeQuietly(s);
+                    else if (reader.readByte() != 1){
+                        logger.debug("PUT failed for shard {} from node {}", index, nodes.get(index));
+                        anyFailed.set(true);
+                    }
+                    logger.debug("Received response for shard {} from node {}", index, nodes.get(index));
+                    closeQuietly(s);
+                    logger.debug("Closed connection to node {} for shard {}", nodes.get(index), index);
+                } catch (IOException e) {
+                    logger.debug("IOException for shard {}: {}", index, e.getMessage());
+                    //ignore for now
+                    //anyFailed.set(true);
+                    //Thread.currentThread().interrupt();
+                } finally {
+                    logger.debug("Shard {} done, counting down latch", index);
+                    latch.countDown();
+                }
+            });
         }
+        try {
+            logger.debug("Waiting for all shard uploads to complete");
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        logger.debug("All shard uploads completed, anyFailed={}", anyFailed.get());
+        return !anyFailed.get();
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
 
@@ -155,13 +151,16 @@ public final class StorageWorker {
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
         PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream  pis = new PipedInputStream(pos, 256 * 1024);
+        PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
         Thread.startVirtualThread(() -> {
             try (pos) {
                 streamReconstruct(partition, storageKey, nodes, pos);
             } catch (Exception e) {
-                try { pos.close(); } catch (IOException ignored) {}
+                try {
+                    pos.close();
+                } catch (IOException ignored) {
+                }
             }
         });
 
@@ -169,9 +168,12 @@ public final class StorageWorker {
     }
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
 
@@ -205,15 +207,19 @@ public final class StorageWorker {
 
             for (int i = 0; i < TOTAL; i++) {
                 InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
-                if (reader.getOpcode() != Opcode.SN_DELETE.getCode()) return false;
-                if (reader.readByte() != 1) return false;
+                if (reader.getOpcode() != Opcode.SN_DELETE.getCode())
+                    return false;
+                if (reader.readByte() != 1)
+                    return false;
             }
             return true;
 
         } catch (IOException e) {
             return false;
         } finally {
-            for (Socket s : sockets) if (s != null) closeQuietly(s);
+            for (Socket s : sockets)
+                if (s != null)
+                    closeQuietly(s);
         }
     }
 
@@ -221,7 +227,8 @@ public final class StorageWorker {
     // Private helpers
     // -------------------------------------------------------------------------
 
-    private void streamReconstruct(int partition, String storageKey, List<InetSocketAddress> nodes, OutputStream out) throws IOException {
+    private void streamReconstruct(int partition, String storageKey, List<InetSocketAddress> nodes, OutputStream out)
+            throws IOException {
 
         Socket[] sockets = new Socket[TOTAL];
         InputStream[] ins = new InputStream[TOTAL];
@@ -258,8 +265,11 @@ public final class StorageWorker {
         }
 
         int count = 0;
-        for (boolean b : present) if (b) count++;
-        if (count < ErasureCoder.K) throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
+        for (boolean b : present)
+            if (b)
+                count++;
+        if (count < ErasureCoder.K)
+            throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
 
         try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present)) {
             byte[] buf = new byte[64 * 1024];
@@ -270,7 +280,9 @@ public final class StorageWorker {
         }
 
         out.flush();
-        for (Socket s : sockets) if (s != null) closeQuietly(s);
+        for (Socket s : sockets)
+            if (s != null)
+                closeQuietly(s);
     }
 
     private List<InetSocketAddress> nodesForKey(int setNum) {
@@ -282,6 +294,9 @@ public final class StorageWorker {
     }
 
     private static void closeQuietly(Socket s) {
-        try { s.close(); } catch (IOException ignored) {}
+        try {
+            s.close();
+        } catch (IOException ignored) {
+        }
     }
 }

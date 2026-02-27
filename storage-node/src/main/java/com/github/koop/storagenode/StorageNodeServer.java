@@ -14,6 +14,9 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import com.github.koop.common.messages.ChannelMessageReader;
 import com.github.koop.common.messages.MessageBuilder;
 import com.github.koop.common.messages.MessageReader;
@@ -26,6 +29,8 @@ public class StorageNodeServer {
     private final StorageNode storageNode;
 
     private ServerSocketChannel serverSocketChannel;
+    
+    private static Logger logger = LogManager.getLogger(StorageNodeServer.class);
 
     public StorageNodeServer(int port, Path dir) {
         this.port = port;
@@ -43,23 +48,24 @@ public class StorageNodeServer {
         int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
         Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
 
+        logger.info("Starting StorageNodeServer with port={} and storagePath={}", port, storagePath);
+
         // 3. Ensure the storage directory exists
         try {
             java.nio.file.Files.createDirectories(storagePath);
         } catch (IOException e) {
-            System.err.println("Failed to create storage directory: " + storagePath);
+            logger.error("Failed to create storage directory: " + storagePath);
             System.exit(1);
         }
 
         // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
-        System.out.println("Storage Node starting on port: " + port);
-        System.out.println("Storage directory: " + storagePath.toAbsolutePath());
+        logger.info("Storage Node starting on port: " + port);
 
         // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("Shutting down server...");
+            logger.info("Shutting down server...");
             server.stop();
         }));
 
@@ -78,12 +84,14 @@ public class StorageNodeServer {
         var reqId = messageReader.readString();
         var partition = messageReader.readInt();
         var key = messageReader.readString();
+        logger.debug("Handling PUT request: reqId={}, partition={}, key={}", reqId, partition, key);
 
         var messageWriter = new MessageBuilder(Opcode.SN_PUT);
         long payloadLength = messageReader.getRemainingLength();
-
+        logger.debug("Storing data of length {} for key {} in partition {}", payloadLength, key, partition);
         this.storageNode.store(partition, reqId, key, socketChannel, payloadLength);
         //write success
+        logger.debug("Writing success for reqId={}",reqId);
         messageWriter.writeByte((byte)1);
         messageWriter.writeToChannel(socketChannel);
     }
@@ -143,6 +151,7 @@ public class StorageNodeServer {
                             var length = messageReader.getRemainingLength();
                             if (length <= 0) break;
                             var opcode = messageReader.getOpcode();
+                            logger.debug("Received opcode {} with payload length {} from {}", opcode, length, clientChannel.getRemoteAddress());
                             // 3. Dispatch
                             var handler = this.handlers.get(opcode);
                             if (handler != null) {
