@@ -8,8 +8,10 @@ import com.github.koop.common.messages.Opcode;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -187,45 +189,53 @@ public final class StorageWorker {
         int partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
-
-        Socket[] sockets = new Socket[TOTAL];
-        DataOutputStream[] outs = new DataOutputStream[TOTAL];
-        InputStream[] ins = new InputStream[TOTAL];
-
-        try {
-            for (int i = 0; i < TOTAL; i++) {
-                Socket s = new Socket();
-                s.connect(nodes.get(i), CONNECT_TIMEOUT_MS);
+        List<Callable<Boolean>> tasks = new LinkedList<>();
+        for (int i = 0; i < TOTAL; i++) {
+            final int index = i;
+            Callable<Boolean> task = () -> {
+            Socket s = new Socket();
+            try{
+                s.connect(nodes.get(index), CONNECT_TIMEOUT_MS);
                 s.setTcpNoDelay(true);
-                sockets[i] = s;
-
-                outs[i] = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                ins[i] = new BufferedInputStream(s.getInputStream());
-
                 MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
                 delMsg.writeInt(partition);
                 delMsg.writeString(storageKey);
-                delMsg.writeToOutputStream(outs[i]);
-                outs[i].flush();
-                s.shutdownOutput();
-            }
-
-            for (int i = 0; i < TOTAL; i++) {
-                InputStreamMessageReader reader = new InputStreamMessageReader(ins[i]);
-                if (reader.getOpcode() != Opcode.SN_DELETE.getCode())
+                var out = new BufferedOutputStream(s.getOutputStream());
+                delMsg.writeToOutputStream(out);
+                out.flush();
+                InputStreamMessageReader reader = new InputStreamMessageReader(s.getInputStream());
+                var opcode = reader.getOpcode();
+                var successByte = reader.readByte();
+                if (opcode != Opcode.SN_DELETE.getCode())
                     return false;
-                if (reader.readByte() != 1)
+                if (successByte != 1)
                     return false;
+            }catch(IOException e){
+                logger.warn("IOException in delete task for node {}: {}", nodes.get(index), e.getMessage());
+                return false;
+            }finally{
+                closeQuietly(s);
             }
             return true;
-
-        } catch (IOException e) {
-            return false;
-        } finally {
-            for (Socket s : sockets)
-                if (s != null)
-                    closeQuietly(s);
+        };
+            tasks.add(task);
         }
+        boolean success;
+        try {
+            success = executor.invokeAll(tasks).stream().allMatch(future -> {
+                try {
+                    return future.get();
+                } catch (Exception e) {
+                    logger.warn("Exception in delete task: {}", e.getMessage());
+                    return false;
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("Delete operation interrupted");
+            return false;
+        }
+        return success;
     }
 
     public void shutdown() {
