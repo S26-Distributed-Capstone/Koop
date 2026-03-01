@@ -1,4 +1,4 @@
-package com.github.koop.common;
+package com.github.koop.common.metadata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.etcd.jetcd.ByteSequence;

@@ -1,4 +1,4 @@
-package com.github.koop.common;
+package com.github.koop.common.metadata;
 
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
