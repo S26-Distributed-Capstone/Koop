@@ -1,7 +1,8 @@
 package com.github.koop.common.metadata;
 
+import java.util.function.Consumer;
+
 public interface Fetcher {
-    void start(ChangeListener<Object> onChange);
-    <T> T fetchCurrent(Class<T> clazz);
+    void start(Consumer<Object> onChange);
     void close();
 }

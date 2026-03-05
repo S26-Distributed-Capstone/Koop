@@ -2,32 +2,19 @@ package com.github.koop.common.metadata;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 public class MemoryFetcher implements Fetcher {
 
     private final Map<Class<?>, Object> store = new ConcurrentHashMap<>();
-    private ChangeListener<Object> listener;
+    private Consumer<Object> listener;
 
-    private MemoryFetcher(Object initial) {
-        if (initial != null) {
-            this.store.put(initial.getClass(), initial);
-        }
-    }
-
-    public static MemoryFetcher start(Object initial, ChangeListener<Object> onChange) {
-        MemoryFetcher fetcher = new MemoryFetcher(initial);
-        fetcher.start(onChange);
-        return fetcher;
+    public MemoryFetcher() {
     }
 
     @Override
-    public void start(ChangeListener<Object> onChange) {
-        this.listener = (ChangeListener<Object>) onChange;
-    }
-
-    @Override
-    public <T> T fetchCurrent(Class<T> clazz) {
-        return clazz.cast(store.get(clazz));
+    public void start(Consumer<Object> onChange) {
+        this.listener = onChange;
     }
 
     @Override
@@ -37,9 +24,9 @@ public class MemoryFetcher implements Fetcher {
 
     public void update(Object newValue) {
         if (newValue != null) {
-            var prev = this.store.put(newValue.getClass(), newValue);
+            this.store.put(newValue.getClass(), newValue);
             if (this.listener != null) {
-                this.listener.onChange(prev, newValue);
+                this.listener.accept(newValue);
             }
         }
     }

@@ -58,7 +58,7 @@ class MetadataClientTest {
             // Initialize app client with the test container endpoint
             Client appClient = Client.builder().endpoints(endpoint).build();
             
-            try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
+            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
                 metadataClient.start();
 
                 // 1. Verify Initial Fetch for both configurations
@@ -131,7 +131,7 @@ class MetadataClientTest {
             ).get();
 
             Client appClient = Client.builder().endpoints(endpoint).build();
-            try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
+            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
                 metadataClient.start();
 
                 final boolean[] listenerFired = {false};
@@ -193,7 +193,7 @@ class MetadataClientTest {
             ).get();
 
             Client appClient = Client.builder().endpoints(endpoint).build();
-            try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
+            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
                 metadataClient.start();
 
                 final boolean[] listenerFired = {false};
@@ -255,7 +255,7 @@ class MetadataClientTest {
             ).get();
 
             Client appClient = Client.builder().endpoints(endpoint).build();
-            try (MetadataClient metadataClient = new MetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
+            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
                 metadataClient.start();
 
                 final boolean[] replicaListenerFired = {false};

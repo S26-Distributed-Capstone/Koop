@@ -2,8 +2,8 @@ package com.github.koop.common.metadata;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -18,30 +18,28 @@ import io.etcd.jetcd.Client;
 public class EtcdFetcher implements Fetcher {
 
     private final Map<Class<? extends Object>, ByteSequence> metadataKeyMap;
-    private final Map<Class<? extends Object>, Object> currentMetadataCache;
     private final Client etcdClient;
     private final ObjectMapper objectMapper;
     private final Logger logger = LogManager.getLogger(EtcdFetcher.class);
-    private ChangeListener<Object> listener;
+    private Consumer<Object> listener;
 
-    private EtcdFetcher(String etcdEndpoint, Map<Class<? extends Object>, String> metadataKeyMap) {
+    public EtcdFetcher(String etcdEndpoint, Map<Class<? extends Object>, String> metadataKeyMap) {
+        if(etcdEndpoint == null || etcdEndpoint.isEmpty()){
+            throw new IllegalArgumentException("ETCD endpoint must be provided");
+        }
         this.metadataKeyMap = metadataKeyMap.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> ByteSequence.from(e.getValue(), StandardCharsets.UTF_8)));
-        this.currentMetadataCache = new ConcurrentHashMap<>();
         this.etcdClient = Client.builder().endpoints(etcdEndpoint).build();
         this.objectMapper = new ObjectMapper();
     }
 
-    public static EtcdFetcher start(String etcdEndpoint, Map<Class<? extends Object>, String> metadataKeyMap,
-            ChangeListener<Object> onChange) {
-        EtcdFetcher fetcher = new EtcdFetcher(etcdEndpoint, metadataKeyMap);
-        fetcher.start(onChange);
-        return fetcher;
+    public EtcdFetcher(Map<Class<? extends Object>, String> metadataKeyMap) {
+        this(System.getenv("ETCD_URL"), metadataKeyMap);
     }
 
     @Override
-    public void start(ChangeListener<Object> onChange) {
+    public void start(Consumer<Object> onChange) {
         this.listener = onChange;
         fetchInitialMetadata();
         setupWatchers();
@@ -56,22 +54,19 @@ public class EtcdFetcher implements Fetcher {
                 @Override
                 public void onNext(io.etcd.jetcd.watch.WatchResponse response) {
                     for (io.etcd.jetcd.watch.WatchEvent event : response.getEvents()) {
-                        Object prev = currentMetadataCache.get(clazz);
                         if (event.getEventType() == io.etcd.jetcd.watch.WatchEvent.EventType.PUT) {
                             try {
                                 String valueStr = event.getKeyValue().getValue().toString(StandardCharsets.UTF_8);
                                 Object valueObj = objectMapper.readValue(valueStr, clazz);
-                                currentMetadataCache.put(clazz, valueObj);
                                 if (listener != null) {
-                                    listener.onChange(prev, valueObj);
+                                    listener.accept(valueObj);
                                 }
                             } catch (JsonProcessingException e) {
                                 logger.error("Failed to parse metadata for key: " + key.toString(), e);
                             }
                         } else if (event.getEventType() == io.etcd.jetcd.watch.WatchEvent.EventType.DELETE) {
-                            currentMetadataCache.remove(clazz);
                             if (listener != null) {
-                                listener.onChange(prev, null);
+                                listener.accept(null);
                             }
                         }
                     }
@@ -102,9 +97,8 @@ public class EtcdFetcher implements Fetcher {
                 var valueStr = kvs.get(0).getValue().toString(StandardCharsets.UTF_8);
                 Object valueObj = objectMapper.readValue(valueStr, clazz);
 
-                Object prev = currentMetadataCache.put(clazz, valueObj);
-                if (listener != null && prev != valueObj) {
-                    listener.onChange(prev, valueObj);
+                if (listener != null) {
+                    listener.accept(valueObj);
                 }
             }
         } catch (InterruptedException e) {
@@ -114,11 +108,6 @@ public class EtcdFetcher implements Fetcher {
         } catch (JsonProcessingException e) {
             logger.error("Failed to parse metadata for key: " + key.toString(), e);
         }
-    }
-
-    @Override
-    public <T> T fetchCurrent(Class<T> clazz) {
-        return clazz.cast(currentMetadataCache.get(clazz));
     }
 
     @Override
