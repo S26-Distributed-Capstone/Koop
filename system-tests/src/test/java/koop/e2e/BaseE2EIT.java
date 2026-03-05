@@ -13,8 +13,7 @@ public abstract class BaseE2EIT {
 
     @BeforeAll
     static void ensureClusterRunning() {
-        // Referencing KoopCluster triggers its static initializer,
-        // which starts docker-compose if not already started.
-        RestAssured.baseURI = KoopCluster.QP_BASE_URL;
+        KoopCluster.start(); // explicit call — no reliance on static initializers
+        RestAssured.baseURI = KoopCluster.baseUrl(); // method call, not constant
     }
 }

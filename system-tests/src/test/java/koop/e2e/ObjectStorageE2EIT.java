@@ -29,10 +29,10 @@ class ObjectStorageE2EIT extends BaseE2EIT {
         when().get("/health").then().statusCode(200);
 
         // Also verify the other two replicas are up
-        given().baseUri(KoopCluster.QP_BASE_URL_2)
+        given().baseUri(KoopCluster.baseUrl2())
             .when().get("/health").then().statusCode(200);
 
-        given().baseUri(KoopCluster.QP_BASE_URL_3)
+        given().baseUri(KoopCluster.baseUrl3())
             .when().get("/health").then().statusCode(200);
     }
 
@@ -131,7 +131,7 @@ class ObjectStorageE2EIT extends BaseE2EIT {
 
         // Write via QP replica 1
         given()
-            .baseUri(KoopCluster.QP_BASE_URL)
+            .baseUri(KoopCluster.baseUrl())
             .body(payload)
             .put("/videos/" + key)
         .then()
@@ -139,7 +139,7 @@ class ObjectStorageE2EIT extends BaseE2EIT {
 
         // Read back from QP replica 2 — tests that routing is consistent
         byte[] retrieved = given()
-            .baseUri(KoopCluster.QP_BASE_URL_2)
+            .baseUri(KoopCluster.baseUrl2())
             .when().get("/videos/" + key)
         .then()
             .statusCode(200)
