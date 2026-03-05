@@ -1,44 +1,114 @@
 services:
-  # --- 6 Storage Nodes ---
-  storage-node:
+  
+  # --- Storage Nodes (9 total: K=6 data + M=3 parity shards per Reed-Solomon stripe) ---
+  # NOTE: 9 hardcoded nodes is a TEMPORARY constraint imposed by StorageWorker requiring
+  # exactly K+M=9 addresses at construction time. Once issue #46 (MetadataClient in QP)
+  # is complete, storage nodes will self-register into etcd on boot and the QP will
+  # discover them dynamically — at that point these can be scaled freely with
+  # "docker compose up --scale storage-node=N" and this explicit list goes away.
+
+  storage_node_1: &storage_node_base
     build:
       context: .
       dockerfile: storage-node/Dockerfile
-    deploy:
-      replicas: 6
-    ports:
-      - "8001-8006:8080" # Maps each replica to 8001, 8002, etc.
     environment:
-      - APP_PORT=8080
+      - PORT=8080
+      - STORAGE_DIR=/data
       - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
-      - REDIS_URL=redis://redis-master:6379
     depends_on:
       - etcd1
-      - redis-master
 
-  # --- 3 Query Processors ---
-  query-processor:
+  storage_node_2:
+    <<: *storage_node_base
+  storage_node_3:
+    <<: *storage_node_base
+  storage_node_4:
+    <<: *storage_node_base
+  storage_node_5:
+    <<: *storage_node_base
+  storage_node_6:
+    <<: *storage_node_base
+  storage_node_7:
+    <<: *storage_node_base
+  storage_node_8:
+    <<: *storage_node_base
+  storage_node_9:
+    <<: *storage_node_base
+
+  # --- Query Processors ---
+  # NOTE: Same story — 3 replicas are explicit here because Testcontainers'
+  # ComposeContainer needs individually named services to map ports dynamically.
+  # Once a load balancer (issue #28) sits in front, you'd scale these freely too.  
+  query_processor_1:
     build:
       context: .
       dockerfile: query-processor/Dockerfile
-    deploy:
-      replicas: 3
     ports:
-      - "9001-9003:8080" # Maps each replica to 9001, 9002, 9003
+      - "9001:8080"
     environment:
-      - APP_PORT=8080
+      - PORT=8080
       - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
-      - STORAGE_NODE_URL=http://storage-node:8080
     depends_on:
-      - storage-node
+      - storage_node_1
+      - storage_node_2
+      - storage_node_3
+      - storage_node_4
+      - storage_node_5
+      - storage_node_6
+      - storage_node_7
+      - storage_node_8
+      - storage_node_9
+      - etcd1
 
-  # --- Single Redis Instance ---
+  query_processor_2:
+    build:
+      context: .
+      dockerfile: query-processor/Dockerfile
+    ports:
+      - "9002:8080"
+    environment:
+      - PORT=8080
+      - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
+    depends_on:
+      - storage_node_1
+      - storage_node_2
+      - storage_node_3
+      - storage_node_4
+      - storage_node_5
+      - storage_node_6
+      - storage_node_7
+      - storage_node_8
+      - storage_node_9
+      - etcd1
+
+  query_processor_3:
+    build:
+      context: .
+      dockerfile: query-processor/Dockerfile
+    ports:
+      - "9003:8080"
+    environment:
+      - PORT=8080
+      - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
+    depends_on:
+      - storage_node_1
+      - storage_node_2
+      - storage_node_3
+      - storage_node_4
+      - storage_node_5
+      - storage_node_6
+      - storage_node_7
+      - storage_node_8
+      - storage_node_9
+      - etcd1
+
+  # --- Redis ---
+  # No host port mapping — only accessed internally by services via redis-master:6379.
+  # Static port bindings cause startup failures in CI if the port is already in use.
   redis-master:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
 
-  # --- ETCD Cluster (Quorum of 3) ---
+  # --- etcd cluster (quorum of 3) ---
   etcd1: &etcd_base
     image: quay.io/coreos/etcd:v3.5.0
     command: etcd --name etcd1 --initial-advertise-peer-urls http://etcd1:2380 --listen-peer-urls http://0.0.0.0:2380 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd1:2379 --initial-cluster-token etcd-cluster-1 --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380 --initial-cluster-state new
