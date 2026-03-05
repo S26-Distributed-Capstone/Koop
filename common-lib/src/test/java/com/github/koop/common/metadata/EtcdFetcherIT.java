@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Testcontainers
-class EtcdFetcherIntegrationTest {
+class EtcdFetcherIT {
 
     // Spin up a real Etcd instance for testing
     @Container
