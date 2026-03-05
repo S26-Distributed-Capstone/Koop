@@ -1,4 +1,4 @@
-package com.github.koop.common;
+package com.github.koop.common.metadata;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
