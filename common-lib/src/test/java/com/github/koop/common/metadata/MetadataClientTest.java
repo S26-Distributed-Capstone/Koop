@@ -1,301 +1,125 @@
 package com.github.koop.common.metadata;
 
-import io.etcd.jetcd.ByteSequence;
-import io.etcd.jetcd.Client;
-
-import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
-import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@Testcontainers
-@Disabled("Flaky tests - needs investigation")
 class MetadataClientTest {
 
-    @Container
-    public static GenericContainer<?> etcd = new GenericContainer<>("quay.io/coreos/etcd:v3.5.12")
-            .withExposedPorts(2379)
-            .withCommand(
-                    "/usr/local/bin/etcd",
-                    "--advertise-client-urls", "http://0.0.0.0:2379",
-                    "--listen-client-urls", "http://0.0.0.0:2379",
-                    "--initial-advertise-peer-urls", "http://0.0.0.0:2380",
-                    "--listen-peer-urls", "http://0.0.0.0:2380",
-                    "--initial-cluster", "default=http://0.0.0.0:2380"
-            )
-            .waitingFor(Wait.forLogMessage(".*ready to serve client requests.*\\n", 1));
+    private MemoryFetcher memoryFetcher;
+    private MetadataClient metadataClient;
 
-    @Test
-    @Disabled("Flaky test - needs investigation")
-    void testMetadataFetchAndWatch() throws Exception {
-        String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
-        
-        // Define separate keys for the two configurations
-        String replicaSetKey = "/config/replica_sets";
-        String partitionSpreadKey = "/config/partition_spread";
+    // Dummy classes used to simulate configuration updates
+    static class DummyConfigA {
+        String value;
+        DummyConfigA(String value) { this.value = value; }
+    }
 
-        String initialReplicaSetJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
-        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [1, 2, 3], \"erasure_set\": \"A\"}]}";
+    static class DummyConfigB {
+        int id;
+        DummyConfigB(int id) { this.id = id; }
+    }
 
-        try (Client rawClient = Client.builder().endpoints(endpoint).build()) {
-            // Seed initial data for both keys
-            rawClient.getKVClient().put(
-                    ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialReplicaSetJson, StandardCharsets.UTF_8)
-            ).get();
+    @BeforeEach
+    void setUp() {
+        memoryFetcher = new MemoryFetcher();
+        metadataClient = new MetadataClient(memoryFetcher);
+    }
 
-            rawClient.getKVClient().put(
-                    ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)
-            ).get();
-
-            // Initialize app client with the test container endpoint
-            Client appClient = Client.builder().endpoints(endpoint).build();
-            
-            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
-                metadataClient.start();
-
-                // 1. Verify Initial Fetch for both configurations
-                ReplicaSetConfiguration rsConfig = metadataClient.getReplicaSetConfiguration();
-                assertNotNull(rsConfig);
-                assertEquals(1, rsConfig.getReplicaSets().get(0).getNumber());
-                assertEquals("10.0.0.1", rsConfig.getReplicaSets().get(0).getMachines().get(0).getIp());
-
-                PartitionSpreadConfiguration psConfig = metadataClient.getPartitionSpreadConfiguration();
-                assertNotNull(psConfig);
-                assertEquals("A", psConfig.getPartitionSpread().get(0).getErasureSet());
-
-                // 2. Verify Watch Updates
-                String updatedReplicaSetJson = "{\"replica_sets\": [{\"number\": 99, \"machines\": [{\"ip\": \"192.168.1.1\", \"port\": 9000}]}]}";
-                String updatedPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [4, 5, 6], \"erasure_set\": \"B\"}]}";
-                
-                rawClient.getKVClient().put(
-                        ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedReplicaSetJson, StandardCharsets.UTF_8)
-                ).get();
-
-                rawClient.getKVClient().put(
-                        ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedPartitionSpreadJson, StandardCharsets.UTF_8)
-                ).get();
-
-                // Poll for updates (Wait up to 5 seconds)
-                boolean replicaUpdated = false;
-                boolean partitionUpdated = false;
-
-                for (int i = 0; i < 50; i++) {
-                    ReplicaSetConfiguration rsc = metadataClient.getReplicaSetConfiguration();
-                    if (rsc != null && rsc.getReplicaSets().get(0).getNumber() == 99) {
-                        replicaUpdated = true;
-                    }
-
-                    PartitionSpreadConfiguration psc = metadataClient.getPartitionSpreadConfiguration();
-                    if (psc != null && "B".equals(psc.getPartitionSpread().get(0).getErasureSet())) {
-                        partitionUpdated = true;
-                    }
-
-                    if (replicaUpdated && partitionUpdated) break;
-                    Thread.sleep(100);
-                }
-
-                assertTrue(replicaUpdated, "ReplicaSetConfiguration should have updated via Watch");
-                assertTrue(partitionUpdated, "PartitionSpreadConfiguration should have updated via Watch");
-            }
-        }
+    @AfterEach
+    void tearDown() throws Exception {
+        metadataClient.close();
     }
 
     @Test
-    void testReplicaSetUpdateListenerFiresOnlyOnReplicaSetChange() throws Exception {
-        String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
-        String replicaSetKey = "/config/replica_sets_listener";
-        String partitionSpreadKey = "/config/partition_spread_listener";
-
-        String initialReplicaSetJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
-        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [1, 2, 3], \"erasure_set\": \"A\"}]}";
-
-        try (Client rawClient = Client.builder().endpoints(endpoint).build()) {
-            // Seed initial data
-            rawClient.getKVClient().put(
-                    ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialReplicaSetJson, StandardCharsets.UTF_8)
-            ).get();
-            rawClient.getKVClient().put(
-                    ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)
-            ).get();
-
-            Client appClient = Client.builder().endpoints(endpoint).build();
-            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
-                metadataClient.start();
-
-                final boolean[] listenerFired = {false};
-                final ReplicaSetConfiguration[] prevHolder = {null};
-                final ReplicaSetConfiguration[] newHolder = {null};
-
-                metadataClient.addReplicaSetUpdateListener((prev, curr) -> {
-                    listenerFired[0] = true;
-                    prevHolder[0] = prev;
-                    newHolder[0] = curr;
-                });
-
-                // Change partitionSpread only, should NOT fire replicaSet listener
-                String updatedPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [4, 5, 6], \"erasure_set\": \"B\"}]}";
-                rawClient.getKVClient().put(
-                        ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedPartitionSpreadJson, StandardCharsets.UTF_8)
-                ).get();
-
-                Thread.sleep(300); // Wait for watch event
-                assertFalse(listenerFired[0], "ReplicaSet listener should not fire on partitionSpread change");
-
-                // Now change replicaSet, should fire
-                String updatedReplicaSetJson = "{\"replica_sets\": [{\"number\": 2, \"machines\": [{\"ip\": \"10.0.0.2\", \"port\": 8001}]}]}";
-                rawClient.getKVClient().put(
-                        ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedReplicaSetJson, StandardCharsets.UTF_8)
-                ).get();
-
-                for (int i = 0; i < 20 && !listenerFired[0]; i++) Thread.sleep(100);
-
-                assertTrue(listenerFired[0], "ReplicaSet listener should fire on replicaSet change");
-                assertNotNull(prevHolder[0]);
-                assertEquals(1, prevHolder[0].getReplicaSets().get(0).getNumber());
-                assertNotNull(newHolder[0]);
-                assertEquals(2, newHolder[0].getReplicaSets().get(0).getNumber());
-            }
-        }
+    void clientCallsFetcherStart() {
+        metadataClient.start();
+        assertTrue(memoryFetcher.wasStarted(), "Fetcher should have been started");
     }
 
     @Test
-    void testPartitionSpreadUpdateListenerFiresOnlyOnPartitionSpreadChange() throws Exception {
-        String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
-        String replicaSetKey = "/config/replica_sets_listener2";
-        String partitionSpreadKey = "/config/partition_spread_listener2";
-
-        String initialReplicaSetJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
-        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [1, 2, 3], \"erasure_set\": \"A\"}]}";
-
-        try (Client rawClient = Client.builder().endpoints(endpoint).build()) {
-            // Seed initial data
-            rawClient.getKVClient().put(
-                    ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialReplicaSetJson, StandardCharsets.UTF_8)
-            ).get();
-            rawClient.getKVClient().put(
-                    ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)
-            ).get();
-
-            Client appClient = Client.builder().endpoints(endpoint).build();
-            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
-                metadataClient.start();
-
-                final boolean[] listenerFired = {false};
-                final PartitionSpreadConfiguration[] prevHolder = {null};
-                final PartitionSpreadConfiguration[] newHolder = {null};
-
-                metadataClient.addPartitionSpreadUpdateListener((prev, curr) -> {
-                    listenerFired[0] = true;
-                    prevHolder[0] = prev;
-                    newHolder[0] = curr;
-                });
-
-                // Change replicaSet only, should NOT fire partitionSpread listener
-                String updatedReplicaSetJson = "{\"replica_sets\": [{\"number\": 2, \"machines\": [{\"ip\": \"10.0.0.2\", \"port\": 8001}]}]}";
-                rawClient.getKVClient().put(
-                        ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedReplicaSetJson, StandardCharsets.UTF_8)
-                ).get();
-
-                Thread.sleep(300); // Wait for watch event
-                assertFalse(listenerFired[0], "PartitionSpread listener should not fire on replicaSet change");
-
-                // Now change partitionSpread, should fire
-                String updatedPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [4, 5, 6], \"erasure_set\": \"B\"}]}";
-                rawClient.getKVClient().put(
-                        ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                        ByteSequence.from(updatedPartitionSpreadJson, StandardCharsets.UTF_8)
-                ).get();
-
-                for (int i = 0; i < 20 && !listenerFired[0]; i++) Thread.sleep(100);
-
-                assertTrue(listenerFired[0], "PartitionSpread listener should fire on partitionSpread change");
-                assertNotNull(prevHolder[0]);
-                assertEquals("A", prevHolder[0].getPartitionSpread().get(0).getErasureSet());
-                assertNotNull(newHolder[0]);
-                assertEquals("B", newHolder[0].getPartitionSpread().get(0).getErasureSet());
-            }
-        }
+    void clientCallsFetcherClose() throws Exception {
+        metadataClient.close();
+        assertTrue(memoryFetcher.wasClosed(), "Fetcher should have been closed");
     }
 
     @Test
-    void testListenersReceiveNullOnDelete() throws Exception {
-        String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
-        String replicaSetKey = "/config/replica_sets_delete";
-        String partitionSpreadKey = "/config/partition_spread_delete";
+    void testListenerReceivesInitialUpdate() {
+        AtomicReference<DummyConfigA> prevRef = new AtomicReference<>();
+        AtomicReference<DummyConfigA> currentRef = new AtomicReference<>();
 
-        String initialReplicaSetJson = "{\"replica_sets\": [{\"number\": 1, \"machines\": [{\"ip\": \"10.0.0.1\", \"port\": 8000}]}]}";
-        String initialPartitionSpreadJson = "{\"partition_spread\": [{\"partitions\": [1, 2, 3], \"erasure_set\": \"A\"}]}";
+        metadataClient.listen(DummyConfigA.class, (prev, current) -> {
+            prevRef.set(prev);
+            currentRef.set(current);
+        });
 
-        try (Client rawClient = Client.builder().endpoints(endpoint).build()) {
-            // Seed initial data
-            rawClient.getKVClient().put(
-                    ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialReplicaSetJson, StandardCharsets.UTF_8)
-            ).get();
-            rawClient.getKVClient().put(
-                    ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8),
-                    ByteSequence.from(initialPartitionSpreadJson, StandardCharsets.UTF_8)
-            ).get();
+        metadataClient.start();
 
-            Client appClient = Client.builder().endpoints(endpoint).build();
-            try (EtcdMetadataClient metadataClient = new EtcdMetadataClient(appClient, replicaSetKey, partitionSpreadKey)) {
-                metadataClient.start();
+        DummyConfigA initialConfig = new DummyConfigA("initial");
+        memoryFetcher.update(initialConfig);
 
-                final boolean[] replicaListenerFired = {false};
-                final ReplicaSetConfiguration[] prevReplica = {null};
-                final ReplicaSetConfiguration[] newReplica = {null};
+        assertNull(prevRef.get(), "Previous configuration should be null on the first update");
+        assertNotNull(currentRef.get(), "Current configuration should not be null");
+        assertEquals("initial", currentRef.get().value);
+    }
 
-                final boolean[] partitionListenerFired = {false};
-                final PartitionSpreadConfiguration[] prevPartition = {null};
-                final PartitionSpreadConfiguration[] newPartition = {null};
+    @Test
+    void testListenerReceivesSubsequentUpdatesWithPrevState() {
+        AtomicReference<DummyConfigA> prevRef = new AtomicReference<>();
+        AtomicReference<DummyConfigA> currentRef = new AtomicReference<>();
 
-                metadataClient.addReplicaSetUpdateListener((prev, curr) -> {
-                    replicaListenerFired[0] = true;
-                    prevReplica[0] = prev;
-                    newReplica[0] = curr;
-                });
+        metadataClient.listen(DummyConfigA.class, (prev, current) -> {
+            prevRef.set(prev);
+            currentRef.set(current);
+        });
 
-                metadataClient.addPartitionSpreadUpdateListener((prev, curr) -> {
-                    partitionListenerFired[0] = true;
-                    prevPartition[0] = prev;
-                    newPartition[0] = curr;
-                });
+        metadataClient.start();
 
-                // Delete replicaSet key
-                rawClient.getKVClient().delete(ByteSequence.from(replicaSetKey, StandardCharsets.UTF_8)).get();
+        DummyConfigA v1 = new DummyConfigA("version-1");
+        memoryFetcher.update(v1);
 
-                for (int i = 0; i < 20 && !replicaListenerFired[0]; i++) Thread.sleep(100);
+        DummyConfigA v2 = new DummyConfigA("version-2");
+        memoryFetcher.update(v2);
 
-                assertTrue(replicaListenerFired[0], "ReplicaSet listener should fire on delete");
-                assertNotNull(prevReplica[0]);
-                assertNull(newReplica[0]);
+        assertEquals(v1, prevRef.get(), "Previous configuration should be version-1");
+        assertEquals(v2, currentRef.get(), "Current configuration should be version-2");
+    }
 
-                // Delete partitionSpread key
-                rawClient.getKVClient().delete(ByteSequence.from(partitionSpreadKey, StandardCharsets.UTF_8)).get();
+    @Test
+    void testListenersAreIsolatedByClass() {
+        AtomicInteger configACalls = new AtomicInteger(0);
+        AtomicInteger configBCalls = new AtomicInteger(0);
 
-                for (int i = 0; i < 20 && !partitionListenerFired[0]; i++) Thread.sleep(100);
+        metadataClient.listen(DummyConfigA.class, (prev, current) -> configACalls.incrementAndGet());
+        metadataClient.listen(DummyConfigB.class, (prev, current) -> configBCalls.incrementAndGet());
 
-                assertTrue(partitionListenerFired[0], "PartitionSpread listener should fire on delete");
-                assertNotNull(prevPartition[0]);
-                assertNull(newPartition[0]);
-            }
-        }
+        metadataClient.start();
+
+        // Update only ConfigA
+        memoryFetcher.update(new DummyConfigA("a-test"));
+
+        assertEquals(1, configACalls.get(), "ConfigA listener should be called once");
+        assertEquals(0, configBCalls.get(), "ConfigB listener should not be called");
+    }
+
+    @Test
+    void testMultipleListenersForTheSameClass() {
+        AtomicInteger listener1Calls = new AtomicInteger(0);
+        AtomicInteger listener2Calls = new AtomicInteger(0);
+
+        metadataClient.listen(DummyConfigA.class, (prev, current) -> listener1Calls.incrementAndGet());
+        metadataClient.listen(DummyConfigA.class, (prev, current) -> listener2Calls.incrementAndGet());
+
+        metadataClient.start();
+
+        memoryFetcher.update(new DummyConfigA("trigger-both"));
+
+        assertEquals(1, listener1Calls.get(), "First listener should be triggered");
+        assertEquals(1, listener2Calls.get(), "Second listener should be triggered");
     }
 }
