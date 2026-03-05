@@ -32,23 +32,23 @@ class EtcdFetcherIntegrationTest {
                     "--listen-client-urls", "http://0.0.0.0:2379",
                     "--initial-advertise-peer-urls", "http://0.0.0.0:2380",
                     "--listen-peer-urls", "http://0.0.0.0:2380",
-                    "--initial-cluster", "default=http://0.0.0.0:2380"
-            )
+                    "--initial-cluster", "default=http://0.0.0.0:2380")
             .waitingFor(Wait.forLogMessage(".*ready to serve client requests.*\\n", 1));
 
     private Client rawEtcdClient;
     private EtcdFetcher etcdFetcher;
     private String endpoint;
-    private final String testKey = "/config/test_dummy";
+    private String testKey;
 
     // Dummy class for JSON deserialization testing
     static class DummyConfig {
         public String status;
         public int version;
-        
+
         // Needed for Jackson
-        public DummyConfig() {}
-        
+        public DummyConfig() {
+        }
+
         public DummyConfig(String status, int version) {
             this.status = status;
             this.version = version;
@@ -60,14 +60,19 @@ class EtcdFetcherIntegrationTest {
         endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
         rawEtcdClient = Client.builder().endpoints(endpoint).build();
 
+        // Generate a random key for each test run to guarantee isolation
+        testKey = "/config/test_dummy_" + java.util.UUID.randomUUID().toString();
+
         Map<Class<?>, String> keyMap = Map.of(DummyConfig.class, testKey);
         etcdFetcher = new EtcdFetcher(endpoint, keyMap);
     }
 
     @AfterEach
     void tearDown() {
-        if (etcdFetcher != null) etcdFetcher.close();
-        if (rawEtcdClient != null) rawEtcdClient.close();
+        if (etcdFetcher != null)
+            etcdFetcher.close();
+        if (rawEtcdClient != null)
+            rawEtcdClient.close();
     }
 
     @Test
@@ -89,7 +94,7 @@ class EtcdFetcherIntegrationTest {
         assertTrue(latch.await(3, TimeUnit.SECONDS), "Fetcher did not trigger initial load in time");
         assertNotNull(receivedObj.get());
         assertTrue(receivedObj.get() instanceof DummyConfig);
-        
+
         DummyConfig config = (DummyConfig) receivedObj.get();
         assertEquals("active", config.status);
         assertEquals(1, config.version);
@@ -112,7 +117,7 @@ class EtcdFetcherIntegrationTest {
 
         // 3. Verify the watcher caught it
         assertTrue(updateLatch.await(5, TimeUnit.SECONDS), "Watcher did not detect PUT event in time");
-        
+
         DummyConfig config = (DummyConfig) receivedObj.get();
         assertEquals("updated", config.status);
         assertEquals(2, config.version);
@@ -133,7 +138,7 @@ class EtcdFetcherIntegrationTest {
         });
 
         // Wait for initial fetch to finish
-        Thread.sleep(500); 
+        Thread.sleep(500);
 
         // 3. Delete the key from Etcd
         rawEtcdClient.getKVClient().delete(ByteSequence.from(testKey, StandardCharsets.UTF_8)).get();
@@ -147,7 +152,6 @@ class EtcdFetcherIntegrationTest {
     private void putToEtcd(String key, String value) throws Exception {
         rawEtcdClient.getKVClient().put(
                 ByteSequence.from(key, StandardCharsets.UTF_8),
-                ByteSequence.from(value, StandardCharsets.UTF_8)
-        ).get();
+                ByteSequence.from(value, StandardCharsets.UTF_8)).get();
     }
 }
