@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Testcontainers
-@Disabled("in dev container can't find docker env - todo fix")
 class EtcdFetcherIntegrationTest {
 
     // Spin up a real Etcd instance for testing

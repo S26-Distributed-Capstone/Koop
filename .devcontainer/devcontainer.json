@@ -23,5 +23,5 @@
         "source=${localWorkspaceFolderBasename}-storage-target,target=${containerWorkspaceFolder}/storage-node/target,type=volume",
         "source=${localWorkspaceFolderBasename}-tests-target,target=${containerWorkspaceFolder}/system-tests/target,type=volume"
     ],
-    "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.m2 ${containerWorkspaceFolder}/target ${containerWorkspaceFolder}/common-lib/target ${containerWorkspaceFolder}/query-processor/target ${containerWorkspaceFolder}/storage-node/target ${containerWorkspaceFolder}/system-tests/target"
+    "postCreateCommand": "bash .devcontainer/setup.sh"
 }
