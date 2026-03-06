@@ -7,7 +7,6 @@ import java.util.logging.Logger;
 import java.util.List;
 import java.util.logging.Level;
 
-import com.github.koop.common.MetadataClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
 import com.github.koop.queryprocessor.processor.StorageWorker;
@@ -105,21 +104,23 @@ public class Main {
     }
 
     private static StorageWorker buildStorageWorkerFromEnv() {
-        // Docker's internal DNS resolves service names directly.
-        // Each storage node listens on port 8080 inside the container (PORT env var).
-        // We split the 6 nodes into 3 sets of 3 for the Reed-Solomon replica groups.
-        // This is a temporary hard-wired config — replace with etcd discovery in PR #46.
         int port = 8080;
+        // Docker Compose service names use underscores (required for Testcontainers
+        // ComposeContainer compatibility), but Docker's internal DNS only resolves
+        // hostnames with hyphens — underscores are invalid per RFC 952 and Docker's
+        // embedded DNS silently fails to resolve them. Docker auto-aliases
+        // underscore service names to their hyphenated equivalent as the container
+        // hostname, so we use hyphens here for DNS resolution.
         List<InetSocketAddress> nodes = List.of(
-            new InetSocketAddress("storage_node_1", port),
-            new InetSocketAddress("storage_node_2", port),
-            new InetSocketAddress("storage_node_3", port),
-            new InetSocketAddress("storage_node_4", port),
-            new InetSocketAddress("storage_node_5", port),
-            new InetSocketAddress("storage_node_6", port),
-            new InetSocketAddress("storage_node_7", port),
-            new InetSocketAddress("storage_node_8", port),
-            new InetSocketAddress("storage_node_9", port)
+            new InetSocketAddress("storage-node-1", port),
+            new InetSocketAddress("storage-node-2", port),
+            new InetSocketAddress("storage-node-3", port),
+            new InetSocketAddress("storage-node-4", port),
+            new InetSocketAddress("storage-node-5", port),
+            new InetSocketAddress("storage-node-6", port),
+            new InetSocketAddress("storage-node-7", port),
+            new InetSocketAddress("storage-node-8", port),
+            new InetSocketAddress("storage-node-9", port)
         );
         return new StorageWorker(nodes, nodes, nodes);
     }
