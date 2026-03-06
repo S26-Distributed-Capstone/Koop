@@ -8,12 +8,12 @@
             "version": "21",
             "installMaven": "true"
         },
-        "ghcr.io/devcontainers/features/copilot-cli:1": {},
         "ghcr.io/devcontainers/features/git:1": {},
         "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
             "version": "latest",
             "dockerDashComposeVersion": "v2"
-        }
+        },
+        "ghcr.io/devcontainers/features/github-cli:1": {}
     },
     "mounts": [
         "source=${localWorkspaceFolderBasename}-m2,target=/home/vscode/.m2,type=volume",
@@ -23,5 +23,10 @@
         "source=${localWorkspaceFolderBasename}-storage-target,target=${containerWorkspaceFolder}/storage-node/target,type=volume",
         "source=${localWorkspaceFolderBasename}-tests-target,target=${containerWorkspaceFolder}/system-tests/target,type=volume"
     ],
+    "customizations": {
+        "vscode": {
+            "extensions": ["redhat.vscode-xml","github.copilot","github.vscode-pull-request-github"]
+        }
+    },
     "postCreateCommand": "bash .devcontainer/setup.sh"
 }
