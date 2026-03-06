@@ -24,14 +24,15 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor("metadata".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
-        DBOptions options = new DBOptions()
+        try (DBOptions options = new DBOptions()
                 .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
+                .setCreateMissingColumnFamilies(true)) {
+            db = RocksDB.open(options, dbPath, descriptors, handles);
 
-        db = RocksDB.open(options, dbPath, descriptors, handles);
+            logHandle = handles.get(1);
+            metaHandle = handles.get(2);
+        }
 
-        logHandle = handles.get(1);
-        metaHandle = handles.get(2);
     }
 
     @Override
@@ -90,7 +91,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public Optional<OpLog> getLog(long seqNum) throws Exception{
+    public Optional<OpLog> getLog(long seqNum) throws Exception {
         byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(seqNum).array();
         byte[] value = db.get(logHandle, key);
 
@@ -118,7 +119,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             iterator.prev();
             return log;
         }).onClose(iterator::close)
-          .takeWhile(log -> log != null);
+                .takeWhile(log -> log != null);
     }
 
     @Override
@@ -126,19 +127,19 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
         RocksIterator iterator = db.newIterator(metaHandle);
         iterator.seek(prefixBytes);
-        return Stream.generate(()->{
-            if(!iterator.isValid()){
+        return Stream.generate(() -> {
+            if (!iterator.isValid()) {
                 return null;
             }
             byte[] key = iterator.key();
-            if(!startsWith(key, prefixBytes)){
+            if (!startsWith(key, prefixBytes)) {
                 return null;
             }
             var res = Metadata.from(iterator.value());
-            //prep for next
+            // prep for next
             iterator.next();
             return res;
-        }).onClose(iterator::close).takeWhile(it->it!=null);
+        }).onClose(iterator::close).takeWhile(it -> it != null);
     }
 
     /**
