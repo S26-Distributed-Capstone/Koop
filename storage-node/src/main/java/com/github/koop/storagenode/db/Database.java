@@ -8,9 +8,7 @@ public class Database implements AutoCloseable {
     }
 
     public void logOperation(long sequenceNumber, String fileKey, String operation) throws Exception {
-        OpLog log = new OpLog();
-        log.key = fileKey;
-        log.operation = operation;
+        OpLog log = new OpLog(fileKey, operation);
         strategy.addLog(sequenceNumber, log);
     }
 
