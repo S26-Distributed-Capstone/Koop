@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Stream;
 
 public class RocksDbStorageStrategy implements StorageStrategy {
     private static final ObjectMapper mapper = new ObjectMapper();
@@ -35,34 +36,44 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public void addLog(long sequenceNumber, OpLog log) throws Exception {
-        byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(sequenceNumber).array();
-        byte[] value = mapper.writeValueAsBytes(log);
-        db.put(logHandle, key, value);
+    public void close() throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'close'");
     }
 
     @Override
-    public void updateMetadata(String fileKey, Metadata metadata) throws Exception {
-        byte[] key = fileKey.getBytes();
-        byte[] value = mapper.writeValueAsBytes(metadata);
-        db.put(metaHandle, key, value);
+    public void addLog(OpLog log) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'addLog'");
+    }
+
+    @Override
+    public void updateMetadata(Metadata metadata) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'updateMetadata'");
+    }
+
+    @Override
+    public void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'atomicallyUpdateLogAndMetadata'");
     }
 
     @Override
     public Metadata getMetadata(String fileKey) throws Exception {
-        byte[] value = db.get(metaHandle, fileKey.getBytes());
-        if (value == null) return null;
-        return mapper.readValue(value, Metadata.class);
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'getMetadata'");
     }
 
     @Override
-    public void close() {
-        // Always close handles before the DB to prevent memory leaks
-        for (ColumnFamilyHandle handle : handles) {
-            handle.close();
-        }
-        if (db != null) {
-            db.close();
-        }
+    public Stream<OpLog> getLogs(long from, long downTo) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'getLogs'");
+    }
+
+    @Override
+    public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'streamMetadataWithPrefix'");
     }
 }

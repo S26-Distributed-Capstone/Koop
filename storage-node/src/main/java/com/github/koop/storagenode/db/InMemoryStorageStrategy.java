@@ -1,21 +1,20 @@
 package com.github.koop.storagenode.db;
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.stream.Stream;
 
 public class InMemoryStorageStrategy implements StorageStrategy {
-    // SkipListMap keeps keys sorted, just like RocksDB
     private final ConcurrentSkipListMap<Long, OpLog> opLogTable = new ConcurrentSkipListMap<>();
-    private final ConcurrentHashMap<String, Metadata> metadataTable = new ConcurrentHashMap<>();
+    private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>();
 
     @Override
-    public void addLog(long sequenceNumber, OpLog log) {
-        opLogTable.put(sequenceNumber, log);
+    public void addLog(OpLog log) {
+        opLogTable.put(log.seqNum(),log);
     }
 
     @Override
-    public void updateMetadata(String fileKey, Metadata metadata) {
-        metadataTable.put(fileKey, metadata);
+    public void updateMetadata(Metadata metadata) {
+        metadataTable.put(metadata.fileName(), metadata);
     }
 
     @Override
@@ -27,5 +26,22 @@ public class InMemoryStorageStrategy implements StorageStrategy {
     public void close() {
         opLogTable.clear();
         metadataTable.clear();
+    }
+
+    @Override
+    public void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata)
+            throws Exception {
+        addLog(log);
+        updateMetadata(metadata);
+    }
+
+    @Override
+    public Stream<OpLog> getLogs(long from, long downTo) throws Exception {
+        return opLogTable.subMap(from, true, downTo, true).reversed().values().stream();
+    }
+
+    @Override
+    public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
+        return metadataTable.tailMap(prefix, true).values().stream();
     }
 }
