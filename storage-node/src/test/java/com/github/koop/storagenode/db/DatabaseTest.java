@@ -110,7 +110,7 @@ class DatabaseTest {
     }
 
     @Test
-    void testGetMetadataReturnsNullForMissingKey() throws Exception {
+    void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
         var metadata = database.getMetadata("non_existent_file.txt");
         assertTrue(metadata.isEmpty(), "Retrieving missing metadata should return null");
     }
