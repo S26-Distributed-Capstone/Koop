@@ -15,10 +15,7 @@ public class Database implements AutoCloseable {
     }
 
     public void setMetadata(String fileKey, String location, String partition, long seq) throws Exception {
-        Metadata meta = new Metadata();
-        meta.location = location;
-        meta.partition = partition;
-        meta.sequenceNumber = seq;
+        Metadata meta = new Metadata(location, partition, seq);
         strategy.updateMetadata(fileKey, meta);
     }
 
