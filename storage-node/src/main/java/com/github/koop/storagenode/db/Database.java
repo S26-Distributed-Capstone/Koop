@@ -39,7 +39,8 @@ public class Database implements AutoCloseable {
     }
 
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
-        return strategy.streamMetadataWithPrefix(prefix);
+        return strategy.streamMetadataWithPrefix(prefix)
+            .takeWhile(meta -> meta.fileName().startsWith(prefix));
     }
 
     @Override

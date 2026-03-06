@@ -43,7 +43,7 @@ public class InMemoryStorageStrategy implements StorageStrategy {
 
     @Override
     public Stream<OpLog> getLogs(long from, long downTo) throws Exception {
-        return opLogTable.subMap(from, true, downTo, true).reversed().values().stream();
+        return opLogTable.subMap(downTo, true, from, true).reversed().values().stream();
     }
 
     @Override

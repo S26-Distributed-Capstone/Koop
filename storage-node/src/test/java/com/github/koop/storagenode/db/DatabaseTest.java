@@ -34,7 +34,7 @@ class DatabaseTest {
         database.logOperation(2L, "file2.txt", "DELETE");
 
         // Retrieve the logs
-        try (Stream<OpLog> logStream = database.getLogs(1L, 2L)) {
+        try (Stream<OpLog> logStream = database.getLogs(2L, 1L)) {
             List<OpLog> logs = logStream.collect(Collectors.toList());
 
             assertEquals(2, logs.size(), "Should retrieve exactly 2 logs");
@@ -151,7 +151,7 @@ class DatabaseTest {
         }
 
         // Query logs from seq 2 to seq 4
-        try (Stream<OpLog> logStream = database.getLogs(2L, 4L)) {
+        try (Stream<OpLog> logStream = database.getLogs(4L, 2L)) {
             List<OpLog> logs = logStream.collect(Collectors.toList());
 
             // Should retrieve 3 logs: seq 4, 3, 2 (reversed order due to descending map)
