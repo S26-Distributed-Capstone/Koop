@@ -127,7 +127,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             //prep for next
             iterator.next();
             return res;
-        }).onClose(iterator::close);
+        }).onClose(iterator::close).takeWhile(it->it!=null);
     }
 
     /**
