@@ -192,7 +192,7 @@ class DatabaseTest {
         database.logOperation(1L, "file.txt", "PUT");
         
         // Ensure data is there
-        assertNotNull(database.getMetadata("file.txt"));
+        assertTrue(database.getMetadata("file.txt").isPresent());
         
         // Close the database (which calls close() on InMemoryStorageStrategy, clearing maps)
         database.close();

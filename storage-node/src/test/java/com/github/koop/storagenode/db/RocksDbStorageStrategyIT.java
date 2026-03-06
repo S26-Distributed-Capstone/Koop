@@ -52,9 +52,9 @@ class RocksDbStorageStrategyIT {
     }
 
     @Test
-    void testGetMetadataReturnsNullForMissingKey() throws Exception {
+    void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
         var retrieved = strategy.getMetadata("missing_file.dat");
-        assertTrue(retrieved.isEmpty(), "Missing keys should return null");
+        assertTrue(retrieved.isEmpty(), "Missing keys should return an empty Optional");
     }
 
     @Test
