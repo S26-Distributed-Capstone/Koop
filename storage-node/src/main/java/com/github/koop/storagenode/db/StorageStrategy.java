@@ -1,5 +1,6 @@
 package com.github.koop.storagenode.db;
 
+import java.util.Optional;
 import java.util.stream.Stream;
 
 public interface StorageStrategy extends AutoCloseable {
@@ -9,7 +10,9 @@ public interface StorageStrategy extends AutoCloseable {
 
     void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception;
 
-    Metadata getMetadata(String fileKey) throws Exception;
+    Optional<Metadata> getMetadata(String fileKey) throws Exception;
+
+    Optional<OpLog> getLog(long seqNum) throws Exception;
 
     Stream<OpLog> getLogs(long from, long downTo) throws Exception;
 

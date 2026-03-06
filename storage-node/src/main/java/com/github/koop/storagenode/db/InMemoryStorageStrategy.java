@@ -1,5 +1,6 @@
 package com.github.koop.storagenode.db;
 
+import java.util.Optional;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Stream;
 
@@ -18,8 +19,13 @@ public class InMemoryStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public Metadata getMetadata(String fileKey) {
-        return metadataTable.get(fileKey);
+    public Optional<Metadata> getMetadata(String fileKey) {
+        return Optional.ofNullable(metadataTable.get(fileKey));
+    }
+
+    @Override
+    public Optional<OpLog> getLog(long seqNum){
+        return Optional.ofNullable(opLogTable.get(seqNum));
     }
 
     @Override

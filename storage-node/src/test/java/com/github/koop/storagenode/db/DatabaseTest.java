@@ -51,6 +51,44 @@ class DatabaseTest {
     }
 
     @Test
+    void testLogOpAndGetALog() throws Exception{
+        database.logOperation(10, "singleFile.txt", "PUT");
+        var logOpt = database.getOpLog(10L);
+        assertTrue(logOpt.isPresent(), "Log should not be null");
+        var log = logOpt.get();
+        assertEquals(10L, log.seqNum());
+        assertEquals("singleFile.txt", log.key());
+        assertEquals("PUT", log.operation());
+    }
+
+    @Test
+    void testGetOpLogReturnsEmptyForMissingKey() throws Exception {
+        var logOpt = database.getOpLog(999L);
+        assertTrue(logOpt.isEmpty(), "Should return empty Optional for missing log");
+    }
+
+    @Test
+    void testStreamMetadataWithPrefixReturnsEmptyForMissingPrefix() throws Exception {
+        database.setMetadata("folderA/file1.txt", "loc1", "1", 1L);
+        database.setMetadata("folderB/file2.txt", "loc2", "2", 2L);
+
+        try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("nonexistent/")) {
+            List<Metadata> results = metaStream
+                .filter(m -> m.fileName().startsWith("nonexistent/"))
+                .collect(Collectors.toList());
+            assertTrue(results.isEmpty(), "Should return empty list for missing prefix");
+        }
+    }
+
+    @Test
+    void testLogOperationWithSameSequenceNumberOverrides() throws Exception {
+        database.logOperation(5L, "file.txt", "PUT");
+        database.logOperation(5L, "file.txt", "DELETE");
+        var logOp = database.getOpLog(5L);
+        assertEquals("DELETE",logOp.get().operation());
+    }
+
+    @Test
     void testSetAndGetMetadata() throws Exception {
         String fileKey = "partition_1/fileA.dat";
         String location = "/data/p1/fileA.dat";
@@ -61,9 +99,10 @@ class DatabaseTest {
         database.setMetadata(fileKey, location, partition, seq);
 
         // Retrieve the metadata
-        Metadata metadata = database.getMetadata(fileKey);
+        var metadataOpt = database.getMetadata(fileKey);
 
-        assertNotNull(metadata, "Metadata should not be null");
+        assertTrue(metadataOpt.isPresent(), "Metadata should not be null");
+        var metadata = metadataOpt.get();
         assertEquals(fileKey, metadata.fileName());
         assertEquals(location, metadata.location());
         assertEquals(partition, metadata.partition());
@@ -72,8 +111,8 @@ class DatabaseTest {
 
     @Test
     void testGetMetadataReturnsNullForMissingKey() throws Exception {
-        Metadata metadata = database.getMetadata("non_existent_file.txt");
-        assertNull(metadata, "Retrieving missing metadata should return null");
+        var metadata = database.getMetadata("non_existent_file.txt");
+        assertTrue(metadata.isEmpty(), "Retrieving missing metadata should return null");
     }
 
     @Test
@@ -88,8 +127,9 @@ class DatabaseTest {
         database.atomicallyUpdate(seq, fileKey, operation, location, partition);
 
         // Verify metadata was updated
-        Metadata metadata = database.getMetadata(fileKey);
-        assertNotNull(metadata);
+        var metadataOpt = database.getMetadata(fileKey);
+        assertTrue(metadataOpt.isPresent());
+        var metadata = metadataOpt.get();
         assertEquals(location, metadata.location());
         assertEquals(partition, metadata.partition());
         assertEquals(seq, metadata.sequenceNumber());
@@ -158,7 +198,7 @@ class DatabaseTest {
         database.close();
         
         // Data should be gone
-        assertNull(database.getMetadata("file.txt"));
+        assertTrue(database.getMetadata("file.txt").isEmpty());
         try (Stream<OpLog> logs = database.getLogs(1L, 1L)) {
             assertEquals(0, logs.count());
         }

@@ -1,12 +1,12 @@
 package com.github.koop.storagenode.db;
 
 import org.rocksdb.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 public class RocksDbStorageStrategy implements StorageStrategy {
@@ -79,14 +79,25 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public Metadata getMetadata(String fileKey) throws Exception {
+    public Optional<Metadata> getMetadata(String fileKey) throws Exception {
         byte[] key = fileKey.getBytes(StandardCharsets.UTF_8);
         byte[] value = db.get(metaHandle, key);
 
         if (value == null) {
-            return null;
+            return Optional.empty();
         }
-        return Metadata.from(value);
+        return Optional.ofNullable(Metadata.from(value));
+    }
+
+    @Override
+    public Optional<OpLog> getLog(long seqNum) throws Exception{
+        byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(seqNum).array();
+        byte[] value = db.get(logHandle, key);
+
+        if (value == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(OpLog.from(value));
     }
 
     @Override

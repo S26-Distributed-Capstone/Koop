@@ -1,5 +1,6 @@
 package com.github.koop.storagenode.db;
 
+import java.util.Optional;
 import java.util.stream.Stream;
 
 public class Database implements AutoCloseable {
@@ -29,8 +30,12 @@ public class Database implements AutoCloseable {
         return strategy.getLogs(from, downTo);
     }
 
-    public Metadata getMetadata(String fileKey) throws Exception {
+    public Optional<Metadata> getMetadata(String fileKey) throws Exception {
         return strategy.getMetadata(fileKey);
+    }
+
+    public Optional<OpLog> getOpLog(long seqNum) throws Exception{
+        return strategy.getLog(seqNum);
     }
 
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {

@@ -42,18 +42,19 @@ class RocksDbStorageStrategyIT {
         strategy.updateMetadata(meta);
 
         // Retrieve and verify
-        Metadata retrieved = strategy.getMetadata(fileKey);
-        assertNotNull(retrieved, "Metadata should be found");
-        assertEquals(fileKey, retrieved.fileName());
-        assertEquals("/data/p1/fileA.dat", retrieved.location());
-        assertEquals("1", retrieved.partition());
-        assertEquals(100L, retrieved.sequenceNumber());
+        var retrieved = strategy.getMetadata(fileKey);
+        assertTrue(retrieved.isPresent(), "Metadata should be found");
+        var metadata = retrieved.get();
+        assertEquals(fileKey, metadata.fileName());
+        assertEquals("/data/p1/fileA.dat", metadata.location());
+        assertEquals("1", metadata.partition());
+        assertEquals(100L, metadata.sequenceNumber());
     }
 
     @Test
     void testGetMetadataReturnsNullForMissingKey() throws Exception {
-        Metadata retrieved = strategy.getMetadata("missing_file.dat");
-        assertNull(retrieved, "Missing keys should return null");
+        var retrieved = strategy.getMetadata("missing_file.dat");
+        assertTrue(retrieved.isEmpty(), "Missing keys should return null");
     }
 
     @Test
@@ -91,9 +92,9 @@ class RocksDbStorageStrategyIT {
         strategy.atomicallyUpdateLogAndMetadata(log, meta);
 
         // Verify Metadata exists
-        Metadata retrievedMeta = strategy.getMetadata(fileKey);
-        assertNotNull(retrievedMeta);
-        assertEquals(seq, retrievedMeta.sequenceNumber());
+        var retrievedMetaOpt = strategy.getMetadata(fileKey);
+        assertTrue(retrievedMetaOpt.isPresent());
+        assertEquals(seq, retrievedMetaOpt.get().sequenceNumber());
 
         // Verify Log exists
         try (Stream<OpLog> logStream = strategy.getLogs(seq, seq)) {
