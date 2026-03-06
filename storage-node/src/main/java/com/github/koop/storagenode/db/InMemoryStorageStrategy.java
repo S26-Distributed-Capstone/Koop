@@ -6,8 +6,7 @@ import java.util.stream.Stream;
 
 public class InMemoryStorageStrategy implements StorageStrategy {
     private final ConcurrentSkipListMap<Long, OpLog> opLogTable = new ConcurrentSkipListMap<>();
-    private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>();
-
+    private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>(); 
     @Override
     public void addLog(OpLog log) {
         opLogTable.put(log.seqNum(),log);
@@ -48,6 +47,6 @@ public class InMemoryStorageStrategy implements StorageStrategy {
 
     @Override
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
-        return metadataTable.tailMap(prefix, true).values().stream();
+        return metadataTable.tailMap(prefix, true).values().stream().takeWhile(metadata->metadata.fileName().startsWith(prefix));
     }
 }
