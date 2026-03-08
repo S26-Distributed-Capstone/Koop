@@ -1,18 +1,17 @@
 package com.github.koop.storagenode;
 
-import com.github.koop.common.messages.InputStreamMessageReader;
-import com.github.koop.common.messages.MessageBuilder;
-import com.github.koop.common.messages.Opcode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.*;
-import java.net.Socket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,117 +19,94 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StorageNodeServerTest {
 
-    private static final int PORT = 9092;
     private StorageNodeServer server;
-    private ExecutorService serverExecutor;
+    private HttpClient http;
+    private int port;
 
     @TempDir
     Path tempDir;
 
     @BeforeEach
     void setUp() throws Exception {
-        server = new StorageNodeServer(PORT, tempDir);
-        serverExecutor = Executors.newSingleThreadExecutor();
-        serverExecutor.submit(() -> server.start());
-        Thread.sleep(100);
+        server = new StorageNodeServer(0, tempDir);  // port 0 → OS picks free port
+        Thread.ofVirtual().start(server::start);
+        Thread.sleep(500); // wait for Javalin to be ready
+        port = server.port();
+        http = HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .build();
     }
 
     @AfterEach
     void tearDown() {
-        serverExecutor.shutdownNow();
         server.stop();
     }
 
-    @Test
-    void testPutAndGet() throws IOException {
-        try (Socket socket = new Socket("localhost", PORT);
-             OutputStream out = socket.getOutputStream();
-             InputStream in = socket.getInputStream()) {
+    private URI storeUri(int partition, String key) {
+        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + key);
+    }
 
-            // --- PUT Request ---
-            String reqId = "req-101";
-            int partition = 5;
-            String key = "my-key";
-            byte[] data = "Hello Server".getBytes(StandardCharsets.UTF_8);
-
-            MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
-            putMsg.writeString(reqId);
-            putMsg.writeInt(partition);
-            putMsg.writeString(key);
-            putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
-            putMsg.writeToOutputStream(out);
-            out.flush();
-
-            // Read PUT Response
-            InputStreamMessageReader putResp = new InputStreamMessageReader(in);
-            assertEquals(Opcode.SN_PUT.getCode(), putResp.getOpcode(), "Response should have correct opcode");
-            int status = putResp.readByte();
-            assertEquals(1, status, "PUT should return success (1)");
-
-            // --- GET Request ---
-            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
-            getMsg.writeInt(partition);
-            getMsg.writeString(key);
-            getMsg.writeToOutputStream(out);
-            out.flush();
-
-            // Read GET Response
-            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
-            assertEquals(Opcode.SN_GET.getCode(), getResp.getOpcode(), "Response should have correct opcode");
-            int found = getResp.readByte();
-            assertEquals(1, found, "GET should return found (1)");
-
-            // Read remaining bytes for the payload directly from the InputStream
-            int dataLen = (int) getResp.getRemainingLength();
-            byte[] responseData = in.readNBytes(dataLen);
-
-            assertEquals("Hello Server", new String(responseData, StandardCharsets.UTF_8));
-        }
+    private URI storeUriWithReq(int partition, String key, String reqId) {
+        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + key + "?requestId=" + reqId);
     }
 
     @Test
-    void testDelete() throws IOException {
-        try (Socket socket = new Socket("localhost", PORT);
-             OutputStream out = socket.getOutputStream();
-             InputStream in = socket.getInputStream()) {
+    void testPutAndGet() throws Exception {
+        int partition = 5;
+        String key = "my-key";
+        byte[] data = "Hello Server".getBytes(StandardCharsets.UTF_8);
 
-            // Setup: Store a file first
-            String reqId = "del-req";
-            int partition = 2;
-            String key = "del-key";
-            byte[] data = "ToBeDeleted".getBytes(StandardCharsets.UTF_8);
+        // --- PUT ---
+        HttpRequest putReq = HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, key, "req-101"))
+                .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
+                .header("Content-Type", "application/octet-stream")
+                .build();
 
-            MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
-            putMsg.writeString(reqId);
-            putMsg.writeInt(partition);
-            putMsg.writeString(key);
-            putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
-            putMsg.writeToOutputStream(out);
-            out.flush();
+        HttpResponse<String> putResp = http.send(putReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, putResp.statusCode(), "PUT should succeed");
 
-            InputStreamMessageReader putResp = new InputStreamMessageReader(in);
-            int status = putResp.readByte(); // consume success
-            assertEquals(1, status, "Setup PUT should succeed");
+        // --- GET ---
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, key))
+                .GET()
+                .build();
 
-            // --- DELETE Request ---
-            MessageBuilder delMsg = new MessageBuilder(Opcode.SN_DELETE);
-            delMsg.writeInt(partition);
-            delMsg.writeString(key);
-            delMsg.writeToOutputStream(out);
-            out.flush();
+        HttpResponse<byte[]> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, getResp.statusCode(), "GET should succeed");
+        assertEquals("Hello Server", new String(getResp.body(), StandardCharsets.UTF_8));
+    }
 
-            InputStreamMessageReader delResp = new InputStreamMessageReader(in);
-            assertEquals(Opcode.SN_DELETE.getCode(), delResp.getOpcode(), "Response should have correct opcode");
-            int deleted = delResp.readByte();
-            assertEquals(1, deleted, "DELETE should return success (1)");
-        }
+    @Test
+    void testDelete() throws Exception {
+        int partition = 2;
+        String key = "del-key";
+        byte[] data = "ToBeDeleted".getBytes(StandardCharsets.UTF_8);
+
+        // Setup: store first
+        HttpRequest putReq = HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, key, "del-req"))
+                .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
+                .header("Content-Type", "application/octet-stream")
+                .build();
+        HttpResponse<String> putResp = http.send(putReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, putResp.statusCode(), "Setup PUT should succeed");
+
+        // --- DELETE ---
+        HttpRequest delReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, key))
+                .DELETE()
+                .build();
+
+        HttpResponse<String> delResp = http.send(delReq, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, delResp.statusCode(), "DELETE should succeed");
     }
 
     @Test
     void testMultipleClientsDifferentKeys() throws Exception {
         int clientCount = 5;
-        Thread[] threads = new Thread[clientCount];
         String[] keys = new String[clientCount];
+        Thread[] threads = new Thread[clientCount];
 
         for (int i = 0; i < clientCount; i++) {
             keys[i] = "key-" + i;
@@ -138,28 +114,16 @@ class StorageNodeServerTest {
             final int idx = i;
 
             threads[i] = new Thread(() -> {
-                try (Socket socket = new Socket("localhost", PORT);
-                     OutputStream out = socket.getOutputStream();
-                     InputStream in = socket.getInputStream()) {
+                try {
+                    HttpRequest putReq = HttpRequest.newBuilder()
+                            .uri(storeUriWithReq(idx, keys[idx], "mc-" + idx))
+                            .PUT(HttpRequest.BodyPublishers.ofByteArray(value.getBytes(StandardCharsets.UTF_8)))
+                            .header("Content-Type", "application/octet-stream")
+                            .build();
 
-                    String reqId = "mc-" + idx;
-                    int partition = idx;
-                    String key = keys[idx];
-                    byte[] data = value.getBytes(StandardCharsets.UTF_8);
-
-                    MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
-                    putMsg.writeString(reqId);
-                    putMsg.writeInt(partition);
-                    putMsg.writeString(key);
-                    putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
-                    putMsg.writeToOutputStream(out);
-                    out.flush();
-
-                    InputStreamMessageReader putResp = new InputStreamMessageReader(in);
-                    int status = putResp.readByte();
-                    assertEquals(1, status, "PUT should return success (1)");
-
-                } catch (IOException e) {
+                    HttpResponse<String> resp = http.send(putReq, HttpResponse.BodyHandlers.ofString());
+                    assertEquals(200, resp.statusCode(), "PUT should succeed");
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             });
@@ -170,88 +134,47 @@ class StorageNodeServerTest {
 
         // Verify each key
         for (int i = 0; i < clientCount; i++) {
-            try (Socket socket = new Socket("localhost", PORT);
-                 OutputStream out = socket.getOutputStream();
-                 InputStream in = socket.getInputStream()) {
+            HttpRequest getReq = HttpRequest.newBuilder()
+                    .uri(storeUri(i, keys[i]))
+                    .GET()
+                    .build();
 
-                int partition = i;
-                String key = keys[i];
-
-                MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
-                getMsg.writeInt(partition);
-                getMsg.writeString(key);
-                getMsg.writeToOutputStream(out);
-                out.flush();
-
-                InputStreamMessageReader getResp = new InputStreamMessageReader(in);
-                int found = getResp.readByte();
-                assertEquals(1, found, "GET should return found (1)");
-
-                int dataLen = (int) getResp.getRemainingLength();
-                byte[] responseData = in.readNBytes(dataLen);
-
-                assertEquals("value-" + i, new String(responseData, StandardCharsets.UTF_8));
-            }
+            HttpResponse<byte[]> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, getResp.statusCode(), "GET should find the key");
+            assertEquals("value-" + i, new String(getResp.body(), StandardCharsets.UTF_8));
         }
     }
 
     @Test
-    void testOverwritePutSameKey() throws IOException {
-        try (Socket socket = new Socket("localhost", PORT);
-             OutputStream out = socket.getOutputStream();
-             InputStream in = socket.getInputStream()) {
+    void testOverwritePutSameKey() throws Exception {
+        int partition = 1;
+        String key = "overwrite-key";
 
-            int partition = 1;
-            String key = "overwrite-key";
+        // First PUT
+        HttpRequest put1 = HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, key, "ow-1"))
+                .PUT(HttpRequest.BodyPublishers.ofByteArray("FirstValue".getBytes(StandardCharsets.UTF_8)))
+                .header("Content-Type", "application/octet-stream")
+                .build();
+        assertEquals(200, http.send(put1, HttpResponse.BodyHandlers.ofString()).statusCode());
 
-            // First PUT
-            String reqId1 = "ow-1";
-            byte[] data1 = "FirstValue".getBytes(StandardCharsets.UTF_8);
+        // Second PUT (overwrite)
+        HttpRequest put2 = HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, key, "ow-2"))
+                .PUT(HttpRequest.BodyPublishers.ofByteArray("SecondValue".getBytes(StandardCharsets.UTF_8)))
+                .header("Content-Type", "application/octet-stream")
+                .build();
+        assertEquals(200, http.send(put2, HttpResponse.BodyHandlers.ofString()).statusCode());
 
-            MessageBuilder putMsg1 = new MessageBuilder(Opcode.SN_PUT);
-            putMsg1.writeString(reqId1);
-            putMsg1.writeInt(partition);
-            putMsg1.writeString(key);
-            putMsg1.writeLargePayload(data1.length, new ByteArrayInputStream(data1));
-            putMsg1.writeToOutputStream(out);
-            out.flush();
+        // GET should return the second value
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, key))
+                .GET()
+                .build();
 
-            InputStreamMessageReader putResp1 = new InputStreamMessageReader(in);
-            int status1 = putResp1.readByte();
-            assertEquals(1, status1, "First PUT should return success (1)");
-
-            // Second PUT (overwrite)
-            String reqId2 = "ow-2";
-            byte[] data2 = "SecondValue".getBytes(StandardCharsets.UTF_8);
-
-            MessageBuilder putMsg2 = new MessageBuilder(Opcode.SN_PUT);
-            putMsg2.writeString(reqId2);
-            putMsg2.writeInt(partition);
-            putMsg2.writeString(key);
-            putMsg2.writeLargePayload(data2.length, new ByteArrayInputStream(data2));
-            putMsg2.writeToOutputStream(out);
-            out.flush();
-
-            InputStreamMessageReader putResp2 = new InputStreamMessageReader(in);
-            int status2 = putResp2.readByte();
-            assertEquals(1, status2, "Second PUT should return success (1)");
-
-            // GET
-            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
-            getMsg.writeInt(partition);
-            getMsg.writeString(key);
-            getMsg.writeToOutputStream(out);
-            out.flush();
-
-            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
-            int found = getResp.readByte();
-            assertEquals(1, found, "GET after overwrite should return found (1)");
-
-            int dataLen = (int) getResp.getRemainingLength();
-            byte[] responseData = in.readNBytes(dataLen);
-
-            assertEquals("SecondValue", new String(responseData, StandardCharsets.UTF_8));
-        }
+        HttpResponse<byte[]> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, getResp.statusCode());
+        assertEquals("SecondValue", new String(getResp.body(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -266,25 +189,16 @@ class StorageNodeServerTest {
             final int idx = i;
             values[idx] = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
             threads[idx] = new Thread(() -> {
-                try (Socket socket = new Socket("localhost", PORT);
-                     OutputStream out = socket.getOutputStream();
-                     InputStream in = socket.getInputStream()) {
+                try {
+                    HttpRequest putReq = HttpRequest.newBuilder()
+                            .uri(storeUriWithReq(partition, key, "req-" + idx))
+                            .PUT(HttpRequest.BodyPublishers.ofByteArray(values[idx].getBytes(StandardCharsets.UTF_8)))
+                            .header("Content-Type", "application/octet-stream")
+                            .build();
 
-                    String reqId = "req-" + idx;
-                    byte[] data = values[idx].getBytes(StandardCharsets.UTF_8);
-
-                    MessageBuilder putMsg = new MessageBuilder(Opcode.SN_PUT);
-                    putMsg.writeString(reqId);
-                    putMsg.writeInt(partition);
-                    putMsg.writeString(key);
-                    putMsg.writeLargePayload(data.length, new ByteArrayInputStream(data));
-                    putMsg.writeToOutputStream(out);
-                    out.flush();
-
-                    InputStreamMessageReader putResp = new InputStreamMessageReader(in);
-                    int status = putResp.readByte();
-                    assertEquals(1, status, "PUT should return success (1)");
-                } catch (IOException e) {
+                    HttpResponse<String> resp = http.send(putReq, HttpResponse.BodyHandlers.ofString());
+                    assertEquals(200, resp.statusCode(), "PUT should succeed");
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             });
@@ -293,29 +207,20 @@ class StorageNodeServerTest {
         for (Thread t : threads) t.start();
         for (Thread t : threads) t.join();
 
-        // GET verification: should be one of the values
-        try (Socket socket = new Socket("localhost", PORT);
-             OutputStream out = socket.getOutputStream();
-             InputStream in = socket.getInputStream()) {
+        // GET should return one of the written values
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, key))
+                .GET()
+                .build();
 
-            MessageBuilder getMsg = new MessageBuilder(Opcode.SN_GET);
-            getMsg.writeInt(partition);
-            getMsg.writeString(key);
-            getMsg.writeToOutputStream(out);
-            out.flush();
+        HttpResponse<byte[]> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, getResp.statusCode());
 
-            InputStreamMessageReader getResp = new InputStreamMessageReader(in);
-            int found = getResp.readByte();
-            assertEquals(1, found, "GET should return found (1)");
-
-            int dataLen = (int) getResp.getRemainingLength();
-            String got = new String(in.readNBytes(dataLen), StandardCharsets.UTF_8);
-
-            boolean matches = false;
-            for (String v : values) {
-                if (v.equals(got)) { matches = true; break; }
-            }
-            assertTrue(matches, "GET should return one of the concurrently written values");
+        String got = new String(getResp.body(), StandardCharsets.UTF_8);
+        boolean matches = false;
+        for (String v : values) {
+            if (v.equals(got)) { matches = true; break; }
         }
+        assertTrue(matches, "GET should return one of the concurrently written values");
     }
 }

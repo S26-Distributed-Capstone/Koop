@@ -6,6 +6,9 @@ import org.junit.jupiter.api.*;
 
 import java.io.*;
 import java.net.*;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.security.SecureRandom;
 import java.time.LocalTime;
@@ -70,7 +73,7 @@ public class RealStorageNodesIT {
             InetSocketAddress addr =
                     new InetSocketAddress("127.0.0.1", port);
 
-            waitForPortOpen(addr, 3000);
+            waitForHttpReady(addr, 5000);
 
             log("[NODE " + nodeId + "] READY");
 
@@ -254,22 +257,26 @@ public class RealStorageNodesIT {
         }
     }
 
-    private static void waitForPortOpen(
+    private static void waitForHttpReady(
             InetSocketAddress addr,
             long timeoutMs) throws InterruptedException {
 
         long deadline = System.currentTimeMillis() + timeoutMs;
+        HttpClient client = HttpClient.newHttpClient();
+        URI healthUri = URI.create("http://" + addr.getHostString() + ":" + addr.getPort() + "/health");
 
         while (System.currentTimeMillis() < deadline) {
-            try (Socket s = new Socket()) {
-                s.connect(addr, 200);
-                return;
+            try {
+                HttpRequest req = HttpRequest.newBuilder().uri(healthUri).GET().build();
+                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) return;
             } catch (IOException ignored) {
-                Thread.sleep(50);
+                // server not ready yet
             }
+            Thread.sleep(50);
         }
 
-        fail("Server did not open port: " + addr);
+        fail("Server did not become ready: " + addr);
     }
 
     private static void deleteRecursive(Path root) throws IOException {
