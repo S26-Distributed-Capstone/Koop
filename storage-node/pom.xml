@@ -36,7 +36,7 @@
         <dependency>
             <groupId>io.javalin</groupId>
             <artifactId>javalin</artifactId>
-            <version>6.7.0</version>
+            <version>7.0.1</version>
         </dependency>
 
         <!-- SLF4J binding for Javalin (routes to Log4j2) -->

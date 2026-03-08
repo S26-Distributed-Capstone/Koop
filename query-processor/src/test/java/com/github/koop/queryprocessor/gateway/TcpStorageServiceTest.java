@@ -28,39 +28,39 @@ class TcpStorageServiceTest {
         store.clear();
 
         mockServer = Javalin.create(config -> {
-            config.useVirtualThreads = true;
-            config.showJavalinBanner = false;
-        });
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
 
-        // PUT handler
-        mockServer.put("/store/{partition}/{key}", ctx -> {
-            String partition = ctx.pathParam("partition");
-            String key = ctx.pathParam("key");
-            byte[] body = ctx.bodyAsBytes();
-            store.put(partition + "|" + key, body);
-            ctx.status(200).result("OK");
-        });
+            // PUT handler
+            config.routes.put("/store/{partition}/{key}", ctx -> {
+                String partition = ctx.pathParam("partition");
+                String key = ctx.pathParam("key");
+                byte[] body = ctx.bodyAsBytes();
+                store.put(partition + "|" + key, body);
+                ctx.status(200).result("OK");
+            });
 
-        // GET handler
-        mockServer.get("/store/{partition}/{key}", ctx -> {
-            String partition = ctx.pathParam("partition");
-            String key = ctx.pathParam("key");
-            byte[] data = store.get(partition + "|" + key);
-            if (data != null) {
-                ctx.status(200)
-                   .header("Content-Type", "application/octet-stream")
-                   .result(data);
-            } else {
-                ctx.status(404).result("");
-            }
-        });
+            // GET handler
+            config.routes.get("/store/{partition}/{key}", ctx -> {
+                String partition = ctx.pathParam("partition");
+                String key = ctx.pathParam("key");
+                byte[] data = store.get(partition + "|" + key);
+                if (data != null) {
+                    ctx.status(200)
+                       .header("Content-Type", "application/octet-stream")
+                       .result(data);
+                } else {
+                    ctx.status(404).result("");
+                }
+            });
 
-        // DELETE handler
-        mockServer.delete("/store/{partition}/{key}", ctx -> {
-            String partition = ctx.pathParam("partition");
-            String key = ctx.pathParam("key");
-            store.remove(partition + "|" + key);
-            ctx.status(200).result("OK");
+            // DELETE handler
+            config.routes.delete("/store/{partition}/{key}", ctx -> {
+                String partition = ctx.pathParam("partition");
+                String key = ctx.pathParam("key");
+                store.remove(partition + "|" + key);
+                ctx.status(200).result("OK");
+            });
         });
 
         mockServer.start(0);

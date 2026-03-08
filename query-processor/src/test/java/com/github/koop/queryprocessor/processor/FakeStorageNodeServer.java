@@ -26,14 +26,14 @@ public final class FakeStorageNodeServer implements Closeable {
 
     public FakeStorageNodeServer() {
         app = Javalin.create(config -> {
-            config.useVirtualThreads = true;
-            config.showJavalinBanner = false;
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L; // 100 MB — tests use large payloads
-        });
 
-        app.put("/store/{partition}/{key}", this::handlePut);
-        app.get("/store/{partition}/{key}", this::handleGet);
-        app.delete("/store/{partition}/{key}", this::handleDelete);
+            config.routes.put("/store/{partition}/{key}", this::handlePut);
+            config.routes.get("/store/{partition}/{key}", this::handleGet);
+            config.routes.delete("/store/{partition}/{key}", this::handleDelete);
+        });
 
         app.start(0); // OS picks a free port
     }

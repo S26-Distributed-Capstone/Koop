@@ -127,15 +127,15 @@ public class StorageNodeServer {
 
     public void start() {
         app = Javalin.create(config -> {
-            config.useVirtualThreads = true;
-            config.showJavalinBanner = false;
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L; // 100 MB — shards can be large
-        });
 
-        app.get("/health", ctx -> ctx.result("OK"));
-        app.put("/store/{partition}/{key}", this::handlePut);
-        app.get("/store/{partition}/{key}", this::handleGet);
-        app.delete("/store/{partition}/{key}", this::handleDelete);
+            config.routes.get("/health", ctx -> ctx.result("OK"));
+            config.routes.put("/store/{partition}/{key}", this::handlePut);
+            config.routes.get("/store/{partition}/{key}", this::handleGet);
+            config.routes.delete("/store/{partition}/{key}", this::handleDelete);
+        });
 
         app.start(port);
         logger.info("StorageNodeServer started on port {}", app.port());
