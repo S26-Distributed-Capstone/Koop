@@ -20,6 +20,7 @@ public class Main {
     public static Javalin createApp(StorageService storage) {
         var app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB
             config.routes.get("/health", Main::healthHandler);
             config.routes.get("/{bucket}/{key}", ctx -> getObjectHandler(ctx, storage));
             config.routes.put("/{bucket}/{key}", ctx -> putObjectHandler(ctx, storage));

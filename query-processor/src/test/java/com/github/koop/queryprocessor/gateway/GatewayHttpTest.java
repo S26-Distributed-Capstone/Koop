@@ -9,6 +9,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.http.HttpRequest.BodyPublisher;
+import java.net.http.HttpRequest.BodyPublishers;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,7 +66,6 @@ class GatewayHttpTest {
             var response = client.get("/health");
             assertEquals(200, response.code());
             assertEquals("API Gateway is healthy!", response.body().string());
-            response.close();
         });
     }
 
@@ -76,14 +77,15 @@ class GatewayHttpTest {
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(InputStream.class), anyLong());
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
-            var response = client.request("/my-bucket/my-key", builder ->
-                builder.put(okhttp3.RequestBody.create("hello world".getBytes(), okhttp3.MediaType.get("application/octet-stream")))
-            );
+            var response = client.request("/my-bucket/my-key", builder ->{
+            builder.put(BodyPublishers.ofByteArray("hello world".getBytes()))
+                   .header("Content-Type", "application/octet-stream");
+            });
+
             assertEquals(200, response.code());
-            assertNotNull(response.header("ETag"));
-            assertEquals("\"dummy-etag-12345\"", response.header("ETag"));
+            assertNotNull(response.headers().get("ETag"));
+            assertEquals("\"dummy-etag-12345\"", response.headers().get("ETag").get(0));
             assertEquals("", response.body().string());  // S3 compat: empty body
-            response.close();
         });
     }
 
@@ -93,9 +95,9 @@ class GatewayHttpTest {
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
             client.request("/videos/movie.mp4", builder ->
-                builder.put(okhttp3.RequestBody.create("data".getBytes(), okhttp3.MediaType.get("application/octet-stream")))
-            ).close();
-
+            builder.put(BodyPublishers.ofByteArray("data".getBytes()))
+                .header("Content-Type", "application/octet-stream")
+            );
             verify(mockStorage).putObject(eq("videos"), eq("movie.mp4"), any(InputStream.class), anyLong());
         });
     }
@@ -107,14 +109,14 @@ class GatewayHttpTest {
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
             var response = client.request("/bucket/key", builder ->
-                builder.put(okhttp3.RequestBody.create("data".getBytes(), okhttp3.MediaType.get("application/octet-stream")))
+                builder.put(BodyPublishers.ofByteArray("data".getBytes()))
+                       .header("Content-Type", "application/octet-stream")
             );
             assertEquals(500, response.code());
-            assertEquals("application/xml", response.header("Content-Type"));
+            assertEquals("application/xml", response.headers().get("Content-Type").get(0));
             String body = response.body().string();
             assertTrue(body.contains("<Code>InternalError</Code>"));
             assertTrue(body.contains("<Resource>/bucket/key</Resource>"));
-            response.close();
         });
     }
 
@@ -130,10 +132,9 @@ class GatewayHttpTest {
             var response = client.get("/my-bucket/my-key");
 
             assertEquals(200, response.code());
-            assertEquals("application/octet-stream", response.header("Content-Type"));
-            assertEquals("\"dummy-etag-12345\"", response.header("ETag"));
-            assertArrayEquals(content, response.body().bytes());
-            response.close();
+            assertEquals("application/octet-stream", response.headers().get("Content-Type").get(0));
+            assertEquals("\"dummy-etag-12345\"", response.headers().get("ETag").get(0));
+            assertArrayEquals(content, response.body().string().getBytes(StandardCharsets.UTF_8));
         });
     }
 
@@ -146,12 +147,11 @@ class GatewayHttpTest {
             var response = client.get("/bucket/missing-key");
 
             assertEquals(404, response.code());
-            assertEquals("application/xml", response.header("Content-Type"));
+            assertEquals("application/xml", response.headers().get("Content-Type").get(0));
             String body = response.body().string();
             assertTrue(body.contains("<Code>NoSuchKey</Code>"));
             assertTrue(body.contains("The specified key does not exist."));
             assertTrue(body.contains("<Resource>/bucket/missing-key</Resource>"));
-            response.close();
         });
     }
 
@@ -164,10 +164,9 @@ class GatewayHttpTest {
             var response = client.get("/bucket/key");
 
             assertEquals(500, response.code());
-            assertEquals("application/xml", response.header("Content-Type"));
+            assertEquals("application/xml", response.headers().get("Content-Type").get(0));
             String body = response.body().string();
             assertTrue(body.contains("<Code>InternalError</Code>"));
-            response.close();
         });
     }
 
@@ -177,7 +176,7 @@ class GatewayHttpTest {
             .thenReturn(new ByteArrayInputStream("data".getBytes()));
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
-            client.get("/videos/clip.mp4").close();
+            client.get("/videos/clip.mp4");
 
             verify(mockStorage).getObject("videos", "clip.mp4");
         });
@@ -191,11 +190,10 @@ class GatewayHttpTest {
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
             var response = client.request("/bucket/key", builder ->
-                builder.delete()
+                builder.delete(BodyPublishers.noBody())
             );
 
             assertEquals(204, response.code());
-            response.close();
         });
     }
 
@@ -204,7 +202,7 @@ class GatewayHttpTest {
         doNothing().when(mockStorage).deleteObject(anyString(), anyString());
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
-            client.request("/videos/old-clip.mp4", builder -> builder.delete()).close();
+            client.request("/videos/old-clip.mp4", builder -> builder.delete(BodyPublishers.noBody()));
 
             verify(mockStorage).deleteObject("videos", "old-clip.mp4");
         });
@@ -217,15 +215,14 @@ class GatewayHttpTest {
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
             var response = client.request("/bucket/key", builder ->
-                builder.delete()
+                builder.delete(BodyPublishers.noBody())
             );
 
             assertEquals(500, response.code());
-            assertEquals("application/xml", response.header("Content-Type"));
+            assertEquals("application/xml", response.headers().get("Content-Type").get(0));
             String body = response.body().string();
             assertTrue(body.contains("<Code>InternalError</Code>"));
             assertTrue(body.contains("<Resource>/bucket/key</Resource>"));
-            response.close();
         });
     }
 
@@ -262,27 +259,24 @@ class GatewayHttpTest {
 
         JavalinTest.test(Main.createApp(mockStorage), (server, client) -> {
             // PUT
-            var putResp = client.request("/bucket/file.mp4", builder ->
-                builder.put(okhttp3.RequestBody.create(content, okhttp3.MediaType.get("application/octet-stream")))
+            var putResp = client.request("/bucket/file.mp4", builder -> 
+                builder.put(BodyPublishers.ofByteArray(content))
+                       .header("Content-Type", "application/octet-stream")
             );
             assertEquals(200, putResp.code());
 
             // GET — should find it
             var getResp = client.get("/bucket/file.mp4");
             assertEquals(200, getResp.code());
-            assertArrayEquals(content, getResp.body().bytes());
+            assertArrayEquals(content, getResp.body().string().getBytes(StandardCharsets.UTF_8));
 
             // DELETE
-            var delResp = client.request("/bucket/file.mp4", builder -> builder.delete());
+            var delResp = client.request("/bucket/file.mp4", builder -> builder.delete(BodyPublishers.noBody()));
             assertEquals(204, delResp.code());
 
             // GET again — should 404
             var getResp2 = client.get("/bucket/file.mp4");
             assertEquals(404, getResp2.code());
-            putResp.close();
-            getResp.close();
-            delResp.close();
-            getResp2.close();
         });
     }
 }
