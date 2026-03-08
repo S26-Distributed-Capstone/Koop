@@ -14,10 +14,10 @@ import io.javalin.http.Context;
  * Storage Node HTTP server powered by Javalin + virtual threads.
  *
  * Endpoints:
- *   PUT    /store/{partition}/{key}?requestId=...  — store a shard
- *   GET    /store/{partition}/{key}                — retrieve a shard
- *   DELETE /store/{partition}/{key}                — delete a shard
- *   GET    /health                                 — health check
+ * PUT /store/{partition}/{key}?requestId=... — store a shard
+ * GET /store/{partition}/{key} — retrieve a shard
+ * DELETE /store/{partition}/{key} — delete a shard
+ * GET /health — health check
  */
 public class StorageNodeServer {
 
@@ -34,9 +34,9 @@ public class StorageNodeServer {
 
     public static void main(String[] args) {
         String envPort = System.getenv("PORT");
-        String envDir  = System.getenv("STORAGE_DIR");
+        String envDir = System.getenv("STORAGE_DIR");
 
-        int port      = (envPort != null) ? Integer.parseInt(envPort) : 8080;
+        int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
         Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
 
         logger.info("Starting StorageNodeServer with port={} and storagePath={}", port, storagePath);
@@ -62,16 +62,15 @@ public class StorageNodeServer {
 
     private void handlePut(Context ctx) {
         try {
-            int partition    = Integer.parseInt(ctx.pathParam("partition"));
-            String key       = ctx.pathParam("key");
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key = ctx.pathParam("key");
             String requestId = ctx.queryParam("requestId");
-            long length      = ctx.contentLength();
 
             storageNode.store(partition, requestId, key,
-                    Channels.newChannel(ctx.bodyInputStream()), length);
+                    Channels.newChannel(ctx.bodyInputStream()));
 
             ctx.status(200).result("OK");
-            logger.debug("PUT partition={} key={} requestId={} length={}", partition, key, requestId, length);
+            logger.debug("PUT partition={} key={} requestId={}", partition, key, requestId);
         } catch (Exception e) {
             logger.error("Error handling PUT", e);
             ctx.status(500).result("ERROR");
@@ -81,20 +80,17 @@ public class StorageNodeServer {
     private void handleGet(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String key    = ctx.pathParam("key");
+            String key = ctx.pathParam("key");
 
             var dataOpt = storageNode.retrieve(partition, key);
             if (dataOpt.isPresent()) {
-                try (var fc = dataOpt.get()) {
-                    byte[] data = new byte[(int) fc.size()];
-                    var buf = java.nio.ByteBuffer.wrap(data);
-                    while (buf.hasRemaining()) fc.read(buf);
+                var fc = dataOpt.get();
+                ctx.status(200)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Length", String.valueOf(fc.size()))
+                        .result(Channels.newInputStream(fc));
 
-                    ctx.status(200)
-                       .header("Content-Type", "application/octet-stream")
-                       .result(data);
-                    logger.debug("GET partition={} key={} found={} bytes", partition, key, data.length);
-                }
+                logger.debug("GET partition={} key={} streaming {} bytes", partition, key, fc.size());
             } else {
                 ctx.status(404).result("");
                 logger.debug("GET partition={} key={} not found", partition, key);
@@ -108,7 +104,7 @@ public class StorageNodeServer {
     private void handleDelete(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String key    = ctx.pathParam("key");
+            String key = ctx.pathParam("key");
 
             boolean result = storageNode.delete(partition, key);
             if (result) {
@@ -148,7 +144,10 @@ public class StorageNodeServer {
         }
     }
 
-    /** Returns the actual port the server is listening on (useful when started with port 0). */
+    /**
+     * Returns the actual port the server is listening on (useful when started with
+     * port 0).
+     */
     public int port() {
         return app != null ? app.port() : port;
     }

@@ -24,9 +24,9 @@ import static com.github.koop.common.erasure.ErasureCoder.TOTAL;
 /**
  * Distributes erasure-coded shards to storage nodes via HTTP.
  * Each storage node runs a Javalin server with endpoints:
- *   PUT    /store/{partition}/{key}?requestId=...
- *   GET    /store/{partition}/{key}
- *   DELETE /store/{partition}/{key}
+ * PUT /store/{partition}/{key}?requestId=...
+ * GET /store/{partition}/{key}
+ * DELETE /store/{partition}/{key}
  */
 public final class StorageWorker {
 
@@ -63,15 +63,20 @@ public final class StorageWorker {
     }
 
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
-        if (data == null)      throw new IllegalArgumentException("data is null");
-        if (length < 0)        throw new IllegalArgumentException("length < 0");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (data == null)
+            throw new IllegalArgumentException("data is null");
+        if (length < 0)
+            throw new IllegalArgumentException("length < 0");
 
         String storageKey = bucket + "-" + key;
         int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum    = routing[0];
+        int setNum = routing[0];
         int partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
@@ -89,15 +94,15 @@ public final class StorageWorker {
                 try {
                     InetSocketAddress node = nodes.get(index);
 
-                    // Read the shard fully so we can send it as a fixed-length body
-                    byte[] shardData = shardStreams[index].readAllBytes();
-
                     URI uri = URI.create(String.format("http://%s:%d/store/%d/%s?requestId=%s",
                             node.getHostString(), node.getPort(), partition, storageKey, requestID));
 
+                    // REMOVED: byte[] shardData = shardStreams[index].readAllBytes();
+
+                    // ADDED: Stream directly from the InputStream
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
-                            .PUT(HttpRequest.BodyPublishers.ofByteArray(shardData))
+                            .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
                             .build();
 
@@ -136,25 +141,31 @@ public final class StorageWorker {
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
         int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum    = routing[0];
+        int setNum = routing[0];
         int partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
 
         PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream pis  = new PipedInputStream(pos, 256 * 1024);
+        PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
         executor.execute(() -> {
             try (pos) {
                 streamReconstruct(partition, storageKey, nodes, pos);
             } catch (Exception e) {
-                try { pos.close(); } catch (IOException ignored) {}
+                try {
+                    pos.close();
+                } catch (IOException ignored) {
+                }
             }
         });
 
@@ -162,13 +173,16 @@ public final class StorageWorker {
     }
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "-" + key;
         int[] routing = ErasureRouting.setForKey(storageKey);
-        int setNum    = routing[0];
+        int setNum = routing[0];
         int partition = routing[1];
 
         List<InetSocketAddress> nodes = nodesForKey(setNum);
@@ -228,11 +242,11 @@ public final class StorageWorker {
     // -------------------------------------------------------------------------
 
     private void streamReconstruct(int partition, String storageKey,
-                                   List<InetSocketAddress> nodes, OutputStream out)
+            List<InetSocketAddress> nodes, OutputStream out)
             throws IOException {
 
         InputStream[] ins = new InputStream[TOTAL];
-        boolean[] present  = new boolean[TOTAL];
+        boolean[] present = new boolean[TOTAL];
 
         for (int i = 0; i < TOTAL; i++) {
             try {
@@ -260,7 +274,8 @@ public final class StorageWorker {
 
         int count = 0;
         for (boolean b : present)
-            if (b) count++;
+            if (b)
+                count++;
         if (count < ErasureCoder.K)
             throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
 

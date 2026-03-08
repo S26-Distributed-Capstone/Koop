@@ -37,7 +37,7 @@ class StorageNodeTest {
         int length = content.length();
 
         // 1. Store
-        node.store(partition, reqId, key, createChannel(content), length);
+        node.store(partition, reqId, key, createChannel(content));
 
         // 2. Retrieve
         Optional<FileChannel> result = node.retrieve(partition, key);
@@ -64,10 +64,10 @@ class StorageNodeTest {
         String v2 = "Data V2";
 
         // Store Version 1
-        node.store(partition, "v1", key, createChannel(v1), v1.length());
+        node.store(partition, "v1", key, createChannel(v1));
 
         // Store Version 2
-        node.store(partition, "v2", key, createChannel(v2), v2.length());
+        node.store(partition, "v2", key, createChannel(v2));
 
         // Retrieve (Should get latest)
         Optional<FileChannel> result = node.retrieve(partition, key);
@@ -91,7 +91,7 @@ class StorageNodeTest {
         String content = "delete me";
 
         // Store initial data
-        node.store(partition, reqId, key, createChannel(content), content.length());
+        node.store(partition, reqId, key, createChannel(content));
 
         // Pre-check: Ensure it exists
         assertTrue(node.retrieve(partition, key).isPresent());
