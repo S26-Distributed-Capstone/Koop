@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package koop.storage;
+
+option java_package = "com.github.koop.common.grpc";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// Storage-node gRPC service – replaces the custom TCP binary protocol.
+// ---------------------------------------------------------------------------
+
+service StorageNodeService {
+
+  // Client-streaming PUT: metadata first, then data chunks.
+  rpc PutShard  (stream PutShardRequest)  returns (PutShardResponse);
+
+  // Server-streaming GET: metadata first, then data chunks.
+  rpc GetShard  (GetShardRequest)         returns (stream GetShardResponse);
+
+  // Unary DELETE.
+  rpc DeleteShard (DeleteShardRequest)    returns (DeleteShardResponse);
+}
+
+// ---- PUT ----
+
+message PutShardRequest {
+  oneof payload {
+    PutShardMetadata metadata = 1;
+    bytes            chunk    = 2;
+  }
+}
+
+message PutShardMetadata {
+  string request_id     = 1;
+  int32  partition      = 2;
+  string key            = 3;
+  int64  payload_length = 4;
+}
+
+message PutShardResponse {
+  bool success = 1;
+}
+
+// ---- GET ----
+
+message GetShardRequest {
+  int32  partition = 1;
+  string key       = 2;
+}
+
+message GetShardResponse {
+  oneof payload {
+    GetShardMetadata metadata = 1;
+    bytes            chunk    = 2;
+  }
+}
+
+message GetShardMetadata {
+  bool found = 1;
+}
+
+// ---- DELETE ----
+
+message DeleteShardRequest {
+  int32  partition = 1;
+  string key       = 2;
+}
+
+message DeleteShardResponse {
+  bool success = 1;
+}

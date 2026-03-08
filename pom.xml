@@ -28,6 +28,8 @@
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <junit.version>5.10.2</junit.version>
+    <grpc.version>1.62.2</grpc.version>
+    <protobuf.version>3.25.3</protobuf.version>
   </properties>
 
   <build>

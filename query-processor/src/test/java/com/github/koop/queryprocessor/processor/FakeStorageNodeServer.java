@@ -1,164 +1,183 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.github.koop.common.messages.InputStreamMessageReader;
-import com.github.koop.common.messages.MessageBuilder;
-import com.github.koop.common.messages.Opcode;
+import com.github.koop.common.grpc.*;
+import com.google.protobuf.ByteString;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
+import io.grpc.Status;
+import io.grpc.stub.StreamObserver;
 
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
+import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Fake storage node server that matches the REAL StorageNodeServer wire protocol using common-lib messages
+ * Fake gRPC storage-node server for unit testing.
+ * Stores shards in memory and honours the {@code enabled} flag to simulate
+ * node failures.
  */
 public final class FakeStorageNodeServer implements Closeable {
 
-    private final ServerSocket server;
-    private final Thread acceptThread;
+    private static final int CHUNK_SIZE = 1 << 20;  // 1 MB
 
+    private final Server server;
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
     private volatile boolean enabled = true;
 
-    Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
+    private static final Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
 
     public FakeStorageNodeServer() throws IOException {
-        this.server = new ServerSocket(0);
-        this.acceptThread = Thread.ofVirtual().start(this::acceptLoop);
+        this.server = ServerBuilder.forPort(0)
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .maxInboundMessageSize(64 * 1024 * 1024)
+                .addService(new FakeService())
+                .build()
+                .start();
     }
 
     public InetSocketAddress address() {
-        return new InetSocketAddress("127.0.0.1", server.getLocalPort());
+        return new InetSocketAddress("127.0.0.1", server.getPort());
     }
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
-    private void acceptLoop() {
-        while (!server.isClosed()) {
-            try {
-                Socket s = server.accept();
-                Thread.startVirtualThread(() -> {
-                    try (s) {
-                        handle(s);
-                    } catch (IOException ignored) {
-                        // swallow in fake server
+    @Override
+    public void close() throws IOException {
+        server.shutdownNow();
+    }
+
+    // -------------------------------------------------------
+    //  Inner gRPC service
+    // -------------------------------------------------------
+
+    private class FakeService
+            extends StorageNodeServiceGrpc.StorageNodeServiceImplBase {
+
+        // ---- PUT (client-streaming) ----
+
+        @Override
+        public StreamObserver<PutShardRequest> putShard(
+                StreamObserver<PutShardResponse> responseObserver) {
+
+            if (!enabled) {
+                responseObserver.onError(
+                        Status.UNAVAILABLE.withDescription("Node disabled").asRuntimeException());
+                return noOpObserver();
+            }
+
+            return new StreamObserver<>() {
+                private int partition;
+                private String key;
+                private final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+
+                @Override
+                public void onNext(PutShardRequest request) {
+                    switch (request.getPayloadCase()) {
+                        case METADATA -> {
+                            partition = request.getMetadata().getPartition();
+                            key       = request.getMetadata().getKey();
+                        }
+                        case CHUNK -> {
+                            try { request.getChunk().writeTo(buf); }
+                            catch (IOException ignored) {}
+                        }
+                        default -> {}
                     }
-                });
-            } catch (IOException e) {
-                if (server.isClosed()) return;
+                }
+
+                @Override public void onError(Throwable t) {}
+
+                @Override
+                public void onCompleted() {
+                    store.put(mapKey(partition, key), buf.toByteArray());
+                    responseObserver.onNext(PutShardResponse.newBuilder()
+                            .setSuccess(true).build());
+                    responseObserver.onCompleted();
+                }
+            };
+        }
+
+        // ---- GET (server-streaming) ----
+
+        @Override
+        public void getShard(GetShardRequest request,
+                             StreamObserver<GetShardResponse> responseObserver) {
+
+            if (!enabled) {
+                responseObserver.onError(
+                        Status.UNAVAILABLE.withDescription("Node disabled").asRuntimeException());
+                return;
             }
-        }
-    }
 
-    private void handle(Socket s) throws IOException {
-        s.setTcpNoDelay(true);
+            byte[] data = store.get(mapKey(request.getPartition(), request.getKey()));
 
-        InputStream in = new BufferedInputStream(s.getInputStream());
-        OutputStream out = new BufferedOutputStream(s.getOutputStream());
-
-        InputStreamMessageReader reader;
-        try {
-            reader = new InputStreamMessageReader(in);
-        } catch (EOFException eof) {
-            return;
-        }
-
-        int opcode = reader.getOpcode();
-
-        if (!enabled) {
-            // simulate node failure but keep protocol correct
-            Opcode op = getOpcodeByCode(opcode);
-            if (op == null) {
-                MessageBuilder err = new MessageBuilder(op);
-                err.writeByte((byte) 0);
-                err.writeToOutputStream(out);
-                out.flush();
-            }
-            return;
-        }
-
-        if (opcode == Opcode.SN_PUT.getCode()) {
-            String requestId = reader.readString();
-            int partition = reader.readInt();
-            String key = reader.readString();
-
-            // payload is rest of stream
-            byte[] payload = in.readNBytes((int)reader.getRemainingLength());
-
-            store.put(mapKey(partition, key), payload);
-
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_PUT);
-            resp.writeByte((byte) 1);
-            resp.writeToOutputStream(out);
-            out.flush();
-
-        } else if (opcode == Opcode.SN_GET.getCode()) {
-            int partition = reader.readInt();
-            String key = reader.readString();
-
-            byte[] data = store.get(mapKey(partition, key));
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
             if (data == null) {
-                resp.writeByte((byte) 0);
+                responseObserver.onNext(GetShardResponse.newBuilder()
+                        .setMetadata(GetShardMetadata.newBuilder()
+                                .setFound(false).build())
+                        .build());
             } else {
-                resp.writeByte((byte) 1);
-                resp.writeLargePayload(data.length, new ByteArrayInputStream(data));
+                responseObserver.onNext(GetShardResponse.newBuilder()
+                        .setMetadata(GetShardMetadata.newBuilder()
+                                .setFound(true).build())
+                        .build());
+
+                int offset = 0;
+                while (offset < data.length) {
+                    int len = Math.min(CHUNK_SIZE, data.length - offset);
+                    responseObserver.onNext(GetShardResponse.newBuilder()
+                            .setChunk(ByteString.copyFrom(data, offset, len))
+                            .build());
+                    offset += len;
+                }
             }
-            resp.writeToOutputStream(out);
-            out.flush();
+            responseObserver.onCompleted();
+        }
 
-        } else if (opcode == Opcode.SN_DELETE.getCode()) {
-            int partition = reader.readInt();
-            String key = reader.readString();
+        // ---- DELETE (unary) ----
 
-            store.remove(mapKey(partition, key));
+        @Override
+        public void deleteShard(DeleteShardRequest request,
+                                StreamObserver<DeleteShardResponse> responseObserver) {
 
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_DELETE);
-            resp.writeByte((byte) 1);
-            resp.writeToOutputStream(out);
-            out.flush();
+            if (!enabled) {
+                responseObserver.onError(
+                        Status.UNAVAILABLE.withDescription("Node disabled").asRuntimeException());
+                return;
+            }
 
-        } else {
-            // Unrecognized opcode
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
-            resp.writeByte((byte) 0);
-            resp.writeToOutputStream(out);
-            out.flush();
+            store.remove(mapKey(request.getPartition(), request.getKey()));
+            responseObserver.onNext(DeleteShardResponse.newBuilder()
+                    .setSuccess(true).build());
+            responseObserver.onCompleted();
         }
     }
+
+    // -------------------------------------------------------
+    //  Helpers
+    // -------------------------------------------------------
 
     private static String mapKey(int partition, String key) {
         return partition + "|" + key;
     }
 
-    private static byte[] readAllToEof(InputStream in) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        byte[] buf = new byte[64 * 1024];
-        while (true) {
-            int r = in.read(buf);
-            if (r == -1) break;
-            baos.write(buf, 0, r);
-        }
-        return baos.toByteArray();
+    @SuppressWarnings("unchecked")
+    private static <T> StreamObserver<T> noOpObserver() {
+        return (StreamObserver<T>) NO_OP;
     }
 
-    private Opcode getOpcodeByCode(int code) {
-        for (Opcode op : Opcode.values()) {
-            if (op.getCode() == code) return op;
-        }
-        return null;
-    }
-
-    @Override
-    public void close() throws IOException {
-        server.close();
-        // acceptThread will exit when server closes
-    }
+    private static final StreamObserver<?> NO_OP = new StreamObserver<>() {
+        @Override public void onNext(Object v)     {}
+        @Override public void onError(Throwable t) {}
+        @Override public void onCompleted()        {}
+    };
 }

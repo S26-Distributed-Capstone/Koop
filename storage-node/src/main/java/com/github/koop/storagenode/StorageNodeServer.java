@@ -1,53 +1,49 @@
 package com.github.koop.storagenode;
 
-import java.io.EOFException;
+import com.github.koop.common.grpc.*;
+import com.google.protobuf.ByteString;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
+import io.grpc.Status;
+import io.grpc.stub.StreamObserver;
+
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.ClosedByInterruptException;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Path;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.github.koop.common.messages.ChannelMessageReader;
-import com.github.koop.common.messages.MessageBuilder;
-import com.github.koop.common.messages.MessageReader;
-import com.github.koop.common.messages.Opcode;
-
 public class StorageNodeServer {
 
-    private int port;
-    private final Map<Integer, Handler> handlers;
+    private final int port;
     private final StorageNode storageNode;
+    private Server grpcServer;
 
-    private ServerSocketChannel serverSocketChannel;
-
-    private static Logger logger = LogManager.getLogger(StorageNodeServer.class);
+    private static final Logger logger = LogManager.getLogger(StorageNodeServer.class);
+    private static final int CHUNK_SIZE = 1 << 20;   // 1 MB
 
     public StorageNodeServer(int port, Path dir) {
         this.port = port;
-        this.handlers = new ConcurrentHashMap<>();
         this.storageNode = new StorageNode(dir);
-        registerHandlers();
     }
 
     public static void main(String[] args) {
-        // 1. Read configuration from Environment Variables
         String envPort = System.getenv("PORT");
-        String envDir = System.getenv("STORAGE_DIR");
+        String envDir  = System.getenv("STORAGE_DIR");
 
-        // 2. Set defaults if environment variables are missing
-        int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
+        int  port        = (envPort != null) ? Integer.parseInt(envPort) : 8080;
         Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
 
         logger.info("Starting StorageNodeServer with port={} and storagePath={}", port, storagePath);
 
-        // 3. Ensure the storage directory exists
         try {
             java.nio.file.Files.createDirectories(storagePath);
         } catch (IOException e) {
@@ -55,14 +51,11 @@ public class StorageNodeServer {
             System.exit(1);
         }
 
-        // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
-        // Log server startup and configuration
         logger.info("Storage Node starting on port: " + port);
         logger.info("Storage directory: " + storagePath.toAbsolutePath());
 
-        // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
             server.stop();
@@ -71,124 +64,232 @@ public class StorageNodeServer {
         server.start();
     }
 
-    private void registerHandlers() {
-        this.handlers.put(Opcode.SN_PUT.getCode(), this::handlePut);
-        this.handlers.put(Opcode.SN_GET.getCode(), this::handleGet);
-        this.handlers.put(Opcode.SN_DELETE.getCode(), this::handleDelete);
-    }
-
-    // --- Handlers ---
-
-    protected void handlePut(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var reqId = messageReader.readString();
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        logger.debug("Handling PUT request: reqId={}, partition={}, key={}", reqId, partition, key);
-
-        var messageWriter = new MessageBuilder(Opcode.SN_PUT);
-        long payloadLength = messageReader.getRemainingLength();
-        logger.debug("Storing data of length {} for key {} in partition {}", payloadLength, key, partition);
-        this.storageNode.store(partition, reqId, key, socketChannel, payloadLength);
-        // write success
-        logger.debug("Writing success for reqId={}", reqId);
-        messageWriter.writeByte((byte) 1);
-        messageWriter.writeToChannel(socketChannel);
-    }
-
-    protected void handleGet(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        var data = this.storageNode.retrieve(partition, key);
-        var messageBuilder = new MessageBuilder(Opcode.SN_GET);
-        if (data.isEmpty()) {
-            messageBuilder.writeByte((byte) 0);// not found
-            messageBuilder.writeToChannel(socketChannel);
-        } else {
-            try (var dataChannel = data.get()) {
-                var size = dataChannel.size();
-                messageBuilder.writeByte((byte) 1);
-                messageBuilder.writeLargePayload(size, dataChannel);
-                messageBuilder.writeToChannel(socketChannel);
-                dataChannel.close(); // Ensure channel is closed after transfer
-            }
-        }
-    }
-
-    protected void handleDelete(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        var result = this.storageNode.delete(partition, key);
-        var messageWriter = new MessageBuilder(Opcode.SN_DELETE);
-        messageWriter.writeByte((byte) (result ? 1 : 0));
-        messageWriter.writeToChannel(socketChannel);
-    }
-
-    // --- Server Lifecycle ---
+    // -------------------------------------------------------------------
+    //  Lifecycle
+    // -------------------------------------------------------------------
 
     public void start() {
-        var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
         try {
-            this.serverSocketChannel = ServerSocketChannel.open();
-            this.serverSocketChannel.bind(new InetSocketAddress(port));
+            grpcServer = ServerBuilder.forPort(port)
+                    .executor(Executors.newVirtualThreadPerTaskExecutor())
+                    .maxInboundMessageSize(64 * 1024 * 1024)
+                    .addService(new StorageNodeGrpcService())
+                    .build()
+                    .start();
 
-            while (this.serverSocketChannel.isOpen() && !Thread.currentThread().isInterrupted()) {
-                SocketChannel clientChannel;
-                try {
-                    clientChannel = this.serverSocketChannel.accept();
-                } catch (ClosedByInterruptException e) {
-                    break;
-                }
-
-                if (!this.serverSocketChannel.isOpen()) {
-                    break;
-                }
-
-                executor.submit(() -> {
-                    try (clientChannel) {
-                        while (clientChannel.isConnected()) {
-                            var messageReader = new ChannelMessageReader(clientChannel);
-                            var length = messageReader.getRemainingLength();
-                            if (length <= 0)
-                                break;
-                            var opcode = messageReader.getOpcode();
-                            logger.debug("Received opcode {} with payload length {} from {}", opcode, length,
-                                    clientChannel.getRemoteAddress());
-                            // 3. Dispatch
-                            var handler = this.handlers.get(opcode);
-                            if (handler != null) {
-                                // Client's frameLength excludes opcode already.
-                                handler.handle(clientChannel, messageReader);
-                            } else {
-                                System.err.println("Unknown opcode: " + opcode);
-                                break;
-                            }
-                        }
-                    } catch (EOFException e) {
-                        // normal disconnect
-                    } catch (IOException e) {
-                        // Ignore standard client disconnect errors
-                        if (e.getMessage() != null &&
-                                !e.getMessage().contains("Connection reset") &&
-                                !e.getMessage().contains("Broken pipe")) {
-
-                            e.printStackTrace();
-                        }
-                    }
-                });
-            }
+            logger.info("Storage Node gRPC server started on port {}", port);
+            grpcServer.awaitTermination();
         } catch (IOException e) {
-            if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
-                e.printStackTrace();
-            }
+            logger.error("Failed to start gRPC server", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     public void stop() {
-        if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
+        if (grpcServer != null) {
+            grpcServer.shutdownNow();
+        }
+    }
+
+    // -------------------------------------------------------------------
+    //  BlockingQueue-backed InputStream.
+    //
+    //  Unlike PipedInputStream this works regardless of how many threads
+    //  write into the queue — perfect for gRPC callbacks that may arrive
+    //  on different virtual threads.
+    // -------------------------------------------------------------------
+
+    private static final ByteString POISON = ByteString.EMPTY;
+
+    private static final class QueueInputStream extends InputStream {
+
+        private final BlockingQueue<ByteString> queue;
+        private byte[] current;
+        private int    pos;
+
+        QueueInputStream(BlockingQueue<ByteString> queue) {
+            this.queue = queue;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (!ensure()) return -1;
+            return current[pos++] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            if (!ensure()) return -1;
+            int n = Math.min(len, current.length - pos);
+            System.arraycopy(current, pos, b, off, n);
+            pos += n;
+            return n;
+        }
+
+        private boolean ensure() throws IOException {
+            while (current == null || pos >= current.length) {
+                ByteString next;
+                try {
+                    next = queue.take();      // parks virtual thread, never pins
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while reading from queue", e);
+                }
+                if (next == POISON) return false;   // end-of-stream sentinel
+                current = next.toByteArray();
+                pos = 0;
+            }
+            return true;
+        }
+    }
+
+    // -------------------------------------------------------------------
+    //  gRPC service implementation
+    // -------------------------------------------------------------------
+
+    private class StorageNodeGrpcService
+            extends StorageNodeServiceGrpc.StorageNodeServiceImplBase {
+
+        // ---- PUT (client-streaming) ----
+
+        @Override
+        public StreamObserver<PutShardRequest> putShard(
+                StreamObserver<PutShardResponse> responseObserver) {
+
+            return new StreamObserver<>() {
+
+                private final BlockingQueue<ByteString> dataQueue = new LinkedBlockingQueue<>();
+                private volatile Thread   storeThread;
+                private volatile boolean  storeSuccess;
+                private volatile Throwable storeError;
+                private volatile String   reqId;
+
+                @Override
+                public void onNext(PutShardRequest request) {
+                    switch (request.getPayloadCase()) {
+                        case METADATA -> {
+                            var meta = request.getMetadata();
+                            reqId = meta.getRequestId();
+                            logger.debug("PUT metadata: reqId={}, partition={}, key={}, len={}",
+                                    reqId, meta.getPartition(), meta.getKey(),
+                                    meta.getPayloadLength());
+
+                            InputStream queueStream = new QueueInputStream(dataQueue);
+                            ReadableByteChannel channel = Channels.newChannel(queueStream);
+
+                            storeThread = Thread.startVirtualThread(() -> {
+                                try {
+                                    storageNode.store(
+                                            meta.getPartition(),
+                                            meta.getRequestId(),
+                                            meta.getKey(),
+                                            channel,
+                                            meta.getPayloadLength());
+                                    storeSuccess = true;
+                                } catch (IOException e) {
+                                    storeError = e;
+                                    logger.debug("Store failed for reqId={}: {}",
+                                            reqId, e.getMessage());
+                                }
+                            });
+                        }
+                        case CHUNK -> {
+                            try {
+                                dataQueue.put(request.getChunk());
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                        default -> logger.warn("Unknown PutShardRequest payload case");
+                    }
+                }
+
+                @Override
+                public void onError(Throwable t) {
+                    dataQueue.offer(POISON);          // unblock store thread
+                }
+
+                @Override
+                public void onCompleted() {
+                    try {
+                        dataQueue.put(POISON);        // signal end-of-stream
+                        if (storeThread != null) storeThread.join();
+                    } catch (Exception ignored) {}
+
+                    responseObserver.onNext(PutShardResponse.newBuilder()
+                            .setSuccess(storeSuccess && storeError == null)
+                            .build());
+                    responseObserver.onCompleted();
+                }
+            };
+        }
+
+        // ---- GET (server-streaming) ----
+
+        @Override
+        public void getShard(GetShardRequest request,
+                             StreamObserver<GetShardResponse> responseObserver) {
             try {
-                this.serverSocketChannel.close();
+                int    partition = request.getPartition();
+                String key       = request.getKey();
+                logger.debug("GET: partition={}, key={}", partition, key);
+
+                var data = storageNode.retrieve(partition, key);
+
+                if (data.isEmpty()) {
+                    responseObserver.onNext(GetShardResponse.newBuilder()
+                            .setMetadata(GetShardMetadata.newBuilder()
+                                    .setFound(false).build())
+                            .build());
+                    responseObserver.onCompleted();
+                    return;
+                }
+
+                try (FileChannel fc = data.get()) {
+                    responseObserver.onNext(GetShardResponse.newBuilder()
+                            .setMetadata(GetShardMetadata.newBuilder()
+                                    .setFound(true).build())
+                            .build());
+
+                    ByteBuffer buf = ByteBuffer.allocate(CHUNK_SIZE);
+                    while (true) {
+                        buf.clear();
+                        int bytesRead = fc.read(buf);
+                        if (bytesRead == -1) break;
+                        buf.flip();
+                        responseObserver.onNext(GetShardResponse.newBuilder()
+                                .setChunk(ByteString.copyFrom(buf))
+                                .build());
+                    }
+                }
+
+                responseObserver.onCompleted();
             } catch (IOException e) {
-                e.printStackTrace();
+                responseObserver.onError(
+                        Status.INTERNAL.withDescription(e.getMessage()).asRuntimeException());
+            }
+        }
+
+        // ---- DELETE (unary) ----
+
+        @Override
+        public void deleteShard(DeleteShardRequest request,
+                                StreamObserver<DeleteShardResponse> responseObserver) {
+            try {
+                int    partition = request.getPartition();
+                String key       = request.getKey();
+                logger.debug("DELETE: partition={}, key={}", partition, key);
+
+                boolean result = storageNode.delete(partition, key);
+
+                responseObserver.onNext(DeleteShardResponse.newBuilder()
+                        .setSuccess(result)
+                        .build());
+                responseObserver.onCompleted();
+            } catch (IOException e) {
+                responseObserver.onError(
+                        Status.INTERNAL.withDescription(e.getMessage()).asRuntimeException());
             }
         }
     }

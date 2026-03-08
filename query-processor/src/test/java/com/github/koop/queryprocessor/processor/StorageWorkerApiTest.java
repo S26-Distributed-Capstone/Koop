@@ -27,7 +27,8 @@ public class StorageWorkerApiTest {
         nodes = new ArrayList<>();
         for (int i = 0; i < 9; i++) nodes.add(new FakeStorageNodeServer());
 
-        List<InetSocketAddress> set = nodes.stream().map(FakeStorageNodeServer::address).toList();
+        List<InetSocketAddress> set = nodes.stream()
+                .map(FakeStorageNodeServer::address).toList();
         worker = new StorageWorker(set, set, set);
     }
 
@@ -38,6 +39,7 @@ public class StorageWorkerApiTest {
 
     @AfterAll
     void teardown() throws Exception {
+        worker.shutdown();
         for (FakeStorageNodeServer n : nodes) n.close();
     }
 
@@ -46,7 +48,8 @@ public class StorageWorkerApiTest {
         byte[] data = new byte[DATA_SIZE];
         new SecureRandom().nextBytes(data);
 
-        boolean ok = worker.put(UUID.randomUUID(), "b", "fileA", data.length, new ByteArrayInputStream(data));
+        boolean ok = worker.put(UUID.randomUUID(), "b", "fileA",
+                data.length, new ByteArrayInputStream(data));
         assertTrue(ok, "put should succeed");
 
         try (InputStream in = worker.get(UUID.randomUUID(), "b", "fileA")) {
@@ -60,7 +63,8 @@ public class StorageWorkerApiTest {
         byte[] data = new byte[DATA_SIZE];
         new SecureRandom().nextBytes(data);
 
-        boolean ok = worker.put(UUID.randomUUID(), "b", "fileB", data.length, new ByteArrayInputStream(data));
+        boolean ok = worker.put(UUID.randomUUID(), "b", "fileB",
+                data.length, new ByteArrayInputStream(data));
         assertTrue(ok, "put should succeed");
 
         // Simulate 3 node failures (M=3 tolerated)
@@ -79,7 +83,8 @@ public class StorageWorkerApiTest {
         byte[] data = new byte[DATA_SIZE];
         new SecureRandom().nextBytes(data);
 
-        boolean ok = worker.put(UUID.randomUUID(), "b", "fileC", data.length, new ByteArrayInputStream(data));
+        boolean ok = worker.put(UUID.randomUUID(), "b", "fileC",
+                data.length, new ByteArrayInputStream(data));
         assertTrue(ok, "put should succeed");
 
         // Simulate 4 node failures (NOT tolerated)
@@ -94,13 +99,12 @@ public class StorageWorkerApiTest {
         }
 
         // Under 4 failures, we should not successfully reconstruct the full object.
-        // Depending on implementation, this may produce EOF/short read rather than throwing.
-        assertNotEquals(data.length, got.length, "should not reconstruct full object under 4 failures");
+        assertNotEquals(data.length, got.length,
+                "should not reconstruct full object under 4 failures");
 
-        // Optional stronger check: if it *did* return full length (rare), it must not match.
         if (got.length == data.length) {
-            assertFalse(Arrays.equals(data, got), "if full length returned, content must not match");
+            assertFalse(Arrays.equals(data, got),
+                    "if full length returned, content must not match");
         }
     }
-
 }
