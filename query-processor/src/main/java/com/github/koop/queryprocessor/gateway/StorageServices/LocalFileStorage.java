@@ -2,6 +2,7 @@ package com.github.koop.queryprocessor.gateway.StorageServices;
 
 import java.io.InputStream;
 import java.nio.file.*;
+import java.util.List;
 
 public class LocalFileStorage implements StorageService {
 
@@ -40,5 +41,55 @@ public class LocalFileStorage implements StorageService {
         Path filePath = rootDir.resolve(bucket).resolve(key);
         Files.deleteIfExists(filePath);
         System.out.println("[LocalFileStorage] Deleted: " + filePath);
+    }
+
+    @Override
+    public void createBucket(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'createBucket'");
+    }
+
+    @Override
+    public void deleteBucket(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'deleteBucket'");
+    }
+
+    @Override
+    public List<ObjectSummary> listObjects(String bucket, String prefix, int maxKeys) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'listObjects'");
+    }
+
+    @Override
+    public boolean bucketExists(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'bucketExists'");
+    }
+
+    @Override
+    public String initiateMultipartUpload(String bucket, String key) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'initiateMultipartUpload'");
+    }
+
+    @Override
+    public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
+            throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'uploadPart'");
+    }
+
+    @Override
+    public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
+            throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'completeMultipartUpload'");
+    }
+
+    @Override
+    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'abortMultipartUpload'");
     }
 }

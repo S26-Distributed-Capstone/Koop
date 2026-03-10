@@ -1,100 +1,249 @@
 package com.github.koop.queryprocessor.gateway.StorageServices;
 
-import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.InputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.IOException;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Executors;
 
 /**
- * HTTP-based client for the Storage Node.
- *
- * Replaces the old TCP binary protocol with simple HTTP calls.
- * The storage node exposes:
- *   PUT    /store/{partition}/{key}?requestId=...
- *   GET    /store/{partition}/{key}
- *   DELETE /store/{partition}/{key}
+ * A client implementation for the Storage Node binary protocol.
+ * * Protocol Specification:
+ * - Transport: TCP
+ * - Frame Header: 8 bytes (Long) representing the total length of the payload (including Opcode).
+ * - Opcode: 4 bytes (Int).
+ * - Strings: 4-byte Integer length prefix followed by UTF-8 bytes.
+ * * Opcodes:
+ * - PUT (1): Stores data.
+ * - DELETE (2): Logically deletes data.
+ * - GET (6): Retrieves data.
  */
 public class TcpStorageService implements StorageService {
 
-    private final String baseUrl;
-    private final HttpClient httpClient;
+    private final String routerHost;
+    private final int routerPort;
+
+    //Protocol Constants
+    private static final int OPCODE_PUT = 1;
+    private static final int OPCODE_DELETE = 2;
+    private static final int OPCODE_GET = 6;
+
+    // Status Constants
+    private static final int STATUS_SUCCESS = 1;
+    private static final int STATUS_FAILURE = 0;
+
 
     public TcpStorageService(String routerHost, int routerPort) {
-        this.baseUrl = "http://" + routerHost + ":" + routerPort;
-        this.httpClient = HttpClient.newBuilder()
-                .executor(Executors.newVirtualThreadPerTaskExecutor())
-                .build();
+        this.routerHost = routerHost;
+        this.routerPort = routerPort;
     }
 
+    /**
+     * Stores an object in the storage node.
+     * * Packet Structure:
+     * [FrameLen (8)] [Opcode=1 (4)] [ReqID_Str] [Partition (4)] [Key_Str] [Data_Bytes]
+     */
     @Override
     public void putObject(String bucket, String key, InputStream data, long length) throws Exception {
-        String requestId = UUID.randomUUID().toString();
-        int partition = getPartition(key);
+        //Data has to be buffered in memory to calculate the frame length before sending
+        //per current protocol, but will need to discuss
 
-        byte[] body = data.readAllBytes();
+        // 1. Buffer the Data
+        byte[] dataBytes = data.readAllBytes();
 
-        URI uri = URI.create(String.format("%s/store/%d/%s?requestId=%s",
-                baseUrl, partition, key, requestId));
+        // 2. Prepare Metadata
+        String requestId = UUID.randomUUID().toString(); // Unique request ID for tracing/logging
+        int partition = getPartition(key); // Simple partitioning based on key hash
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(uri)
-                .PUT(HttpRequest.BodyPublishers.ofByteArray(body))
-                .header("Content-Type", "application/octet-stream")
-                .build();
+        // 3. Calculate Payload Size
+        long payloadLength = getStringLength(requestId) + 4 + getStringLength(key) + dataBytes.length;
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        //4. Send packet
+        try(Socket socket = new Socket(routerHost, routerPort);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream())) {
 
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("Storage Node returned HTTP " + response.statusCode() + " for PUT.");
+            // Header (8 bytes)
+            writeFrameHeader(out, payloadLength);
+            // Opcode (4 bytes)
+            out.writeInt(OPCODE_PUT);
+            // Payload
+            writeString(out, requestId);
+            out.writeInt(partition);
+            writeString(out, key);
+            out.write(dataBytes);
+            out.flush();
+
+            if(!readResponseStatus(in)) {
+                throw new RuntimeException("Storage Node returned failure status for PUT.");            
+            }
         }
+
     }
 
+    /**
+     * Retrieves an object stream from the storage node.
+     * * Packet Structure:
+     * [FrameLen (8)] [Opcode=6 (4)] [Partition (4)] [Key_Str]
+     * * Returns:
+     * An open InputStream to the data, or null if not found.
+     */
+    @SuppressWarnings("resource")
     @Override
     public InputStream getObject(String bucket, String key) throws Exception {
         int partition = getPartition(key);
+        long payloadLength = 4 + getStringLength(key); // Partition (4 bytes)
 
-        URI uri = URI.create(String.format("%s/store/%d/%s", baseUrl, partition, key));
+        Socket socket = new Socket(routerHost, routerPort);
+        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        try{
+            writeFrameHeader(out, payloadLength);
+            out.writeInt(OPCODE_GET);
+            out.writeInt(partition);
+            writeString(out, key);
+            out.flush();
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(uri)
-                .GET()
-                .build();
+            boolean found = readResponseStatus(in);
+            if(!found) {
+                socket.close();
+                return null; // Not found
+            }
 
-        HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-
-        if (response.statusCode() == 404) {
-            return null; // Not found
+            return in; // Caller is responsible for closing this stream (and underlying socket)
+        }catch(Exception e) {
+            socket.close();
+            throw e;
         }
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("Storage Node returned HTTP " + response.statusCode() + " for GET.");
-        }
-
-        return new ByteArrayInputStream(response.body());
     }
 
+    /**
+     * Deletes an object from the storage node.
+     * * Packet Structure:
+     * [FrameLen (8)] [Opcode=2 (4)] [Partition (4)] [Key_Str]
+     */
     @Override
     public void deleteObject(String bucket, String key) throws Exception {
         int partition = getPartition(key);
+        long payloadLength = 4 + getStringLength(key); // Partition (4 bytes)
 
-        URI uri = URI.create(String.format("%s/store/%d/%s", baseUrl, partition, key));
+        try(Socket socket = new Socket(routerHost, routerPort);
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream())) {
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(uri)
-                .DELETE()
-                .build();
+            
+            writeFrameHeader(out, payloadLength);
+            out.writeInt(OPCODE_DELETE);
+            out.writeInt(partition);
+            writeString(out, key);
+            out.flush();
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("Storage Node returned HTTP " + response.statusCode() + " for DELETE.");
+            if(!readResponseStatus(in)) {
+                throw new RuntimeException("Storage Node returned failure status for DELETE.");            
+            }
         }
     }
 
+    /**
+     * Writes the 8-byte frame length header. 
+     * The server expects the total frame size (including the Opcode).
+     */
+    private void writeFrameHeader(DataOutputStream out, long payloadLength) throws IOException {
+        // Frame Length = Opcode (4 bytes) + Payload Length
+        out.writeLong(4 + payloadLength);
+    }
+
+    /**
+     * Writes a string in the format: [4-byte Length][Bytes]
+     * The server uses UTF-8.
+     */
+    private void writeString(DataOutputStream out, String s) throws IOException {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(bytes.length);
+        out.write(bytes);
+    }
+
+    /**
+     * Reads the response header from the server.
+     * The server sends: [8-byte Length][1-byte Status]
+     * * @return true if status is SUCCESS (1), false otherwise.
+     */
+    private boolean readResponseStatus(DataInputStream in) throws IOException {
+        // 1. Consume the 8-byte response length
+        // We don't strictly need the value, but we must read it to advance the stream.
+        long length = in.readLong(); 
+        
+        // 2. Read the 1-byte status
+        // The server sends a single byte: 1 for success, 0 for failure.
+        // We use readByte() or read() (read returns int 0-255).
+        int status = in.read();
+        
+        return status == STATUS_SUCCESS;
+    }
+
+    /**
+     * Helper to calculate the byte length of a string when encoded.
+     * Needed to calculate the total frame length before sending.
+     */
+    private int getStringLength(String s) {
+        return 4 + s.getBytes(StandardCharsets.UTF_8).length; // 4 bytes for length integer + bytes
+    }
+    
     private int getPartition(String key) {
         return Math.abs(key.hashCode() % 10);
     }
+
+    @Override
+    public void createBucket(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'createBucket'");
+    }
+
+    @Override
+    public void deleteBucket(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'deleteBucket'");
+    }
+
+    @Override
+    public List<ObjectSummary> listObjects(String bucket, String prefix, int maxKeys) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'listObjects'");
+    }
+
+    @Override
+    public boolean bucketExists(String bucket) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'bucketExists'");
+    }
+
+    @Override
+    public String initiateMultipartUpload(String bucket, String key) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'initiateMultipartUpload'");
+    }
+
+    @Override
+    public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
+            throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'uploadPart'");
+    }
+
+    @Override
+    public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
+            throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'completeMultipartUpload'");
+    }
+
+    @Override
+    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'abortMultipartUpload'");
+    }
+
 }

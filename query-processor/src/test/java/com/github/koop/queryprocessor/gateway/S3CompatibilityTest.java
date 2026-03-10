@@ -1,6 +1,7 @@
 package com.github.koop.queryprocessor.gateway;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import io.javalin.Javalin;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,8 +20,7 @@ import software.amazon.awssdk.services.s3.model.*;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-
-
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -402,5 +402,352 @@ class S3CompatibilityTest {
         );
 
         verify(mockStorage).putObject(eq(BUCKET), eq("large-file.bin"), any(), anyLong());
+    }
+
+    // ===================== BUCKET OPERATIONS =====================
+
+    @Test
+    @Order(16)
+    void sdkCreateBucket_returns200_noException() throws Exception {
+        doNothing().when(mockStorage).createBucket(anyString());
+
+        assertDoesNotThrow(() ->
+                s3.createBucket(CreateBucketRequest.builder()
+                        .bucket(BUCKET)
+                        .build())
+        );
+    }
+
+    @Test
+    @Order(17)
+    void sdkCreateBucket_delegatesCorrectBucketName_toStorageService() throws Exception {
+        doNothing().when(mockStorage).createBucket(anyString());
+
+        s3.createBucket(CreateBucketRequest.builder().bucket("my-new-bucket").build());
+
+        verify(mockStorage).createBucket("my-new-bucket");
+    }
+
+    @Test
+    @Order(18)
+    void sdkCreateBucket_storageThrows_raisesS3Exception() throws Exception {
+        doThrow(new RuntimeException("bucket already exists"))
+                .when(mockStorage).createBucket(anyString());
+
+        assertThrows(S3Exception.class, () ->
+                s3.createBucket(CreateBucketRequest.builder().bucket(BUCKET).build())
+        );
+    }
+
+    @Test
+    @Order(19)
+    void sdkDeleteBucket_returns204_noException() throws Exception {
+        doNothing().when(mockStorage).deleteBucket(anyString());
+
+        assertDoesNotThrow(() ->
+                s3.deleteBucket(DeleteBucketRequest.builder()
+                        .bucket(BUCKET)
+                        .build())
+        );
+    }
+
+    @Test
+    @Order(20)
+    void sdkDeleteBucket_delegatesCorrectBucketName_toStorageService() throws Exception {
+        doNothing().when(mockStorage).deleteBucket(anyString());
+
+        s3.deleteBucket(DeleteBucketRequest.builder().bucket("old-bucket").build());
+
+        verify(mockStorage).deleteBucket("old-bucket");
+    }
+
+    @Test
+    @Order(21)
+    void sdkHeadBucket_bucketExists_returns200() throws Exception {
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
+
+        // headBucket throws NoSuchBucketException on 404, so no exception = 200
+        assertDoesNotThrow(() ->
+                s3.headBucket(HeadBucketRequest.builder().bucket(BUCKET).build())
+        );
+    }
+
+    @Test
+    @Order(22)
+    void sdkHeadBucket_bucketMissing_throwsNoSuchBucketException() throws Exception {
+        when(mockStorage.bucketExists("ghost-bucket")).thenReturn(false);
+
+        NoSuchBucketException ex = assertThrows(NoSuchBucketException.class, () ->
+                s3.headBucket(HeadBucketRequest.builder().bucket("ghost-bucket").build())
+        );
+
+        assertEquals(404, ex.statusCode());
+    }
+
+    @Test
+    @Order(23)
+    void sdkListObjects_emptyBucket_returnsZeroContents() throws Exception {
+        when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
+                .thenReturn(List.of());
+
+        ListObjectsV2Response response = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build()
+        );
+
+        assertEquals(0, response.keyCount(), "Empty bucket should return keyCount=0");
+        assertTrue(response.contents().isEmpty(), "Empty bucket should return no Contents entries");
+    }
+
+    @Test
+    @Order(24)
+    void sdkListObjects_withObjects_returnsCorrectKeys() throws Exception {
+        List<ObjectSummary> summaries = List.of(
+                new ObjectSummary("file-a.txt", 100L, "2025-01-01T00:00:00Z", "etag-a"),
+                new ObjectSummary("file-b.txt", 200L, "2025-01-02T00:00:00Z", "etag-b")
+        );
+        when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
+                .thenReturn(summaries);
+
+        ListObjectsV2Response response = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build()
+        );
+
+        assertEquals(2, response.keyCount());
+        assertEquals("file-a.txt", response.contents().get(0).key());
+        assertEquals("file-b.txt", response.contents().get(1).key());
+    }
+
+    @Test
+    @Order(25)
+    void sdkListObjects_passesPrefix_toStorageService() throws Exception {
+        when(mockStorage.listObjects(eq(BUCKET), eq("logs/"), anyInt()))
+                .thenReturn(List.of());
+
+        s3.listObjectsV2(ListObjectsV2Request.builder()
+                .bucket(BUCKET)
+                .prefix("logs/")
+                .build());
+
+        verify(mockStorage).listObjects(eq(BUCKET), eq("logs/"), anyInt());
+    }
+
+    // ===================== MULTIPART UPLOAD =====================
+
+    @Test
+    @Order(26)
+    void sdkCreateMultipartUpload_returnsUploadId() throws Exception {
+        when(mockStorage.initiateMultipartUpload(BUCKET, KEY)).thenReturn("upload-id-xyz");
+
+        CreateMultipartUploadResponse response = s3.createMultipartUpload(
+                CreateMultipartUploadRequest.builder()
+                        .bucket(BUCKET)
+                        .key(KEY)
+                        .build()
+        );
+
+        assertNotNull(response.uploadId(), "SDK should receive and expose the uploadId");
+        assertEquals("upload-id-xyz", response.uploadId());
+    }
+
+    @Test
+    @Order(27)
+    void sdkCreateMultipartUpload_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
+        when(mockStorage.initiateMultipartUpload(anyString(), anyString())).thenReturn("upload-id-xyz");
+
+        s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                .bucket("videos")
+                .key("movie.mp4")
+                .build());
+
+        verify(mockStorage).initiateMultipartUpload("videos", "movie.mp4");
+    }
+
+    @Test
+    @Order(28)
+    void sdkUploadPart_returnsETag() throws Exception {
+        byte[] partData = new byte[5 * 1024 * 1024]; // 5 MB — S3 minimum part size
+        doAnswer(invocation -> {
+            java.io.InputStream is = invocation.getArgument(4);
+            is.readAllBytes();
+            return "part-etag-1";
+        }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
+                eq(1), any(), anyLong());
+
+        UploadPartResponse response = s3.uploadPart(
+                UploadPartRequest.builder()
+                        .bucket(BUCKET)
+                        .key(KEY)
+                        .uploadId("upload-id-xyz")
+                        .partNumber(1)
+                        .contentLength((long) partData.length)
+                        .build(),
+                RequestBody.fromBytes(partData)
+        );
+
+        assertNotNull(response.eTag(), "SDK should receive the per-part ETag");
+        // SDK wraps ETags in quotes; strip them for comparison
+        assertEquals("part-etag-1", response.eTag().replace("\"", ""));
+    }
+
+    @Test
+    @Order(29)
+    void sdkUploadPart_delegatesCorrectArgs_toStorageService() throws Exception {
+        byte[] partData = new byte[5 * 1024 * 1024];
+        doAnswer(invocation -> {
+            java.io.InputStream is = invocation.getArgument(4);
+            is.readAllBytes();
+            return "etag-part";
+        }).when(mockStorage).uploadPart(anyString(), anyString(), anyString(), anyInt(), any(), anyLong());
+
+        s3.uploadPart(
+                UploadPartRequest.builder()
+                        .bucket(BUCKET).key(KEY)
+                        .uploadId("upload-id-xyz")
+                        .partNumber(2)
+                        .contentLength((long) partData.length)
+                        .build(),
+                RequestBody.fromBytes(partData)
+        );
+
+        verify(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
+                eq(2), any(), anyLong());
+    }
+
+    @Test
+    @Order(30)
+    void sdkCompleteMultipartUpload_returnsETag() throws Exception {
+        when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq("upload-id-xyz"), anyList()))
+                .thenReturn("final-etag-abc");
+
+        CompletedPart sdkPart = CompletedPart.builder().partNumber(1).eTag("\"part-etag-1\"").build();
+
+        CompleteMultipartUploadResponse response = s3.completeMultipartUpload(
+                CompleteMultipartUploadRequest.builder()
+                        .bucket(BUCKET)
+                        .key(KEY)
+                        .uploadId("upload-id-xyz")
+                        .multipartUpload(CompletedMultipartUpload.builder()
+                                .parts(sdkPart)
+                                .build())
+                        .build()
+        );
+
+        assertNotNull(response.eTag());
+        assertEquals("\"final-etag-abc\"", response.eTag());
+    }
+
+    @Test
+    @Order(31)
+    void sdkCompleteMultipartUpload_delegatesCorrectUploadIdAndParts_toStorageService() throws Exception {
+        when(mockStorage.completeMultipartUpload(anyString(), anyString(), anyString(), anyList()))
+                .thenReturn("final-etag");
+
+        CompletedPart part1 = CompletedPart.builder().partNumber(1).eTag("\"etag-1\"").build();
+        CompletedPart part2 = CompletedPart.builder().partNumber(2).eTag("\"etag-2\"").build();
+
+        s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                .bucket(BUCKET).key(KEY)
+                .uploadId("upload-id-xyz")
+                .multipartUpload(CompletedMultipartUpload.builder().parts(part1, part2).build())
+                .build());
+
+        verify(mockStorage).completeMultipartUpload(
+                eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
+                argThat(parts ->
+                        parts.size() == 2
+                        && parts.get(0).partNumber() == 1
+                        && parts.get(1).partNumber() == 2
+                )
+        );
+    }
+
+    @Test
+    @Order(32)
+    void sdkAbortMultipartUpload_returns204_noException() throws Exception {
+        doNothing().when(mockStorage).abortMultipartUpload(anyString(), anyString(), anyString());
+
+        assertDoesNotThrow(() ->
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                        .bucket(BUCKET)
+                        .key(KEY)
+                        .uploadId("upload-id-xyz")
+                        .build())
+        );
+    }
+
+    @Test
+    @Order(33)
+    void sdkAbortMultipartUpload_delegatesCorrectArgs_toStorageService() throws Exception {
+        doNothing().when(mockStorage).abortMultipartUpload(anyString(), anyString(), anyString());
+
+        s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                .bucket(BUCKET).key(KEY)
+                .uploadId("upload-id-xyz")
+                .build());
+
+        verify(mockStorage).abortMultipartUpload(BUCKET, KEY, "upload-id-xyz");
+    }
+
+    // ===================== MULTIPART FULL LIFECYCLE =====================
+
+    @Test
+    @Order(34)
+    void sdkMultipartLifecycle_initiateUploadCompleteThenGet() throws Exception {
+        String uploadId = "lifecycle-upload-id";
+        byte[] part1 = new byte[5 * 1024 * 1024];
+        byte[] part2 = "final-chunk".getBytes(StandardCharsets.UTF_8);
+
+        when(mockStorage.initiateMultipartUpload(BUCKET, KEY)).thenReturn(uploadId);
+        doAnswer(invocation -> {
+            java.io.InputStream is = invocation.getArgument(4);
+            is.readAllBytes();
+            return "etag-p1";
+        }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(1), any(), anyLong());
+        doAnswer(invocation -> {
+            java.io.InputStream is = invocation.getArgument(4);
+            is.readAllBytes();
+            return "etag-p2";
+        }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(2), any(), anyLong());
+        when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq(uploadId), anyList()))
+                .thenReturn("assembled-etag");
+        when(mockStorage.getObject(BUCKET, KEY))
+                .thenReturn(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8)));
+
+        // Step 1: initiate
+        CreateMultipartUploadResponse initResp = s3.createMultipartUpload(
+                CreateMultipartUploadRequest.builder().bucket(BUCKET).key(KEY).build()
+        );
+        assertEquals(uploadId, initResp.uploadId());
+
+        // Step 2: upload parts
+        UploadPartResponse p1Resp = s3.uploadPart(
+                UploadPartRequest.builder().bucket(BUCKET).key(KEY)
+                        .uploadId(uploadId).partNumber(1).contentLength((long) part1.length).build(),
+                RequestBody.fromBytes(part1)
+        );
+        UploadPartResponse p2Resp = s3.uploadPart(
+                UploadPartRequest.builder().bucket(BUCKET).key(KEY)
+                        .uploadId(uploadId).partNumber(2).contentLength((long) part2.length).build(),
+                RequestBody.fromBytes(part2)
+        );
+
+        // Step 3: complete
+        CompleteMultipartUploadResponse completeResp = s3.completeMultipartUpload(
+                CompleteMultipartUploadRequest.builder()
+                        .bucket(BUCKET).key(KEY).uploadId(uploadId)
+                        .multipartUpload(CompletedMultipartUpload.builder().parts(
+                                CompletedPart.builder().partNumber(1).eTag(p1Resp.eTag()).build(),
+                                CompletedPart.builder().partNumber(2).eTag(p2Resp.eTag()).build()
+                        ).build())
+                        .build()
+        );
+        assertNotNull(completeResp.eTag());
+
+        // Step 4: verify assembled object is retrievable
+        ResponseBytes<GetObjectResponse> getResp = s3.getObject(
+                GetObjectRequest.builder().bucket(BUCKET).key(KEY).build(),
+                ResponseTransformer.toBytes()
+        );
+        assertNotNull(getResp.asByteArray());
     }
 }
