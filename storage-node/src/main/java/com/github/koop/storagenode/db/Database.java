@@ -10,7 +10,7 @@ public class Database implements AutoCloseable {
         this.strategy = strategy;
     }
 
-    public void logOperation(long sequenceNumber, String fileKey, String operation) throws Exception {
+    public void logOperation(long sequenceNumber, String fileKey, Operation operation) throws Exception {
         OpLog log = new OpLog(sequenceNumber, fileKey, operation);
         strategy.addLog(log);
     }
@@ -20,7 +20,7 @@ public class Database implements AutoCloseable {
         strategy.updateMetadata(meta);
     }
 
-    public void atomicallyUpdate(long sequenceNumber, String fileKey, String operation, String location, String partition) throws Exception {
+    public void atomicallyUpdate(long sequenceNumber, String fileKey, Operation operation, String location, String partition) throws Exception {
         OpLog log = new OpLog(sequenceNumber, fileKey, operation);
         Metadata meta = new Metadata(fileKey, location, partition, sequenceNumber);
         strategy.atomicallyUpdateLogAndMetadata(log, meta);

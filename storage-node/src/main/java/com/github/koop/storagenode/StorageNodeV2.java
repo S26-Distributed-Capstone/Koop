@@ -10,6 +10,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.Operation;
 
 import net.bytebuddy.asm.MemberSubstitution.Substitution.Chain.Step.ForField.Read;
 
@@ -38,9 +39,11 @@ public class StorageNodeV2 {
         write(path, data, length);
     }
 
-    protected void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
-        db.atomicallyUpdate(seqNumber, key, requestID, key, requestID);
+    protected void commit(String partition, String key, String requestID, long seqNumber) throws Exception {
+        db.atomicallyUpdate(seqNumber,key, Operation.PUT, requestID, partition);
     }
+
+
 
     private final void write(Path path, ReadableByteChannel data, long length) throws IOException {
         try (FileChannel fc = FileChannel.open(

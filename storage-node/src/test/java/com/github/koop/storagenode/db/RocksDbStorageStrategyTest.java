@@ -5,6 +5,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import io.etcd.jetcd.op.Cmp.Op;
+
 import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -61,7 +63,7 @@ class RocksDbStorageStrategyTest {
     void testAddLogAndGetLogsRange() throws Exception {
         // Add 5 logs
         for (long i = 1; i <= 5; i++) {
-            strategy.addLog(new OpLog(i, "file_" + i, "PUT"));
+            strategy.addLog(new OpLog(i, "file_" + i, Operation.PUT));
         }
 
         // Retrieve logs between sequence numbers 2 and 4
@@ -85,7 +87,7 @@ class RocksDbStorageStrategyTest {
         long seq = 42L;
         String fileKey = "atomic_file.txt";
         
-        OpLog log = new OpLog(seq, fileKey, "DELETE");
+        OpLog log = new OpLog(seq, fileKey, Operation.DELETE);
         Metadata meta = new Metadata(fileKey, "deleted", "2", seq);
 
         // Perform atomic update
@@ -101,7 +103,7 @@ class RocksDbStorageStrategyTest {
             List<OpLog> logs = logStream.collect(Collectors.toList());
             assertEquals(1, logs.size());
             assertEquals(seq, logs.get(0).seqNum());
-            assertEquals("DELETE", logs.get(0).operation());
+            assertEquals(Operation.DELETE, logs.get(0).operation());
         }
     }
 

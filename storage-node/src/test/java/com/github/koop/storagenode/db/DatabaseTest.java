@@ -4,6 +4,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.etcd.jetcd.op.Cmp.Op;
+
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -30,8 +32,8 @@ class DatabaseTest {
     @Test
     void testLogOperationAndGetLogs() throws Exception {
         // Log a few operations
-        database.logOperation(1L, "file1.txt", "PUT");
-        database.logOperation(2L, "file2.txt", "DELETE");
+        database.logOperation(1L, "file1.txt", Operation.PUT);
+        database.logOperation(2L, "file2.txt", Operation.DELETE);
 
         // Retrieve the logs
         try (Stream<OpLog> logStream = database.getLogs(2L, 1L)) {
@@ -42,23 +44,23 @@ class DatabaseTest {
             // InMemoryStorageStrategy's subMap().reversed() returns descending order
             assertEquals(2L, logs.get(0).seqNum());
             assertEquals("file2.txt", logs.get(0).key());
-            assertEquals("DELETE", logs.get(0).operation());
+            assertEquals(Operation.DELETE, logs.get(0).operation());
 
             assertEquals(1L, logs.get(1).seqNum());
             assertEquals("file1.txt", logs.get(1).key());
-            assertEquals("PUT", logs.get(1).operation());
+            assertEquals(Operation.PUT, logs.get(1).operation());
         }
     }
 
     @Test
     void testLogOpAndGetALog() throws Exception{
-        database.logOperation(10, "singleFile.txt", "PUT");
+        database.logOperation(10, "singleFile.txt", Operation.PUT);
         var logOpt = database.getOpLog(10L);
         assertTrue(logOpt.isPresent(), "Log should not be null");
         var log = logOpt.get();
         assertEquals(10L, log.seqNum());
         assertEquals("singleFile.txt", log.key());
-        assertEquals("PUT", log.operation());
+        assertEquals(Operation.PUT, log.operation());
     }
 
     @Test
@@ -82,10 +84,10 @@ class DatabaseTest {
 
     @Test
     void testLogOperationWithSameSequenceNumberOverrides() throws Exception {
-        database.logOperation(5L, "file.txt", "PUT");
-        database.logOperation(5L, "file.txt", "DELETE");
+        database.logOperation(5L, "file.txt", Operation.PUT);
+        database.logOperation(5L, "file.txt", Operation.DELETE);
         var logOp = database.getOpLog(5L);
-        assertEquals("DELETE",logOp.get().operation());
+        assertEquals(Operation.DELETE,logOp.get().operation());
     }
 
     @Test
@@ -119,7 +121,7 @@ class DatabaseTest {
     void testAtomicallyUpdate() throws Exception {
         long seq = 42L;
         String fileKey = "test-atomic.txt";
-        String operation = "PUT";
+        var operation = Operation.PUT;
         String location = "/disk1/test-atomic.txt";
         String partition = "2";
 
@@ -147,7 +149,7 @@ class DatabaseTest {
     void testGetLogsRange() throws Exception {
         // Insert logs with sequences 1 through 5
         for (long i = 1; i <= 5; i++) {
-            database.logOperation(i, "file_" + i, "OP_" + i);
+            database.logOperation(i, "file_" + i, Operation.PUT);
         }
 
         // Query logs from seq 2 to seq 4
@@ -189,7 +191,7 @@ class DatabaseTest {
     @Test
     void testCloseClearsInMemoryStorage() throws Exception {
         database.setMetadata("file.txt", "loc", "1", 1L);
-        database.logOperation(1L, "file.txt", "PUT");
+        database.logOperation(1L, "file.txt", Operation.PUT);
         
         // Ensure data is there
         assertTrue(database.getMetadata("file.txt").isPresent());
