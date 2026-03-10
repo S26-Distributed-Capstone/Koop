@@ -1,6 +1,11 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
+import com.github.koop.common.metadata.MemoryFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.ReplicaSetConfiguration;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.Machine;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.ReplicaSet;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -15,6 +20,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -30,36 +36,57 @@ import static com.github.koop.common.erasure.ErasureCoder.TOTAL;
  */
 public final class StorageWorker {
 
-    private final List<InetSocketAddress> set1;
-    private final List<InetSocketAddress> set2;
-    private final List<InetSocketAddress> set3;
-
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
 
     private final ExecutorService executor;
     private final HttpClient httpClient;
+    private final MetadataClient metadataClient;
+    private final AtomicReference<ReplicaSetConfiguration> replicaSetConfig = new AtomicReference<>();
 
+    // FOR TESTING ONLY - constructs a MetadataClient backed by a MemoryFetcher
+    // with an empty configuration; use the three-arg constructor to supply nodes.
     public StorageWorker() {
-        set1 = List.of();
-        set2 = List.of();
-        set3 = List.of();
-        this.executor = Executors.newVirtualThreadPerTaskExecutor();
-        this.httpClient = HttpClient.newBuilder()
-                .executor(Executors.newVirtualThreadPerTaskExecutor())
-                .build();
+        this(List.of(), List.of(), List.of());
     }
 
+    // FOR TESTING ONLY - builds a MetadataClient backed by a MemoryFetcher and
+    // pre-populates it with a ReplicaSetConfiguration derived from the three
+    // address lists, assigning them set numbers 1, 2, and 3 respectively.
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
-        if (set1.size() != TOTAL || set2.size() != TOTAL || set3.size() != TOTAL) {
-            throw new IllegalArgumentException("Each set must have exactly " + TOTAL + " nodes");
-        }
-        this.set1 = set1;
-        this.set2 = set2;
-        this.set3 = set3;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
+        MemoryFetcher fetcher = new MemoryFetcher();
+        this.metadataClient = new MetadataClient(fetcher);
+        this.metadataClient.listen(ReplicaSetConfiguration.class, (prev, current) -> {
+            replicaSetConfig.set(current);
+            logger.info("ReplicaSetConfiguration updated: {} replica sets",
+                    current.getReplicaSets() == null ? 0 : current.getReplicaSets().size());
+        });
+        this.metadataClient.start();
+        // update() must come after start() so the listener registered above is
+        // already in place when MemoryFetcher fires it synchronously.
+        ReplicaSetConfiguration config = new ReplicaSetConfiguration();
+        config.setReplicaSets(List.of(
+                toReplicaSet(1, set1),
+                toReplicaSet(2, set2),
+                toReplicaSet(3, set3)));
+        fetcher.update(config);
+    }
+
+    public StorageWorker(MetadataClient metadataClient) {
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        this.httpClient = HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .build();
+        this.metadataClient = metadataClient;
+        this.metadataClient.listen(ReplicaSetConfiguration.class, (prev, current) -> {
+            replicaSetConfig.set(current);
+            logger.info("ReplicaSetConfiguration updated: {} replica sets",
+                    current.getReplicaSets() == null ? 0 : current.getReplicaSets().size());
+        });
+        this.metadataClient.start();
     }
 
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
@@ -79,7 +106,7 @@ public final class StorageWorker {
         int setNum = routing[0];
         int partition = routing[1];
 
-        List<InetSocketAddress> nodes = nodesForKey(setNum);
+        List<InetSocketAddress> nodes = nodesForSet(setNum);
 
         // Shard the incoming stream — each InputStream carries shard data.
         // IMPORTANT: all shard streams must be drained concurrently because
@@ -97,9 +124,6 @@ public final class StorageWorker {
                     URI uri = URI.create(String.format("http://%s:%d/store/%d/%s?requestId=%s",
                             node.getHostString(), node.getPort(), partition, storageKey, requestID));
 
-                    // REMOVED: byte[] shardData = shardStreams[index].readAllBytes();
-
-                    // ADDED: Stream directly from the InputStream
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
@@ -153,7 +177,7 @@ public final class StorageWorker {
         int setNum = routing[0];
         int partition = routing[1];
 
-        List<InetSocketAddress> nodes = nodesForKey(setNum);
+        List<InetSocketAddress> nodes = nodesForSet(setNum);
 
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
@@ -185,7 +209,7 @@ public final class StorageWorker {
         int setNum = routing[0];
         int partition = routing[1];
 
-        List<InetSocketAddress> nodes = nodesForKey(setNum);
+        List<InetSocketAddress> nodes = nodesForSet(setNum);
         List<Callable<Boolean>> tasks = new LinkedList<>();
 
         for (int i = 0; i < TOTAL; i++) {
@@ -241,8 +265,33 @@ public final class StorageWorker {
     // Private helpers
     // -------------------------------------------------------------------------
 
+    /**
+     * Looks up the {@link InetSocketAddress} list for the given set number from
+     * the live {@link ReplicaSetConfiguration} held by the metadata client.
+     *
+     * <p>The config is updated in-place via the {@link MetadataClient} listener
+     * registered in the constructor, so callers always get the most recent view
+     * without restarting the worker.
+     *
+     * @throws IllegalStateException if no configuration has been received yet,
+     *                               or if {@code setNum} is not present in it.
+     */
+    private List<InetSocketAddress> nodesForSet(int setNum) {
+        ReplicaSetConfiguration config = replicaSetConfig.get();
+        if (config == null) {
+            throw new IllegalStateException("ReplicaSetConfiguration has not been received from metadata yet");
+        }
+        return config.getReplicaSets().stream()
+                .filter(rs -> rs.getNumber() == setNum)
+                .findFirst()
+                .map(rs -> rs.getMachines().stream()
+                        .map(m -> new InetSocketAddress(m.getIp(), m.getPort()))
+                        .toList())
+                .orElseThrow(() -> new IllegalStateException("No replica set found for set number: " + setNum));
+    }
+
     private void streamReconstruct(int partition, String storageKey,
-            List<InetSocketAddress> nodes, OutputStream out)
+                                   List<InetSocketAddress> nodes, OutputStream out)
             throws IOException {
 
         InputStream[] ins = new InputStream[TOTAL];
@@ -290,11 +339,15 @@ public final class StorageWorker {
         out.flush();
     }
 
-    private List<InetSocketAddress> nodesForKey(int setNum) {
-        return switch (setNum) {
-            case 1 -> set1;
-            case 2 -> set2;
-            default -> set3;
-        };
+    private static ReplicaSet toReplicaSet(int number, List<InetSocketAddress> addresses) {
+        ReplicaSet rs = new ReplicaSet();
+        rs.setNumber(number);
+        rs.setMachines(addresses.stream().map(addr -> {
+            Machine m = new Machine();
+            m.setIp(addr.getHostString());
+            m.setPort(addr.getPort());
+            return m;
+        }).toList());
+        return rs;
     }
 }

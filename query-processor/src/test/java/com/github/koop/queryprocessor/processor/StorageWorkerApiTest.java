@@ -1,5 +1,11 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.metadata.MemoryFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.ReplicaSetConfiguration;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.Machine;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.ReplicaSet;
+
 import org.junit.jupiter.api.*;
 
 import java.io.ByteArrayInputStream;
@@ -21,6 +27,7 @@ public class StorageWorkerApiTest {
 
     private List<FakeStorageNodeServer> nodes;
     private StorageWorker worker;
+    private MemoryFetcher memoryFetcher;
 
     @BeforeAll
     void setup() throws Exception {
@@ -28,8 +35,25 @@ public class StorageWorkerApiTest {
         for (int i = 0; i < 9; i++) nodes.add(new FakeStorageNodeServer());
 
         List<InetSocketAddress> set = nodes.stream().map(FakeStorageNodeServer::address).toList();
+
+        // Three-arg constructor handles all the metadata wiring internally,
+        // so setup stays as simple as the original test.
         worker = new StorageWorker(set, set, set);
+
+        // Also keep a handle on a MemoryFetcher-backed worker for the live
+        // update test, constructed with the correct listener-before-update ordering.
+        memoryFetcher = new MemoryFetcher();
+        MetadataClient metadataClient = new MetadataClient(memoryFetcher);
+        // Worker must be constructed before update() so its listener is registered.
+        StorageWorker liveWorker = new StorageWorker(metadataClient);
+        memoryFetcher.update(buildReplicaSetConfiguration(set, set, set));
+        // liveWorker is only used in liveConfigUpdate_newNodesUsedOnNextRequest;
+        // store it so we can swap it in that test.
+        this.liveWorker = liveWorker;
     }
+
+    // Separate worker used only for the live-update test.
+    private StorageWorker liveWorker;
 
     @BeforeEach
     void resetNodes() {
@@ -103,4 +127,57 @@ public class StorageWorkerApiTest {
         }
     }
 
+    @Test
+    void liveConfigUpdate_newNodesUsedOnNextRequest() throws Exception {
+        List<FakeStorageNodeServer> newNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) newNodes.add(new FakeStorageNodeServer());
+
+        try {
+            List<InetSocketAddress> newSet = newNodes.stream().map(FakeStorageNodeServer::address).toList();
+
+            // Push updated config — liveWorker's listener fires synchronously.
+            memoryFetcher.update(buildReplicaSetConfiguration(newSet, newSet, newSet));
+
+            byte[] data = new byte[DATA_SIZE];
+            new SecureRandom().nextBytes(data);
+
+            boolean ok = liveWorker.put(UUID.randomUUID(), "b", "fileD", data.length, new ByteArrayInputStream(data));
+            assertTrue(ok, "put to updated nodes should succeed");
+
+            try (InputStream in = liveWorker.get(UUID.randomUUID(), "b", "fileD")) {
+                byte[] got = in.readAllBytes();
+                assertArrayEquals(data, got, "should read back from updated nodes");
+            }
+        } finally {
+            for (FakeStorageNodeServer n : newNodes) n.close();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private static ReplicaSetConfiguration buildReplicaSetConfiguration(
+            List<InetSocketAddress> set1,
+            List<InetSocketAddress> set2,
+            List<InetSocketAddress> set3) {
+        ReplicaSetConfiguration config = new ReplicaSetConfiguration();
+        config.setReplicaSets(List.of(
+                toReplicaSet(1, set1),
+                toReplicaSet(2, set2),
+                toReplicaSet(3, set3)));
+        return config;
+    }
+
+    private static ReplicaSet toReplicaSet(int number, List<InetSocketAddress> addresses) {
+        ReplicaSet rs = new ReplicaSet();
+        rs.setNumber(number);
+        rs.setMachines(addresses.stream().map(addr -> {
+            Machine m = new Machine();
+            m.setIp(addr.getHostString());
+            m.setPort(addr.getPort());
+            return m;
+        }).toList());
+        return rs;
+    }
 }
