@@ -119,60 +119,54 @@ public class StorageNode {
         }
     }
 
-    protected void store(
-            int partition,
-            String requestID,
-            String key,
-            ReadableByteChannel data, 
-            long length) throws IOException {
+protected void store(
+        int partition,
+        String requestID,
+        String key,
+        ReadableByteChannel data) throws IOException {
 
-        // 1. Capture OLD version for GC later
-        Optional<String> oldVersion = getLatestObjectStored(partition, key);
+    // 1. Capture OLD version for GC later
+    Optional<String> oldVersion = getLatestObjectStored(partition, key);
 
-        Path path = getObjectFile(partition, requestID, key);
-        Files.createDirectories(path.getParent());
+    Path path = getObjectFile(partition, requestID, key);
+    Files.createDirectories(path.getParent());
 
-try (FileChannel fc = FileChannel.open(
-                path,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE)) {
+    try (FileChannel fc = FileChannel.open(
+            path,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE)) {
 
-            long written = 0;
-            while (written < length) {
-                long n = fc.transferFrom(data, written, length - written);
-                if (n == 0) {
-                    // TCP buffer is empty (waiting on network). Sleep 1ms to yield the Virtual Thread.
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("Transfer interrupted", e);
-                    }
-                } else if (n < 0) {
-                    throw new EOFException("Unexpected EOF reading payload");
-                } else {
-                    written += n;
-                }
+        // --- UPDATED STREAMING READ LOGIC ---
+        // If length is known (> 0), we can use it. If it's chunked (-1), we read until EOF.
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocateDirect(64 * 1024); // 64KB buffer
+        
+        while (data.read(buffer) != -1) {
+            buffer.flip();
+            while (buffer.hasRemaining()) {
+                fc.write(buffer);
             }
+            buffer.clear();
         }
-
-        // 2. Commit the NEW version (Atomic Switch)
-        bumpLatestObjectStored(partition, key, requestID);
-
-        // 3. GC the OLD version (Best Effort)
-        Thread.ofVirtual().start(() -> {
-             if (oldVersion.isPresent() && !oldVersion.get().equals(requestID)) {
-                 try {
-                     Path oldPath = getObjectFile(partition, oldVersion.get(), key);
-                     deleteUntilSuccess(oldPath); // Helper from before
-                     Files.deleteIfExists(oldPath.getParent());
-                 } catch (IOException ignored) {
-                     // Log and ignore
-                 }
-             }
-        });
+        // ------------------------------------
     }
+
+    // 2. Commit the NEW version (Atomic Switch)
+    bumpLatestObjectStored(partition, key, requestID);
+
+    // 3. GC the OLD version (Best Effort)
+    Thread.ofVirtual().start(() -> {
+         if (oldVersion.isPresent() && !oldVersion.get().equals(requestID)) {
+             try {
+                 Path oldPath = getObjectFile(partition, oldVersion.get(), key);
+                 deleteUntilSuccess(oldPath); 
+                 Files.deleteIfExists(oldPath.getParent());
+             } catch (IOException ignored) {
+                 // Log and ignore
+             }
+         }
+    });
+}
 
     protected Optional<FileChannel> retrieve(int partition, String key) throws IOException {
         var latestObjectIDStored = getLatestObjectStored(partition, key);

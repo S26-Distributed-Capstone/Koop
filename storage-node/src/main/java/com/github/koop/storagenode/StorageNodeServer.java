@@ -1,68 +1,55 @@
 package com.github.koop.storagenode;
 
-import java.io.EOFException;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.ClosedByInterruptException;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.channels.Channels;
 import java.nio.file.Path;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.github.koop.common.messages.ChannelMessageReader;
-import com.github.koop.common.messages.MessageBuilder;
-import com.github.koop.common.messages.MessageReader;
-import com.github.koop.common.messages.Opcode;
+import io.javalin.Javalin;
+import io.javalin.http.Context;
 
+/**
+ * Storage Node HTTP server powered by Javalin + virtual threads.
+ *
+ * Endpoints:
+ * PUT /store/{partition}/{key}?requestId=... — store a shard
+ * GET /store/{partition}/{key} — retrieve a shard
+ * DELETE /store/{partition}/{key} — delete a shard
+ * GET /health — health check
+ */
 public class StorageNodeServer {
 
-    private int port;
-    private final Map<Integer, Handler> handlers;
+    private final int port;
     private final StorageNode storageNode;
+    private Javalin app;
 
-    private ServerSocketChannel serverSocketChannel;
-
-    private static Logger logger = LogManager.getLogger(StorageNodeServer.class);
+    private static final Logger logger = LogManager.getLogger(StorageNodeServer.class);
 
     public StorageNodeServer(int port, Path dir) {
         this.port = port;
-        this.handlers = new ConcurrentHashMap<>();
         this.storageNode = new StorageNode(dir);
-        registerHandlers();
     }
 
     public static void main(String[] args) {
-        // 1. Read configuration from Environment Variables
         String envPort = System.getenv("PORT");
         String envDir = System.getenv("STORAGE_DIR");
 
-        // 2. Set defaults if environment variables are missing
         int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
         Path storagePath = Path.of((envDir != null) ? envDir : "./storage");
 
         logger.info("Starting StorageNodeServer with port={} and storagePath={}", port, storagePath);
 
-        // 3. Ensure the storage directory exists
         try {
             java.nio.file.Files.createDirectories(storagePath);
         } catch (IOException e) {
-            logger.error("Failed to create storage directory: " + storagePath);
+            logger.error("Failed to create storage directory: {}", storagePath);
             System.exit(1);
         }
 
-        // 4. Initialize and start the server
         StorageNodeServer server = new StorageNodeServer(port, storagePath);
 
-        // Log server startup and configuration
-        logger.info("Storage Node starting on port: " + port);
-        logger.info("Storage directory: " + storagePath.toAbsolutePath());
-
-        // Add a shutdown hook to close the server gracefully on Ctrl+C
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
             server.stop();
@@ -71,125 +58,97 @@ public class StorageNodeServer {
         server.start();
     }
 
-    private void registerHandlers() {
-        this.handlers.put(Opcode.SN_PUT.getCode(), this::handlePut);
-        this.handlers.put(Opcode.SN_GET.getCode(), this::handleGet);
-        this.handlers.put(Opcode.SN_DELETE.getCode(), this::handleDelete);
-    }
-
     // --- Handlers ---
 
-    protected void handlePut(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var reqId = messageReader.readString();
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        logger.debug("Handling PUT request: reqId={}, partition={}, key={}", reqId, partition, key);
+    private void handlePut(Context ctx) {
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key = ctx.pathParam("key");
+            String requestId = ctx.queryParam("requestId");
 
-        var messageWriter = new MessageBuilder(Opcode.SN_PUT);
-        long payloadLength = messageReader.getRemainingLength();
-        logger.debug("Storing data of length {} for key {} in partition {}", payloadLength, key, partition);
-        this.storageNode.store(partition, reqId, key, socketChannel, payloadLength);
-        // write success
-        logger.debug("Writing success for reqId={}", reqId);
-        messageWriter.writeByte((byte) 1);
-        messageWriter.writeToChannel(socketChannel);
-    }
+            storageNode.store(partition, requestId, key,
+                    Channels.newChannel(ctx.bodyInputStream()));
 
-    protected void handleGet(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        var data = this.storageNode.retrieve(partition, key);
-        var messageBuilder = new MessageBuilder(Opcode.SN_GET);
-        if (data.isEmpty()) {
-            messageBuilder.writeByte((byte) 0);// not found
-            messageBuilder.writeToChannel(socketChannel);
-        } else {
-            try (var dataChannel = data.get()) {
-                var size = dataChannel.size();
-                messageBuilder.writeByte((byte) 1);
-                messageBuilder.writeLargePayload(size, dataChannel);
-                messageBuilder.writeToChannel(socketChannel);
-                dataChannel.close(); // Ensure channel is closed after transfer
-            }
+            ctx.status(200).result("OK");
+            logger.debug("PUT partition={} key={} requestId={}", partition, key, requestId);
+        } catch (Exception e) {
+            logger.error("Error handling PUT", e);
+            ctx.status(500).result("ERROR");
         }
     }
 
-    protected void handleDelete(SocketChannel socketChannel, MessageReader messageReader) throws IOException {
-        var partition = messageReader.readInt();
-        var key = messageReader.readString();
-        var result = this.storageNode.delete(partition, key);
-        var messageWriter = new MessageBuilder(Opcode.SN_DELETE);
-        messageWriter.writeByte((byte) (result ? 1 : 0));
-        messageWriter.writeToChannel(socketChannel);
+    private void handleGet(Context ctx) {
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key = ctx.pathParam("key");
+
+            var dataOpt = storageNode.retrieve(partition, key);
+            if (dataOpt.isPresent()) {
+                var fc = dataOpt.get();
+                ctx.status(200)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Length", String.valueOf(fc.size()))
+                        .result(Channels.newInputStream(fc));
+
+                logger.debug("GET partition={} key={} streaming {} bytes", partition, key, fc.size());
+            } else {
+                ctx.status(404).result("");
+                logger.debug("GET partition={} key={} not found", partition, key);
+            }
+        } catch (Exception e) {
+            logger.error("Error handling GET", e);
+            ctx.status(500).result("ERROR");
+        }
+    }
+
+    private void handleDelete(Context ctx) {
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key = ctx.pathParam("key");
+
+            boolean result = storageNode.delete(partition, key);
+            if (result) {
+                ctx.status(200).result("OK");
+            } else {
+                ctx.status(404).result("NOT_FOUND");
+            }
+            logger.debug("DELETE partition={} key={} result={}", partition, key, result);
+        } catch (Exception e) {
+            logger.error("Error handling DELETE", e);
+            ctx.status(500).result("ERROR");
+        }
     }
 
     // --- Server Lifecycle ---
 
     public void start() {
-        var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
-        try {
-            this.serverSocketChannel = ServerSocketChannel.open();
-            this.serverSocketChannel.bind(new InetSocketAddress(port));
+        app = Javalin.create(config -> {
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB — shards can be large
 
-            while (this.serverSocketChannel.isOpen() && !Thread.currentThread().isInterrupted()) {
-                SocketChannel clientChannel;
-                try {
-                    clientChannel = this.serverSocketChannel.accept();
-                } catch (ClosedByInterruptException e) {
-                    break;
-                }
+            config.routes.get("/health", ctx -> ctx.result("OK"));
+            config.routes.put("/store/{partition}/{key}", this::handlePut);
+            config.routes.get("/store/{partition}/{key}", this::handleGet);
+            config.routes.delete("/store/{partition}/{key}", this::handleDelete);
+        });
 
-                if (!this.serverSocketChannel.isOpen()) {
-                    break;
-                }
-
-                executor.submit(() -> {
-                    try (clientChannel) {
-                        while (clientChannel.isConnected()) {
-                            var messageReader = new ChannelMessageReader(clientChannel);
-                            var length = messageReader.getRemainingLength();
-                            if (length <= 0)
-                                break;
-                            var opcode = messageReader.getOpcode();
-                            logger.debug("Received opcode {} with payload length {} from {}", opcode, length,
-                                    clientChannel.getRemoteAddress());
-                            // 3. Dispatch
-                            var handler = this.handlers.get(opcode);
-                            if (handler != null) {
-                                // Client's frameLength excludes opcode already.
-                                handler.handle(clientChannel, messageReader);
-                            } else {
-                                System.err.println("Unknown opcode: " + opcode);
-                                break;
-                            }
-                        }
-                    } catch (EOFException e) {
-                        // normal disconnect
-                    } catch (IOException e) {
-                        // Ignore standard client disconnect errors
-                        if (e.getMessage() != null &&
-                                !e.getMessage().contains("Connection reset") &&
-                                !e.getMessage().contains("Broken pipe")) {
-
-                            e.printStackTrace();
-                        }
-                    }
-                });
-            }
-        } catch (IOException e) {
-            if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
-                e.printStackTrace();
-            }
-        }
+        app.start(port);
+        logger.info("StorageNodeServer started on port {}", app.port());
     }
 
     public void stop() {
-        if (this.serverSocketChannel != null && this.serverSocketChannel.isOpen()) {
-            try {
-                this.serverSocketChannel.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+        if (app != null) {
+            app.stop();
+            logger.info("StorageNodeServer stopped");
         }
+    }
+
+    /**
+     * Returns the actual port the server is listening on (useful when started with
+     * port 0).
+     */
+    public int port() {
+        return app != null ? app.port() : port;
     }
 }
