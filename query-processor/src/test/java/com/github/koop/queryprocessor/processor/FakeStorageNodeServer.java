@@ -1,13 +1,11 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.github.koop.common.messages.InputStreamMessageReader;
-import com.github.koop.common.messages.MessageBuilder;
-import com.github.koop.common.messages.Opcode;
+import io.javalin.Javalin;
+import io.javalin.http.Context;
 
-import java.io.*;
+import java.io.Closeable;
+import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -15,122 +13,94 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Fake storage node server that matches the REAL StorageNodeServer wire protocol using common-lib messages
+ * Fake storage node HTTP server for testing.
+ * Mimics the real StorageNodeServer Javalin endpoints.
  */
 public final class FakeStorageNodeServer implements Closeable {
 
-    private final ServerSocket server;
-    private final Thread acceptThread;
-
+    private final Javalin app;
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
     private volatile boolean enabled = true;
 
-    Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
+    private final Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
 
-    public FakeStorageNodeServer() throws IOException {
-        this.server = new ServerSocket(0);
-        this.acceptThread = Thread.ofVirtual().start(this::acceptLoop);
+    public FakeStorageNodeServer() {
+        app = Javalin.create(config -> {
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB — tests use large payloads
+
+            config.routes.put("/store/{partition}/{key}", this::handlePut);
+            config.routes.get("/store/{partition}/{key}", this::handleGet);
+            config.routes.delete("/store/{partition}/{key}", this::handleDelete);
+        });
+
+        app.start(0); // OS picks a free port
     }
 
     public InetSocketAddress address() {
-        return new InetSocketAddress("127.0.0.1", server.getLocalPort());
+        return new InetSocketAddress("127.0.0.1", app.port());
     }
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
-    private void acceptLoop() {
-        while (!server.isClosed()) {
-            try {
-                Socket s = server.accept();
-                Thread.startVirtualThread(() -> {
-                    try (s) {
-                        handle(s);
-                    } catch (IOException ignored) {
-                        // swallow in fake server
-                    }
-                });
-            } catch (IOException e) {
-                if (server.isClosed()) return;
-            }
+    private void handlePut(Context ctx) {
+        if (!enabled) {
+            ctx.status(503).result("NODE_DISABLED");
+            return;
+        }
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key    = ctx.pathParam("key");
+            byte[] data   = ctx.bodyAsBytes();
+
+            store.put(mapKey(partition, key), data);
+            ctx.status(200).result("OK");
+        } catch (Exception e) {
+            logger.error("Error in fake PUT", e);
+            ctx.status(500).result("ERROR");
         }
     }
 
-    private void handle(Socket s) throws IOException {
-        s.setTcpNoDelay(true);
-
-        InputStream in = new BufferedInputStream(s.getInputStream());
-        OutputStream out = new BufferedOutputStream(s.getOutputStream());
-
-        InputStreamMessageReader reader;
-        try {
-            reader = new InputStreamMessageReader(in);
-        } catch (EOFException eof) {
-            return;
-        }
-
-        int opcode = reader.getOpcode();
-
+    private void handleGet(Context ctx) {
         if (!enabled) {
-            // simulate node failure but keep protocol correct
-            Opcode op = getOpcodeByCode(opcode);
-            if (op == null) {
-                MessageBuilder err = new MessageBuilder(op);
-                err.writeByte((byte) 0);
-                err.writeToOutputStream(out);
-                out.flush();
-            }
+            ctx.status(503).result("NODE_DISABLED");
             return;
         }
-
-        if (opcode == Opcode.SN_PUT.getCode()) {
-            String requestId = reader.readString();
-            int partition = reader.readInt();
-            String key = reader.readString();
-
-            // payload is rest of stream
-            byte[] payload = in.readNBytes((int)reader.getRemainingLength());
-
-            store.put(mapKey(partition, key), payload);
-
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_PUT);
-            resp.writeByte((byte) 1);
-            resp.writeToOutputStream(out);
-            out.flush();
-
-        } else if (opcode == Opcode.SN_GET.getCode()) {
-            int partition = reader.readInt();
-            String key = reader.readString();
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key    = ctx.pathParam("key");
 
             byte[] data = store.get(mapKey(partition, key));
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
-            if (data == null) {
-                resp.writeByte((byte) 0);
+            if (data != null) {
+                ctx.status(200)
+                   .header("Content-Type", "application/octet-stream")
+                   .result(data);
             } else {
-                resp.writeByte((byte) 1);
-                resp.writeLargePayload(data.length, new ByteArrayInputStream(data));
+                ctx.status(404).result("");
             }
-            resp.writeToOutputStream(out);
-            out.flush();
+        } catch (Exception e) {
+            logger.error("Error in fake GET", e);
+            ctx.status(500).result("ERROR");
+        }
+    }
 
-        } else if (opcode == Opcode.SN_DELETE.getCode()) {
-            int partition = reader.readInt();
-            String key = reader.readString();
+    private void handleDelete(Context ctx) {
+        if (!enabled) {
+            ctx.status(503).result("NODE_DISABLED");
+            return;
+        }
+        try {
+            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String key    = ctx.pathParam("key");
 
             store.remove(mapKey(partition, key));
-
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_DELETE);
-            resp.writeByte((byte) 1);
-            resp.writeToOutputStream(out);
-            out.flush();
-
-        } else {
-            // Unrecognized opcode
-            MessageBuilder resp = new MessageBuilder(Opcode.SN_GET);
-            resp.writeByte((byte) 0);
-            resp.writeToOutputStream(out);
-            out.flush();
+            ctx.status(200).result("OK");
+        } catch (Exception e) {
+            logger.error("Error in fake DELETE", e);
+            ctx.status(500).result("ERROR");
         }
     }
 
@@ -138,27 +108,8 @@ public final class FakeStorageNodeServer implements Closeable {
         return partition + "|" + key;
     }
 
-    private static byte[] readAllToEof(InputStream in) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        byte[] buf = new byte[64 * 1024];
-        while (true) {
-            int r = in.read(buf);
-            if (r == -1) break;
-            baos.write(buf, 0, r);
-        }
-        return baos.toByteArray();
-    }
-
-    private Opcode getOpcodeByCode(int code) {
-        for (Opcode op : Opcode.values()) {
-            if (op.getCode() == code) return op;
-        }
-        return null;
-    }
-
     @Override
     public void close() throws IOException {
-        server.close();
-        // acceptThread will exit when server closes
+        app.stop();
     }
 }

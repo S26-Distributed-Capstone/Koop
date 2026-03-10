@@ -19,76 +19,80 @@ public class Main {
      */
     public static Javalin createApp(StorageService storage) {
         var app = Javalin.create(config -> {
-            config.useVirtualThreads = true;
-        });
-
-        app.get("/health", ctx -> ctx.result("API Gateway is healthy!"));
-
-        // GET /{bucket}/{key}
-        app.get("/{bucket}/{key}", ctx -> {
-            String bucket = ctx.pathParam("bucket");
-            String key = ctx.pathParam("key");
-            String resourcePath = "/" + bucket + "/" + key;
-
-            try {
-                InputStream data = storage.getObject(bucket, key);
-                if (data != null) {
-                    ctx.status(200);
-                    ctx.header("Content-Type", "application/octet-stream");
-                    ctx.header("ETag", "\"dummy-etag-12345\"");
-                    ctx.result(data);
-                } else {
-                    ctx.status(404);
-                    ctx.header("Content-Type", "application/xml");
-                    ctx.result(buildS3ErrorXml("NoSuchKey", "The specified key does not exist.", resourcePath));
-                }
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, String.format("Error in GET /%s/%s", bucket, key), e);
-                ctx.status(500);
-                ctx.header("Content-Type", "application/xml");
-                ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
-            }
-        });
-
-        // PUT /{bucket}/{key}
-        app.put("/{bucket}/{key}", ctx -> {
-            String bucket = ctx.pathParam("bucket");
-            String key = ctx.pathParam("key");
-            long contentLength = ctx.contentLength();
-            String resourcePath = "/" + bucket + "/" + key;
-
-            try {
-                InputStream is = ctx.bodyInputStream();
-                storage.putObject(bucket, key, is, contentLength);
-                ctx.status(200);
-                ctx.header("ETag", "\"dummy-etag-12345\"");
-                ctx.result("");
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, String.format("Error in PUT /%s/%s", bucket, key), e);
-                ctx.status(500);
-                ctx.header("Content-Type", "application/xml");
-                ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
-            }
-        });
-
-        // DELETE /{bucket}/{key}
-        app.delete("/{bucket}/{key}", ctx -> {
-            String bucket = ctx.pathParam("bucket");
-            String key = ctx.pathParam("key");
-            String resourcePath = "/" + bucket + "/" + key;
-
-            try {
-                storage.deleteObject(bucket, key);
-                ctx.status(204);
-            } catch (Exception e) {
-                logger.log(Level.SEVERE, String.format("Error in DELETE /%s/%s", bucket, key), e);
-                ctx.status(500);
-                ctx.header("Content-Type", "application/xml");
-                ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
-            }
+            config.concurrency.useVirtualThreads = true;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB
+            config.routes.get("/health", Main::healthHandler);
+            config.routes.get("/{bucket}/{key}", ctx -> getObjectHandler(ctx, storage));
+            config.routes.put("/{bucket}/{key}", ctx -> putObjectHandler(ctx, storage));
+            config.routes.delete("/{bucket}/{key}", ctx -> deleteObjectHandler(ctx, storage));
         });
 
         return app;
+    }
+
+    private static void healthHandler(io.javalin.http.Context ctx) {
+        ctx.result("API Gateway is healthy!");
+    }
+
+    private static void getObjectHandler(io.javalin.http.Context ctx, StorageService storage) {
+        String bucket = ctx.pathParam("bucket");
+        String key = ctx.pathParam("key");
+        String resourcePath = "/" + bucket + "/" + key;
+
+        try {
+            InputStream data = storage.getObject(bucket, key);
+            if (data != null) {
+                ctx.status(200);
+                ctx.header("Content-Type", "application/octet-stream");
+                ctx.header("ETag", "\"dummy-etag-12345\"");
+                ctx.result(data);
+            } else {
+                ctx.status(404);
+                ctx.header("Content-Type", "application/xml");
+                ctx.result(buildS3ErrorXml("NoSuchKey", "The specified key does not exist.", resourcePath));
+            }
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, String.format("Error in GET /%s/%s", bucket, key), e);
+            ctx.status(500);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
+        }
+    }
+
+    private static void putObjectHandler(io.javalin.http.Context ctx, StorageService storage) {
+        String bucket = ctx.pathParam("bucket");
+        String key = ctx.pathParam("key");
+        long contentLength = ctx.contentLength();
+        String resourcePath = "/" + bucket + "/" + key;
+
+        try {
+            InputStream is = ctx.bodyInputStream();
+            storage.putObject(bucket, key, is, contentLength);
+            ctx.status(200);
+            ctx.header("ETag", "\"dummy-etag-12345\"");
+            ctx.result("");
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, String.format("Error in PUT /%s/%s", bucket, key), e);
+            ctx.status(500);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
+        }
+    }
+
+    private static void deleteObjectHandler(io.javalin.http.Context ctx, StorageService storage) {
+        String bucket = ctx.pathParam("bucket");
+        String key = ctx.pathParam("key");
+        String resourcePath = "/" + bucket + "/" + key;
+
+        try {
+            storage.deleteObject(bucket, key);
+            ctx.status(204);
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, String.format("Error in DELETE /%s/%s", bucket, key), e);
+            ctx.status(500);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
+        }
     }
 
     public static void main(String[] args) {

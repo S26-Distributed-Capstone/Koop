@@ -382,7 +382,13 @@ class S3CompatibilityTest {
         byte[] largeData = new byte[1024 * 1024]; // 1MB
         new java.util.Random().nextBytes(largeData);
 
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        // The mock must drain the InputStream; otherwise the server responds
+        // before the client finishes uploading the 1 MB body, causing a broken pipe.
+        doAnswer(invocation -> {
+            java.io.InputStream is = invocation.getArgument(2);
+            is.readAllBytes();
+            return null;
+        }).when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
 
         assertDoesNotThrow(() ->
                 s3.putObject(
