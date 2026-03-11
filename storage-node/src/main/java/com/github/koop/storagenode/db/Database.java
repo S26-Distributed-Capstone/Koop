@@ -15,12 +15,13 @@ public class Database implements AutoCloseable {
         strategy.addLog(log);
     }
 
-    public void setMetadata(String fileKey, String location, String partition, long seq) throws Exception {
+    public void setMetadata(String fileKey, String location, int partition, long seq) throws Exception {
         Metadata meta = new Metadata(fileKey, location, partition, seq);
         strategy.updateMetadata(meta);
     }
 
-    public void atomicallyUpdate(long sequenceNumber, String fileKey, Operation operation, String location, String partition) throws Exception {
+    public void atomicallyUpdate(long sequenceNumber, String fileKey, Operation operation, String location,
+            int partition) throws Exception {
         OpLog log = new OpLog(sequenceNumber, fileKey, operation);
         Metadata meta = new Metadata(fileKey, location, partition, sequenceNumber);
         strategy.atomicallyUpdateLogAndMetadata(log, meta);
@@ -34,13 +35,13 @@ public class Database implements AutoCloseable {
         return strategy.getMetadata(fileKey);
     }
 
-    public Optional<OpLog> getOpLog(long seqNum) throws Exception{
+    public Optional<OpLog> getOpLog(long seqNum) throws Exception {
         return strategy.getLog(seqNum);
     }
 
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
         return strategy.streamMetadataWithPrefix(prefix)
-            .takeWhile(meta -> meta.fileName().startsWith(prefix));
+                .takeWhile(meta -> meta.fileName().startsWith(prefix));
     }
 
     @Override

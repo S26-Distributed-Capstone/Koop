@@ -6,24 +6,23 @@ import java.nio.charset.StandardCharsets;
 public record Metadata(
     String fileName,
     String location,
-    String partition,
+    int partition,
     long sequenceNumber) {
 
     public byte[] serialize() {
         byte[] fileNameBytes = fileName.getBytes(StandardCharsets.UTF_8);
         byte[] locationBytes = location.getBytes(StandardCharsets.UTF_8);
-        byte[] partitionBytes = partition.getBytes(StandardCharsets.UTF_8);
 
         int totalLength = 4 + fileNameBytes.length +
                          4 + locationBytes.length +
-                         4 + partitionBytes.length +
-                         8;
+                         4 + // partition (int)
+                         8;  // sequenceNumber (long)
 
         ByteBuffer buffer = ByteBuffer.allocate(totalLength);
 
         writeString(buffer, fileNameBytes);
         writeString(buffer, locationBytes);
-        writeString(buffer, partitionBytes);
+        buffer.putInt(partition);
         buffer.putLong(sequenceNumber);
 
         return buffer.array();
@@ -34,7 +33,7 @@ public record Metadata(
 
         String fileName = readString(buffer);
         String location = readString(buffer);
-        String partition = readString(buffer);
+        int partition = buffer.getInt();
         long sequenceNumber = buffer.getLong();
 
         return new Metadata(fileName, location, partition, sequenceNumber);

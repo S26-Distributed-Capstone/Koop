@@ -38,7 +38,7 @@ class RocksDbStorageStrategyTest {
     @Test
     void testUpdateAndGetMetadata() throws Exception {
         String fileKey = "partition_1/fileA.dat";
-        Metadata meta = new Metadata(fileKey, "/data/p1/fileA.dat", "1", 100L);
+        Metadata meta = new Metadata(fileKey, "/data/p1/fileA.dat", 1, 100L);
 
         // Save metadata
         strategy.updateMetadata(meta);
@@ -49,7 +49,7 @@ class RocksDbStorageStrategyTest {
         var metadata = retrieved.get();
         assertEquals(fileKey, metadata.fileName());
         assertEquals("/data/p1/fileA.dat", metadata.location());
-        assertEquals("1", metadata.partition());
+        assertEquals(1, metadata.partition());
         assertEquals(100L, metadata.sequenceNumber());
     }
 
@@ -88,7 +88,7 @@ class RocksDbStorageStrategyTest {
         String fileKey = "atomic_file.txt";
         
         OpLog log = new OpLog(seq, fileKey, Operation.DELETE);
-        Metadata meta = new Metadata(fileKey, "deleted", "2", seq);
+        Metadata meta = new Metadata(fileKey, "deleted", 2, seq);
 
         // Perform atomic update
         strategy.atomicallyUpdateLogAndMetadata(log, meta);
@@ -110,11 +110,11 @@ class RocksDbStorageStrategyTest {
     @Test
     void testStreamMetadataWithPrefix() throws Exception {
         // Setup data with different prefixes
-        strategy.updateMetadata(new Metadata("videos/2023/vid1.mp4", "loc1", "1", 1L));
-        strategy.updateMetadata(new Metadata("videos/2023/vid2.mp4", "loc2", "1", 2L));
-        strategy.updateMetadata(new Metadata("videos/2024/vid3.mp4", "loc3", "1", 3L));
-        strategy.updateMetadata(new Metadata("documents/doc1.pdf", "loc4", "1", 4L));
-        strategy.updateMetadata(new Metadata("videos/202", "loc5", "1", 5L)); // Partial match trap
+        strategy.updateMetadata(new Metadata("videos/2023/vid1.mp4", "loc1", 1, 1L));
+        strategy.updateMetadata(new Metadata("videos/2023/vid2.mp4", "loc2", 1, 2L));
+        strategy.updateMetadata(new Metadata("videos/2024/vid3.mp4", "loc3", 1, 3L));
+        strategy.updateMetadata(new Metadata("documents/doc1.pdf", "loc4", 1, 4L));
+        strategy.updateMetadata(new Metadata("videos/202", "loc5", 1, 5L)); // Partial match trap
 
         // Query prefix "videos/2023/"
         try (Stream<Metadata> metaStream = strategy.streamMetadataWithPrefix("videos/2023/")) {
@@ -136,7 +136,7 @@ class RocksDbStorageStrategyTest {
 
     @Test
     void testPrefixStreamReturnsEmptyForNoMatch() throws Exception {
-        strategy.updateMetadata(new Metadata("folderA/file1.txt", "loc1", "1", 1L));
+        strategy.updateMetadata(new Metadata("folderA/file1.txt", "loc1", 1, 1L));
 
         try (Stream<Metadata> metaStream = strategy.streamMetadataWithPrefix("folderB/")) {
             List<Metadata> results = metaStream.collect(Collectors.toList());

@@ -71,8 +71,8 @@ class DatabaseTest {
 
     @Test
     void testStreamMetadataWithPrefixReturnsEmptyForMissingPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", "1", 1L);
-        database.setMetadata("folderB/file2.txt", "loc2", "2", 2L);
+        database.setMetadata("folderA/file1.txt", "loc1", 1, 1L);
+        database.setMetadata("folderB/file2.txt", "loc2", 2, 2L);
 
         try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("nonexistent/")) {
             List<Metadata> results = metaStream
@@ -94,7 +94,7 @@ class DatabaseTest {
     void testSetAndGetMetadata() throws Exception {
         String fileKey = "partition_1/fileA.dat";
         String location = "/data/p1/fileA.dat";
-        String partition = "1";
+        int partition = 1;
         long seq = 100L;
 
         // Set the metadata
@@ -123,7 +123,7 @@ class DatabaseTest {
         String fileKey = "test-atomic.txt";
         var operation = Operation.PUT;
         String location = "/disk1/test-atomic.txt";
-        String partition = "2";
+        int partition = 2;
 
         // Perform atomic update
         database.atomicallyUpdate(seq, fileKey, operation, location, partition);
@@ -166,10 +166,10 @@ class DatabaseTest {
 
     @Test
     void testStreamMetadataWithPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", "1", 1L);
-        database.setMetadata("folderA/file2.txt", "loc2", "1", 2L);
-        database.setMetadata("folderB/file3.txt", "loc3", "2", 3L);
-        database.setMetadata("folderA_suffix/file4.txt", "loc4", "1", 4L);
+        database.setMetadata("folderA/file1.txt", "loc1", 1, 1L);
+        database.setMetadata("folderA/file2.txt", "loc2", 1, 2L);
+        database.setMetadata("folderB/file3.txt", "loc3", 2, 3L);
+        database.setMetadata("folderA_suffix/file4.txt", "loc4", 1, 4L);
 
         // Stream metadata starting with "folderA/"
         try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("folderA/")) {
@@ -190,7 +190,7 @@ class DatabaseTest {
 
     @Test
     void testCloseClearsInMemoryStorage() throws Exception {
-        database.setMetadata("file.txt", "loc", "1", 1L);
+        database.setMetadata("file.txt", "loc", 1, 1L);
         database.logOperation(1L, "file.txt", Operation.PUT);
         
         // Ensure data is there
