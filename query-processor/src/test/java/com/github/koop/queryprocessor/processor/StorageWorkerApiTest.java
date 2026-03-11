@@ -1,5 +1,13 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.metadata.MemoryFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.metadata.ReplicaSetConfiguration;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.Machine;
+import com.github.koop.common.metadata.ReplicaSetConfiguration.ReplicaSet;
+
 import org.junit.jupiter.api.*;
 
 import java.io.ByteArrayInputStream;
@@ -21,6 +29,8 @@ public class StorageWorkerApiTest {
 
     private List<FakeStorageNodeServer> nodes;
     private StorageWorker worker;
+    private StorageWorker liveWorker;
+    private MemoryFetcher memoryFetcher;
 
     @BeforeAll
     void setup() throws Exception {
@@ -28,7 +38,19 @@ public class StorageWorkerApiTest {
         for (int i = 0; i < 9; i++) nodes.add(new FakeStorageNodeServer());
 
         List<InetSocketAddress> set = nodes.stream().map(FakeStorageNodeServer::address).toList();
+
+        // Three-arg constructor handles all the metadata wiring internally,
+        // so setup stays as simple as the original test.
         worker = new StorageWorker(set, set, set);
+
+        // Build a separate MetadataClient-backed worker for the live update test.
+        // Worker must be constructed before update() so its listeners are registered.
+        memoryFetcher = new MemoryFetcher();
+        MetadataClient metadataClient = new MetadataClient(memoryFetcher);
+        liveWorker = new StorageWorker(metadataClient);
+        // Push both configs — order doesn't matter, both listeners are already registered.
+        memoryFetcher.update(buildReplicaSetConfiguration(set, set, set));
+        memoryFetcher.update(buildPartitionSpreadConfiguration());
     }
 
     @BeforeEach
@@ -93,14 +115,131 @@ public class StorageWorkerApiTest {
             got = in.readAllBytes();
         }
 
-        // Under 4 failures, we should not successfully reconstruct the full object.
-        // Depending on implementation, this may produce EOF/short read rather than throwing.
         assertNotEquals(data.length, got.length, "should not reconstruct full object under 4 failures");
-
-        // Optional stronger check: if it *did* return full length (rare), it must not match.
         if (got.length == data.length) {
             assertFalse(Arrays.equals(data, got), "if full length returned, content must not match");
         }
     }
 
+    @Test
+    void liveConfigUpdate_newNodesUsedOnNextRequest() throws Exception {
+        List<FakeStorageNodeServer> newNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) newNodes.add(new FakeStorageNodeServer());
+
+        try {
+            List<InetSocketAddress> newSet = newNodes.stream().map(FakeStorageNodeServer::address).toList();
+
+            // Push updated replica set and partition spread — listeners fire synchronously.
+            memoryFetcher.update(buildReplicaSetConfiguration(newSet, newSet, newSet));
+            memoryFetcher.update(buildPartitionSpreadConfiguration());
+
+            byte[] data = new byte[DATA_SIZE];
+            new SecureRandom().nextBytes(data);
+
+            boolean ok = liveWorker.put(UUID.randomUUID(), "b", "fileD", data.length, new ByteArrayInputStream(data));
+            assertTrue(ok, "put to updated nodes should succeed");
+
+            try (InputStream in = liveWorker.get(UUID.randomUUID(), "b", "fileD")) {
+                byte[] got = in.readAllBytes();
+                assertArrayEquals(data, got, "should read back from updated nodes");
+            }
+        } finally {
+            for (FakeStorageNodeServer n : newNodes) n.close();
+        }
+    }
+
+
+    @Test
+    void productionConstructor_putGetDelete_roundTrip() throws Exception {
+        // Spin up a dedicated set of 9 nodes so this test is fully isolated
+        // from the shared nodes used by the other tests.
+        List<FakeStorageNodeServer> prodNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) prodNodes.add(new FakeStorageNodeServer());
+
+        try {
+            List<InetSocketAddress> set = prodNodes.stream().map(FakeStorageNodeServer::address).toList();
+
+            // Use the production MetadataClient constructor directly — no testing
+            // shortcut. Worker is constructed first so listeners are registered,
+            // then both configs are pushed via the MemoryFetcher.
+            MemoryFetcher fetcher = new MemoryFetcher();
+            MetadataClient client = new MetadataClient(fetcher);
+            StorageWorker prodWorker = new StorageWorker(client);
+            fetcher.update(buildReplicaSetConfiguration(set, set, set));
+            fetcher.update(buildPartitionSpreadConfiguration());
+
+            byte[] data = new byte[DATA_SIZE];
+            new SecureRandom().nextBytes(data);
+
+            // PUT
+            boolean ok = prodWorker.put(UUID.randomUUID(), "prod", "fileP", data.length, new ByteArrayInputStream(data));
+            assertTrue(ok, "production constructor: put should succeed");
+
+            // GET
+            try (InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP")) {
+                byte[] got = in.readAllBytes();
+                assertArrayEquals(data, got, "production constructor: round-trip data must match");
+            }
+
+            // DELETE then confirm GET returns nothing / short data
+            boolean deleted = prodWorker.delete(UUID.randomUUID(), "prod", "fileP");
+            assertTrue(deleted, "production constructor: delete should succeed");
+
+            try (InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP")) {
+                byte[] got = in.readAllBytes();
+                assertNotEquals(data.length, got.length,
+                        "production constructor: data should not be retrievable after delete");
+            }
+        } finally {
+            for (FakeStorageNodeServer n : prodNodes) n.close();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private static ReplicaSetConfiguration buildReplicaSetConfiguration(
+            List<InetSocketAddress> set1,
+            List<InetSocketAddress> set2,
+            List<InetSocketAddress> set3) {
+        ReplicaSetConfiguration config = new ReplicaSetConfiguration();
+        config.setReplicaSets(List.of(
+                toReplicaSet(1, set1),
+                toReplicaSet(2, set2),
+                toReplicaSet(3, set3)));
+        return config;
+    }
+
+    /**
+     * Builds a PartitionSpreadConfiguration matching the one baked into the
+     * testing constructor: 99 partitions spread evenly, 33 per set.
+     */
+    private static PartitionSpreadConfiguration buildPartitionSpreadConfiguration() {
+        PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
+        List<PartitionSpread> spreads = new ArrayList<>();
+        String[] setNames = {"set1", "set2", "set3"};
+        for (int s = 0; s < 3; s++) {
+            PartitionSpread spread = new PartitionSpread();
+            spread.setErasureSet(setNames[s]);
+            List<Integer> partitions = new ArrayList<>();
+            for (int p = s * 33; p < (s + 1) * 33; p++) partitions.add(p);
+            spread.setPartitions(partitions);
+            spreads.add(spread);
+        }
+        ps.setPartitionSpread(spreads);
+        return ps;
+    }
+
+    private static ReplicaSet toReplicaSet(int number, List<InetSocketAddress> addresses) {
+        ReplicaSet rs = new ReplicaSet();
+        rs.setNumber(number);
+        rs.setMachines(addresses.stream().map(addr -> {
+            Machine m = new Machine();
+            m.setIp(addr.getHostString());
+            m.setPort(addr.getPort());
+            return m;
+        }).toList());
+        return rs;
+    }
 }
