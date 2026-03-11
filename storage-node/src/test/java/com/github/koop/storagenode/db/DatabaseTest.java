@@ -4,8 +4,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import io.etcd.jetcd.op.Cmp.Op;
-
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -32,8 +30,8 @@ class DatabaseTest {
     @Test
     void testLogOperationAndGetLogs() throws Exception {
         // Log a few operations
-        database.logOperation(1L, "file1.txt", Operation.PUT);
-        database.logOperation(2L, "file2.txt", Operation.DELETE);
+        database.logOperation(new OpLog(1L, "file1.txt", Operation.PUT));
+        database.logOperation(new OpLog(2L, "file2.txt", Operation.DELETE));
 
         // Retrieve the logs
         try (Stream<OpLog> logStream = database.getLogs(2L, 1L)) {
@@ -54,7 +52,7 @@ class DatabaseTest {
 
     @Test
     void testLogOpAndGetALog() throws Exception{
-        database.logOperation(10, "singleFile.txt", Operation.PUT);
+        database.logOperation(new OpLog(10, "singleFile.txt", Operation.PUT));
         var logOpt = database.getOpLog(10L);
         assertTrue(logOpt.isPresent(), "Log should not be null");
         var log = logOpt.get();
@@ -71,8 +69,8 @@ class DatabaseTest {
 
     @Test
     void testStreamMetadataWithPrefixReturnsEmptyForMissingPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", 1, 1L);
-        database.setMetadata("folderB/file2.txt", "loc2", 2, 2L);
+        database.setMetadata(new Metadata("folderA/file1.txt", "loc1", 1, 1L));
+        database.setMetadata(new Metadata("folderB/file2.txt", "loc2", 2, 2L));
 
         try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("nonexistent/")) {
             List<Metadata> results = metaStream
@@ -84,8 +82,8 @@ class DatabaseTest {
 
     @Test
     void testLogOperationWithSameSequenceNumberOverrides() throws Exception {
-        database.logOperation(5L, "file.txt", Operation.PUT);
-        database.logOperation(5L, "file.txt", Operation.DELETE);
+        database.logOperation(new OpLog(5L, "file.txt", Operation.PUT));
+        database.logOperation(new OpLog(5L, "file.txt", Operation.DELETE));
         var logOp = database.getOpLog(5L);
         assertEquals(Operation.DELETE,logOp.get().operation());
     }
@@ -98,7 +96,7 @@ class DatabaseTest {
         long seq = 100L;
 
         // Set the metadata
-        database.setMetadata(fileKey, location, partition, seq);
+        database.setMetadata(new Metadata(fileKey, location, partition, seq));
 
         // Retrieve the metadata
         var metadataOpt = database.getMetadata(fileKey);
@@ -126,7 +124,7 @@ class DatabaseTest {
         int partition = 2;
 
         // Perform atomic update
-        database.atomicallyUpdate(seq, fileKey, operation, location, partition);
+        database.atomicallyUpdate(new Metadata(fileKey, location, partition, seq), new OpLog(seq, fileKey, operation));
 
         // Verify metadata was updated
         var metadataOpt = database.getMetadata(fileKey);
@@ -149,7 +147,7 @@ class DatabaseTest {
     void testGetLogsRange() throws Exception {
         // Insert logs with sequences 1 through 5
         for (long i = 1; i <= 5; i++) {
-            database.logOperation(i, "file_" + i, Operation.PUT);
+            database.logOperation(new OpLog(i, "file_" + i, Operation.PUT));
         }
 
         // Query logs from seq 2 to seq 4
@@ -166,10 +164,10 @@ class DatabaseTest {
 
     @Test
     void testStreamMetadataWithPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", 1, 1L);
-        database.setMetadata("folderA/file2.txt", "loc2", 1, 2L);
-        database.setMetadata("folderB/file3.txt", "loc3", 2, 3L);
-        database.setMetadata("folderA_suffix/file4.txt", "loc4", 1, 4L);
+        database.setMetadata(new Metadata("folderA/file1.txt", "loc1", 1, 1L));
+        database.setMetadata(new Metadata("folderA/file2.txt", "loc2", 1, 2L));
+        database.setMetadata(new Metadata("folderB/file3.txt", "loc3", 2, 3L));
+        database.setMetadata(new Metadata("folderA_suffix/file4.txt", "loc4", 1, 4L));
 
         // Stream metadata starting with "folderA/"
         try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("folderA/")) {
@@ -190,8 +188,8 @@ class DatabaseTest {
 
     @Test
     void testCloseClearsInMemoryStorage() throws Exception {
-        database.setMetadata("file.txt", "loc", 1, 1L);
-        database.logOperation(1L, "file.txt", Operation.PUT);
+        database.setMetadata(new Metadata("file.txt", "loc", 1, 1L));
+        database.logOperation(new OpLog(1L, "file.txt", Operation.PUT));
         
         // Ensure data is there
         assertTrue(database.getMetadata("file.txt").isPresent());

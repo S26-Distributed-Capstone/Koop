@@ -4,26 +4,22 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 public class Database implements AutoCloseable {
+    public static final String TOMBSTONE_LOCATION = "DELETED";
     private final StorageStrategy strategy;
 
     public Database(StorageStrategy strategy) {
         this.strategy = strategy;
     }
 
-    public void logOperation(long sequenceNumber, String fileKey, Operation operation) throws Exception {
-        OpLog log = new OpLog(sequenceNumber, fileKey, operation);
+    public void logOperation(OpLog log) throws Exception {
         strategy.addLog(log);
     }
 
-    public void setMetadata(String fileKey, String location, int partition, long seq) throws Exception {
-        Metadata meta = new Metadata(fileKey, location, partition, seq);
+    public void setMetadata(Metadata meta) throws Exception {
         strategy.updateMetadata(meta);
     }
 
-    public void atomicallyUpdate(long sequenceNumber, String fileKey, Operation operation, String location,
-            int partition) throws Exception {
-        OpLog log = new OpLog(sequenceNumber, fileKey, operation);
-        Metadata meta = new Metadata(fileKey, location, partition, sequenceNumber);
+    public void atomicallyUpdate(Metadata meta, OpLog log) throws Exception {
         strategy.atomicallyUpdateLogAndMetadata(log, meta);
     }
 
