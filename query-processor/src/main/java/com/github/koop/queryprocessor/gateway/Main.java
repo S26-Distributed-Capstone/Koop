@@ -75,6 +75,16 @@ public class Main {
         return app;
     }
 
+    private static void verifyContentLength(Context ctx) {
+        long contentLength = ctx.contentLength();
+        if(contentLength <= 0) {
+            ctx.status(400);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InvalidRequest",
+                    "Content-Length header is required and must be greater than 0.", ctx.path()));
+        }
+    }
+
     // ─── Health ───────────────────────────────────────────────────────────────
 
     private static void healthHandler(Context ctx) {
@@ -246,27 +256,26 @@ public class Main {
         String uploadId = ctx.queryParam("uploadId");
         String partNumberStr = ctx.queryParam("partNumber");
         String resourcePath = "/" + bucket + "/" + key;
-
+        long contentLength = ctx.contentLength();
+        verifyContentLength(ctx);
         try {
             if (uploadId != null && partNumberStr != null) {
                 // ── UploadPart ──
                 int partNumber = Integer.parseInt(partNumberStr);
-                long contentLength = ctx.contentLength();
                 InputStream data = ctx.bodyInputStream();
 
                 String etag = storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
 
                 ctx.status(200);
-                ctx.header("ETag", "\"" + etag + "\"");
+                //ctx.header("ETag", "\"" + etag + "\"");
                 ctx.result("");
             } else {
                 // ── PutObject ──
-                long contentLength = ctx.contentLength();
                 InputStream data = ctx.bodyInputStream();
 
                 storage.putObject(bucket, key, data, contentLength);
                 ctx.status(200);
-                ctx.header("ETag", "\"dummy-etag-12345\"");
+                //ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result("");
             }
         } catch (UnsupportedOperationException e) {
@@ -369,7 +378,7 @@ public class Main {
             sb.append("    <Key>").append(obj.key()).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
             sb.append("    <LastModified>").append(obj.lastModified()).append("</LastModified>\n");
-            sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
+            //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
             sb.append("  </Contents>\n");
         }
         sb.append("</ListBucketResult>");
@@ -417,8 +426,8 @@ public class Main {
         for (int i = 1; i < partBlocks.length; i++) { // skip index 0 (pre-first-<Part> text)
             String block = partBlocks[i];
             int partNumber = Integer.parseInt(extractXmlTag(block, "PartNumber"));
-            String etag = extractXmlTag(block, "ETag").replace("\"", "");
-            parts.add(new CompletedPart(partNumber, etag));
+            //String etag = extractXmlTag(block, "ETag").replace("\"", "");
+            parts.add(new CompletedPart(partNumber));
         }
         return parts;
     }
