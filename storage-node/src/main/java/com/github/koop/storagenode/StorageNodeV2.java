@@ -10,6 +10,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.eclipse.jetty.util.IO;
+
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.Metadata;
 import com.github.koop.storagenode.db.OpLog;
@@ -18,6 +22,7 @@ import com.github.koop.storagenode.db.Operation;
 public class StorageNodeV2 {
     private final Database db;
     private final Path storageDir;
+    private final static Logger logger = LogManager.getLogger(StorageNodeV2.class);
 
     public StorageNodeV2(Database db, Path dir) {
         this.db = db;
@@ -42,7 +47,7 @@ public class StorageNodeV2 {
             ReadableByteChannel data,
             long length) throws IOException {
 
-        Path path = getObjectPath(key);
+        Path path = getObjectPath(requestID);
         Files.createDirectories(path.getParent());
         write(path, data, length);
     }
@@ -101,6 +106,16 @@ public class StorageNodeV2 {
             }
             fc.force(true);
 
+        }catch(IOException e){
+            // If there's an error during write, attempt to delete the file to avoid leaving partial data
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException ex) {
+                // Log the failure to delete the file, but don't mask the original exception
+                logger.error("Failed to delete file after write error: " + path);
+                ex.printStackTrace();
+            }
+            throw e; // Rethrow the original exception
         }
     }
 }
