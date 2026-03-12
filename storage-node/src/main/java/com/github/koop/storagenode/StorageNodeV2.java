@@ -12,7 +12,6 @@ import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.eclipse.jetty.util.IO;
 
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.Metadata;
@@ -76,7 +75,7 @@ public class StorageNodeV2 {
 
 
 
-    private final void write(Path path, ReadableByteChannel data, long length) throws IOException {
+private final void write(Path path, ReadableByteChannel data, long length) throws IOException {
         try (FileChannel fc = FileChannel.open(
                 path,
                 StandardOpenOption.CREATE,
@@ -86,34 +85,46 @@ public class StorageNodeV2 {
             long written = 0;
             while (written < length) {
                 long n = fc.transferFrom(data, written, length - written);
-                if(!data.isOpen()){
-                    throw new IOException("Data channel closed before expected length was written");
-                }
-                else if (n == 0) {
-                    // TCP buffer is empty (waiting on network). Sleep 1ms to yield the Virtual
-                    // Thread.
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("Transfer interrupted", e);
-                    }
-                } else if (n < 0) {
-                    throw new EOFException("Unexpected EOF reading payload");
-                } else {
+                
+                if (n > 0) {
                     written += n;
+                } else if (!data.isOpen()) {
+                    throw new IOException("Data channel closed before expected length was written");
+                } else {
+                    // n == 0. transferFrom can return 0 if the network buffer is empty, OR if we hit EOF.
+                    // To safely distinguish, we attempt to read a single byte.
+                    java.nio.ByteBuffer checkBuf = java.nio.ByteBuffer.allocate(1);
+                    int readBytes = data.read(checkBuf);
+                    
+                    if (readBytes == -1) {
+                        throw new EOFException("Unexpected EOF reading payload. Expected " + length + " bytes, but only received " + written);
+                    } else if (readBytes > 0) {
+                        // We successfully read a byte. Write it to the file and increment our tracker.
+                        checkBuf.flip();
+                        while (checkBuf.hasRemaining()) {
+                            fc.write(checkBuf, written);
+                        }
+                        written += readBytes;
+                    } else {
+                        // readBytes == 0. The channel is open but truly has no data available right now. Yield virtual thread.
+                        try {
+                            Thread.sleep(1);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Transfer interrupted", e);
+                        }
+                    }
                 }
             }
             fc.force(true);
 
-        }catch(IOException e){
+        } catch (IOException e) {
             // If there's an error during write, attempt to delete the file to avoid leaving partial data
             try {
                 Files.deleteIfExists(path);
             } catch (IOException ex) {
-                // Log the failure to delete the file, but don't mask the original exception
-                logger.error("Failed to delete file after write error: " + path);
-                ex.printStackTrace();
+                // Properly log the failure using Log4j2, passing the exception stack trace
+                logger.error("Failed to delete file after write error: {}", path, ex);
             }
             throw e; // Rethrow the original exception
         }
