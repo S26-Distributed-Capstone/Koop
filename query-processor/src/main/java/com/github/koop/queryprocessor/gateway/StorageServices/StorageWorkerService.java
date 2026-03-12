@@ -4,6 +4,8 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.UUID;
 
+import com.github.koop.queryprocessor.gateway.cache.MemoryMultipartUploadCache;
+import com.github.koop.queryprocessor.gateway.cache.MultipartUploadCache;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
 /**
@@ -17,15 +19,25 @@ import com.github.koop.queryprocessor.processor.StorageWorker;
 public class StorageWorkerService implements StorageService {
     
     private final StorageWorker storageWorker;
+    private final MultipartUploadCache uploadCache;
     
     /**
+     * Initializes the StorageWorkerService with the configured StorageWorker and cache.
+     */
+    public StorageWorkerService(StorageWorker storageWorker, MultipartUploadCache uploadCache) {
+        this.storageWorker = storageWorker;
+        this.uploadCache = uploadCache;
+    }
+
+    /**
      * Initializes the StorageWorkerService with the configured StorageWorker.
+     * Uses an in-memory cache suitable for single-node dev/testing.
      * 
      * The StorageWorker should be initialized with the three replica sets
      * before being passed to this constructor.
      */
     public StorageWorkerService(StorageWorker storageWorker) {
-        this.storageWorker = storageWorker;
+        this(storageWorker, new MemoryMultipartUploadCache());
     }
     
     /**
@@ -35,9 +47,7 @@ public class StorageWorkerService implements StorageService {
      * TODO: Remove this once Main.java is updated to pass StorageWorker instance
      */
     public StorageWorkerService() {
-        // Temporary: Create StorageWorker with null sets
-        // This will need to be properly initialized with node addresses
-        this.storageWorker = new StorageWorker(null, null, null);
+        this(new StorageWorker(null, null, null), new MemoryMultipartUploadCache());
     }
 
     @Override
@@ -101,27 +111,36 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public String initiateMultipartUpload(String bucket, String key) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'initiateMultipartUpload'");
+        String uploadId = UUID.randomUUID().toString();
+        uploadCache.createUpload(uploadId, bucket, key);
+        return uploadId;
     }
 
     @Override
     public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
             throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'uploadPart'");
+        // TODO: delegate actual shard write to StorageWorker once multipart storage logic is ready
+        String etag = UUID.randomUUID().toString();
+        uploadCache.addPart(uploadId, partNumber, etag);
+        return etag;
     }
 
     @Override
     public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
             throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'completeMultipartUpload'");
+        // Retrieve tracked parts so the storage layer can verify / assemble them
+        var trackedParts = uploadCache.getParts(uploadId);
+        // TODO: pass trackedParts to StorageWorker once assembly logic is ready
+        uploadCache.deleteUpload(uploadId);
+        // TODO: return real final ETag from assembled object
+        throw new UnsupportedOperationException("CompleteMultipartUpload storage assembly not yet implemented");
     }
 
     @Override
     public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'abortMultipartUpload'");
+        // Retrieve tracked parts so the storage layer can discard the uploaded shards
+        var trackedParts = uploadCache.getParts(uploadId);
+        // TODO: instruct StorageWorker to delete each shard once abort logic is ready
+        uploadCache.deleteUpload(uploadId);
     }
 }
