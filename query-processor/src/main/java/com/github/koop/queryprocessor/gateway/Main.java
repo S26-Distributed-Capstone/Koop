@@ -264,7 +264,7 @@ public class Main {
                 int partNumber = Integer.parseInt(partNumberStr);
                 InputStream data = ctx.bodyInputStream();
 
-                String etag = storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
+                storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
 
                 ctx.status(200);
                 //ctx.header("ETag", "\"" + etag + "\"");
@@ -411,7 +411,6 @@ public class Main {
      *   &lt;CompleteMultipartUpload&gt;
      *     &lt;Part&gt;
      *       &lt;PartNumber&gt;1&lt;/PartNumber&gt;
-     *       &lt;ETag&gt;"abc123"&lt;/ETag&gt;
      *     &lt;/Part&gt;
      *     ...
      *   &lt;/CompleteMultipartUpload&gt;
