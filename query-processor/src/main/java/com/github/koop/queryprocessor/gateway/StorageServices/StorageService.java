@@ -64,6 +64,6 @@ public interface StorageService {
 
     // ─── Value types ─────────────────────────────────────────────────────────
 
-    record ObjectSummary(String key, long size, String lastModified, String etag) {}
-    record CompletedPart(int partNumber, String etag) {}
+    record ObjectSummary(String key, long size, String lastModified) {}
+    record CompletedPart(int partNumber) {}
 }
