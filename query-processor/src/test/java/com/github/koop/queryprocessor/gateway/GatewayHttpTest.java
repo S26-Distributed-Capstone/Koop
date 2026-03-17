@@ -72,7 +72,7 @@ class GatewayHttpTest {
     // ===================== PUT OBJECT =====================
 
     @Test
-    void putObject_returns200_withETag() throws Exception {
+    void putObject_returns200_withoutETag() throws Exception {
         // StorageService.putObject is void — just don't throw
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(InputStream.class), anyLong());
 
@@ -83,8 +83,7 @@ class GatewayHttpTest {
             });
 
             assertEquals(200, response.code());
-            assertNotNull(response.headers().get("ETag"));
-            assertEquals("\"dummy-etag-12345\"", response.headers().get("ETag").get(0));
+            assertNull(response.headers().get("ETag"));
             assertEquals("", response.body().string());  // S3 compat: empty body
         });
     }
@@ -133,7 +132,7 @@ class GatewayHttpTest {
 
             assertEquals(200, response.code());
             assertEquals("application/octet-stream", response.headers().get("Content-Type").get(0));
-            assertEquals("\"dummy-etag-12345\"", response.headers().get("ETag").get(0));
+            assertNull(response.headers().get("ETag"));
             assertArrayEquals(content, response.body().string().getBytes(StandardCharsets.UTF_8));
         });
     }

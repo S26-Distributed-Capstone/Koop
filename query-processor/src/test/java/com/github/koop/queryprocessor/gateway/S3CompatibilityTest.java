@@ -132,7 +132,7 @@ class S3CompatibilityTest {
 
     @Test
     @Order(2)
-    void sdkPutObject_returns200_andETag() throws Exception {
+        void sdkPutObject_returns200_withoutETag() throws Exception {
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
 
         PutObjectResponse response = s3.putObject(
@@ -144,9 +144,7 @@ class S3CompatibilityTest {
                 RequestBody.fromBytes(CONTENT_BYTES)
         );
 
-        // The SDK parses the ETag header — verify it came through
-        assertNotNull(response.eTag(), "SDK should receive and parse ETag from gateway");
-        assertEquals("\"dummy-etag-12345\"", response.eTag());
+        assertNull(response.eTag(), "SDK should not expose an ETag when gateway omits the header");
     }
 
     @Test
@@ -208,7 +206,7 @@ class S3CompatibilityTest {
 
     @Test
     @Order(6)
-    void sdkGetObject_returnsETag() throws Exception {
+        void sdkGetObject_withoutETagHeader_hasNullETag() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
                 .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
 
@@ -217,8 +215,8 @@ class S3CompatibilityTest {
                 ResponseTransformer.toBytes()
         );
 
-        assertEquals("\"dummy-etag-12345\"", result.response().eTag(),
-                "SDK should parse ETag from gateway response header");
+        assertNull(result.response().eTag(),
+                "SDK should expose null ETag when gateway response omits ETag header");
     }
 
     @Test
@@ -334,7 +332,7 @@ class S3CompatibilityTest {
                         .contentLength((long) data.length).build(),
                 RequestBody.fromBytes(data)
         );
-        assertNotNull(putResp.eTag());
+        assertNull(putResp.eTag());
 
         // GET — should find the object
         ResponseBytes<GetObjectResponse> getResp = s3.getObject(

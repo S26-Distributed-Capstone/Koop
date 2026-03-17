@@ -181,7 +181,6 @@ public class Main {
             if (data != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
-                ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result(data);
             } else {
                 ctx.status(404);
@@ -266,7 +265,6 @@ public class Main {
 
                 storage.putObject(bucket, key, data, contentLength);
                 ctx.status(200);
-                ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result("");
             }
         } catch (UnsupportedOperationException e) {
