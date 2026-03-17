@@ -5,6 +5,7 @@ import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.Obj
 import io.javalin.Javalin;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -20,6 +21,8 @@ import software.amazon.awssdk.services.s3.model.*;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,18 +30,15 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * S3 SDK Compatibility Tests for the API Gateway.
+ * S3 SDK Compatibility Tests V2 for the API Gateway (No-ETag Version).
  *
  * These tests use the official AWS SDK v2 S3 client pointed at a locally running
  * Javalin server to verify that the gateway behaves like a real S3-compatible
- * endpoint from the SDK's perspective.
- *
- * The StorageService backend is mocked — we only care that the gateway correctly
- * translates between the S3 protocol and the StorageService interface.
+ * endpoint from the SDK's perspective, completely omitting ETag usage.
  */
 @ExtendWith(MockitoExtension.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class S3CompatibilityTest {
+class S3Test {
 
     @Mock
     private StorageService mockStorage;
@@ -50,7 +50,7 @@ class S3CompatibilityTest {
     // Fixed test constants
     private static final String BUCKET = "test-bucket";
     private static final String KEY = "test-object.txt";
-    private static final String CONTENT = "Hello from S3 SDK!";
+    private static final String CONTENT = "Hello from S3 SDK without ETags!";
     private static final byte[] CONTENT_BYTES = CONTENT.getBytes(StandardCharsets.UTF_8);
 
     static java.util.logging.Level originalRootLevel;
@@ -90,22 +90,18 @@ class S3CompatibilityTest {
 
     @BeforeEach
     void setUp() {
-        // Start the Javalin app on a random port (0 = OS picks one)
+        // Start the Javalin app on a random port
         app = Main.createApp(mockStorage).start(0);
         port = app.port();
 
-        // Build an S3 client pointing at our local gateway.
-        // - endpoint: localhost:<port>
-        // - pathStyleAccess: required since we're not on real AWS (no subdomain routing)
-        // - credentials: fake but required by the SDK
-        // - region: any value works since we're not on real AWS
         s3 = S3Client.builder()
                 .endpointOverride(URI.create("http://localhost:" + port))
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create("fake-access-key", "fake-secret-key")))
                 .region(Region.US_EAST_1)
                 .serviceConfiguration(software.amazon.awssdk.services.s3.S3Configuration.builder()
-                        .pathStyleAccessEnabled(true) // CRITICAL: enables /{bucket}/{key} style URLs
+                        .pathStyleAccessEnabled(true)
+                        .chunkedEncodingEnabled(false)
                         .build())
                 .build();
     }
@@ -121,10 +117,6 @@ class S3CompatibilityTest {
     @Test
     @Order(1)
     void healthEndpoint_isReachable() {
-        // Sanity check: confirm the server is up before running S3 tests.
-        // We use raw HTTP here since the S3 SDK doesn't have a health-check concept.
-        var client = java.net.http.HttpClient.newHttpClient();
-        // Simple approach: just ensure app started on a valid port
         assertTrue(port > 0, "App should have started on a valid port");
     }
 
@@ -132,21 +124,19 @@ class S3CompatibilityTest {
 
     @Test
     @Order(2)
-    void sdkPutObject_returns200_andETag() throws Exception {
+    void sdkPutObject_returns200_noException() throws Exception {
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
 
-        PutObjectResponse response = s3.putObject(
-                PutObjectRequest.builder()
-                        .bucket(BUCKET)
-                        .key(KEY)
-                        .contentLength((long) CONTENT_BYTES.length)
-                        .build(),
-                RequestBody.fromBytes(CONTENT_BYTES)
+        assertDoesNotThrow(() ->
+            s3.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(BUCKET)
+                            .key(KEY)
+                            .contentLength((long) CONTENT_BYTES.length)
+                            .build(),
+                    RequestBody.fromBytes(CONTENT_BYTES)
+            )
         );
-
-        // The SDK parses the ETag header — verify it came through
-        assertNotNull(response.eTag(), "SDK should receive and parse ETag from gateway");
-        assertEquals("\"dummy-etag-12345\"", response.eTag());
     }
 
     @Test
@@ -163,17 +153,38 @@ class S3CompatibilityTest {
                 RequestBody.fromBytes(CONTENT_BYTES)
         );
 
-        // Verify the gateway correctly parsed the S3 path and forwarded to StorageService
         verify(mockStorage).putObject(eq(BUCKET), eq(KEY), any(), anyLong());
     }
 
     @Test
     @Order(4)
+    void sdkPutObject_fromFile_passesContentLengthToStorageService(@TempDir Path tempDir) throws Exception {
+        Path tempFile = tempDir.resolve("upload.txt");
+        Files.write(tempFile, CONTENT_BYTES);
+        long expectedLength = Files.size(tempFile);
+
+        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+
+        // Ensures the SDK maps the file size into Content-Length correctly, overriding chunking behavior if any
+        s3.putObject(
+                PutObjectRequest.builder()
+                        .bucket(BUCKET)
+                        .key("file-upload.txt")
+                        .contentLength(expectedLength) 
+                        .build(),
+                RequestBody.fromFile(tempFile)
+        );
+
+        // Verify that the exact file size was passed to the storage worker backend
+        verify(mockStorage).putObject(eq(BUCKET), eq("file-upload.txt"), any(), eq(expectedLength));
+    }
+
+    @Test
+    @Order(5)
     void sdkPutObject_storageThrows_raisesS3Exception() throws Exception {
         doThrow(new RuntimeException("disk full"))
                 .when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
 
-        // The SDK should raise an S3Exception (wrapping the 500 response) rather than a raw HTTP error
         assertThrows(S3Exception.class, () ->
                 s3.putObject(
                         PutObjectRequest.builder()
@@ -189,7 +200,7 @@ class S3CompatibilityTest {
     // ===================== GET OBJECT =====================
 
     @Test
-    @Order(5)
+    @Order(6)
     void sdkGetObject_returnsCorrectContent() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
                 .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
@@ -207,26 +218,10 @@ class S3CompatibilityTest {
     }
 
     @Test
-    @Order(6)
-    void sdkGetObject_returnsETag() throws Exception {
-        when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
-
-        ResponseBytes<GetObjectResponse> result = s3.getObject(
-                GetObjectRequest.builder().bucket(BUCKET).key(KEY).build(),
-                ResponseTransformer.toBytes()
-        );
-
-        assertEquals("\"dummy-etag-12345\"", result.response().eTag(),
-                "SDK should parse ETag from gateway response header");
-    }
-
-    @Test
     @Order(7)
     void sdkGetObject_notFound_throwsNoSuchKeyException() throws Exception {
         when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
 
-        // The SDK should map the 404 + NoSuchKey XML to the typed NoSuchKeyException
         NoSuchKeyException ex = assertThrows(NoSuchKeyException.class, () ->
                 s3.getObject(
                         GetObjectRequest.builder()
@@ -278,7 +273,6 @@ class S3CompatibilityTest {
     void sdkDeleteObject_returns204_noException() throws Exception {
         doNothing().when(mockStorage).deleteObject(anyString(), anyString());
 
-        // SDK delete should complete without throwing
         assertDoesNotThrow(() ->
                 s3.deleteObject(DeleteObjectRequest.builder()
                         .bucket(BUCKET)
@@ -321,22 +315,22 @@ class S3CompatibilityTest {
     void sdkFullLifecycle_putGetDelete() throws Exception {
         byte[] data = "lifecycle-test-data".getBytes(StandardCharsets.UTF_8);
 
-        // Set up mock responses
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
         when(mockStorage.getObject(BUCKET, "lifecycle.bin"))
                 .thenReturn(new ByteArrayInputStream(data))
-                .thenReturn(null); // second call after delete returns null
+                .thenReturn(null);
         doNothing().when(mockStorage).deleteObject(anyString(), anyString());
 
         // PUT
-        PutObjectResponse putResp = s3.putObject(
-                PutObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin")
-                        .contentLength((long) data.length).build(),
-                RequestBody.fromBytes(data)
+        assertDoesNotThrow(() -> 
+            s3.putObject(
+                    PutObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin")
+                            .contentLength((long) data.length).build(),
+                    RequestBody.fromBytes(data)
+            )
         );
-        assertNotNull(putResp.eTag());
 
-        // GET — should find the object
+        // GET 
         ResponseBytes<GetObjectResponse> getResp = s3.getObject(
                 GetObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin").build(),
                 ResponseTransformer.toBytes()
@@ -349,7 +343,7 @@ class S3CompatibilityTest {
                         .bucket(BUCKET).key("lifecycle.bin").build())
         );
 
-        // GET after delete — should throw NoSuchKeyException
+        // GET after delete
         assertThrows(NoSuchKeyException.class, () ->
                 s3.getObject(
                         GetObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin").build(),
@@ -378,12 +372,9 @@ class S3CompatibilityTest {
     @Test
     @Order(15)
     void sdkPutObject_largePayload_handledCorrectly() throws Exception {
-        // Test with a larger payload to verify streaming/buffering is handled correctly
         byte[] largeData = new byte[1024 * 1024]; // 1MB
         new java.util.Random().nextBytes(largeData);
 
-        // The mock must drain the InputStream; otherwise the server responds
-        // before the client finishes uploading the 1 MB body, causing a broken pipe.
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(2);
             is.readAllBytes();
@@ -402,6 +393,28 @@ class S3CompatibilityTest {
         );
 
         verify(mockStorage).putObject(eq(BUCKET), eq("large-file.bin"), any(), anyLong());
+    }
+
+    @Test
+    void sdkPutObject_fromInputStream_passesContentLengthToStorageService() throws Exception {
+        byte[] streamData = "data from an input stream".getBytes(StandardCharsets.UTF_8);
+        long expectedLength = streamData.length;
+
+        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+
+        // Use RequestBody.fromInputStream and explicitly pass the length
+        assertDoesNotThrow(() ->
+            s3.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(BUCKET)
+                            .key("stream-upload.txt")
+                            .build(),
+                    RequestBody.fromInputStream(new ByteArrayInputStream(streamData), expectedLength)
+            )
+        );
+
+        // Verify that the exact stream size was passed to the storage worker backend
+        verify(mockStorage).putObject(eq(BUCKET), eq("stream-upload.txt"), any(), eq(expectedLength));
     }
 
     // ===================== BUCKET OPERATIONS =====================
@@ -466,7 +479,6 @@ class S3CompatibilityTest {
     void sdkHeadBucket_bucketExists_returns200() throws Exception {
         when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
 
-        // headBucket throws NoSuchBucketException on 404, so no exception = 200
         assertDoesNotThrow(() ->
                 s3.headBucket(HeadBucketRequest.builder().bucket(BUCKET).build())
         );
@@ -501,9 +513,10 @@ class S3CompatibilityTest {
     @Test
     @Order(24)
     void sdkListObjects_withObjects_returnsCorrectKeys() throws Exception {
+        // ETag is omitted from the ObjectSummary 
         List<ObjectSummary> summaries = List.of(
-                new ObjectSummary("file-a.txt", 100L, "2025-01-01T00:00:00Z", "etag-a"),
-                new ObjectSummary("file-b.txt", 200L, "2025-01-02T00:00:00Z", "etag-b")
+                new ObjectSummary("file-a.txt", 100L, "2025-01-01T00:00:00Z"),
+                new ObjectSummary("file-b.txt", 200L, "2025-01-02T00:00:00Z")
         );
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(summaries);
@@ -564,29 +577,27 @@ class S3CompatibilityTest {
 
     @Test
     @Order(28)
-    void sdkUploadPart_returnsETag() throws Exception {
-        byte[] partData = new byte[5 * 1024 * 1024]; // 5 MB — S3 minimum part size
+    void sdkUploadPart_completesWithoutException() throws Exception {
+        byte[] partData = new byte[5 * 1024 * 1024]; 
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return "part-etag-1";
+            return ""; // No ETag returned by StorageService
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
                 eq(1), any(), anyLong());
 
-        UploadPartResponse response = s3.uploadPart(
-                UploadPartRequest.builder()
-                        .bucket(BUCKET)
-                        .key(KEY)
-                        .uploadId("upload-id-xyz")
-                        .partNumber(1)
-                        .contentLength((long) partData.length)
-                        .build(),
-                RequestBody.fromBytes(partData)
+        assertDoesNotThrow(() -> 
+            s3.uploadPart(
+                    UploadPartRequest.builder()
+                            .bucket(BUCKET)
+                            .key(KEY)
+                            .uploadId("upload-id-xyz")
+                            .partNumber(1)
+                            .contentLength((long) partData.length)
+                            .build(),
+                    RequestBody.fromBytes(partData)
+            )
         );
-
-        assertNotNull(response.eTag(), "SDK should receive the per-part ETag");
-        // SDK wraps ETags in quotes; strip them for comparison
-        assertEquals("part-etag-1", response.eTag().replace("\"", ""));
     }
 
     @Test
@@ -596,7 +607,7 @@ class S3CompatibilityTest {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return "etag-part";
+            return ""; 
         }).when(mockStorage).uploadPart(anyString(), anyString(), anyString(), anyInt(), any(), anyLong());
 
         s3.uploadPart(
@@ -615,35 +626,34 @@ class S3CompatibilityTest {
 
     @Test
     @Order(30)
-    void sdkCompleteMultipartUpload_returnsETag() throws Exception {
+    void sdkCompleteMultipartUpload_completesWithoutException() throws Exception {
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq("upload-id-xyz"), anyList()))
-                .thenReturn("final-etag-abc");
+                .thenReturn("");
 
-        CompletedPart sdkPart = CompletedPart.builder().partNumber(1).eTag("\"part-etag-1\"").build();
+        CompletedPart sdkPart = CompletedPart.builder().partNumber(1).build();
 
-        CompleteMultipartUploadResponse response = s3.completeMultipartUpload(
-                CompleteMultipartUploadRequest.builder()
-                        .bucket(BUCKET)
-                        .key(KEY)
-                        .uploadId("upload-id-xyz")
-                        .multipartUpload(CompletedMultipartUpload.builder()
-                                .parts(sdkPart)
-                                .build())
-                        .build()
+        assertDoesNotThrow(() -> 
+            s3.completeMultipartUpload(
+                    CompleteMultipartUploadRequest.builder()
+                            .bucket(BUCKET)
+                            .key(KEY)
+                            .uploadId("upload-id-xyz")
+                            .multipartUpload(CompletedMultipartUpload.builder()
+                                    .parts(sdkPart)
+                                    .build())
+                            .build()
+            )
         );
-
-        assertNotNull(response.eTag());
-        assertEquals("\"final-etag-abc\"", response.eTag());
     }
 
     @Test
     @Order(31)
     void sdkCompleteMultipartUpload_delegatesCorrectUploadIdAndParts_toStorageService() throws Exception {
         when(mockStorage.completeMultipartUpload(anyString(), anyString(), anyString(), anyList()))
-                .thenReturn("final-etag");
+                .thenReturn("");
 
-        CompletedPart part1 = CompletedPart.builder().partNumber(1).eTag("\"etag-1\"").build();
-        CompletedPart part2 = CompletedPart.builder().partNumber(2).eTag("\"etag-2\"").build();
+        CompletedPart part1 = CompletedPart.builder().partNumber(1).build();
+        CompletedPart part2 = CompletedPart.builder().partNumber(2).build();
 
         s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                 .bucket(BUCKET).key(KEY)
@@ -701,15 +711,15 @@ class S3CompatibilityTest {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return "etag-p1";
+            return ""; 
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(1), any(), anyLong());
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return "etag-p2";
+            return "";
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(2), any(), anyLong());
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq(uploadId), anyList()))
-                .thenReturn("assembled-etag");
+                .thenReturn("");
         when(mockStorage.getObject(BUCKET, KEY))
                 .thenReturn(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8)));
 
@@ -720,28 +730,29 @@ class S3CompatibilityTest {
         assertEquals(uploadId, initResp.uploadId());
 
         // Step 2: upload parts
-        UploadPartResponse p1Resp = s3.uploadPart(
+        s3.uploadPart(
                 UploadPartRequest.builder().bucket(BUCKET).key(KEY)
                         .uploadId(uploadId).partNumber(1).contentLength((long) part1.length).build(),
                 RequestBody.fromBytes(part1)
         );
-        UploadPartResponse p2Resp = s3.uploadPart(
+        s3.uploadPart(
                 UploadPartRequest.builder().bucket(BUCKET).key(KEY)
                         .uploadId(uploadId).partNumber(2).contentLength((long) part2.length).build(),
                 RequestBody.fromBytes(part2)
         );
 
-        // Step 3: complete
-        CompleteMultipartUploadResponse completeResp = s3.completeMultipartUpload(
-                CompleteMultipartUploadRequest.builder()
-                        .bucket(BUCKET).key(KEY).uploadId(uploadId)
-                        .multipartUpload(CompletedMultipartUpload.builder().parts(
-                                CompletedPart.builder().partNumber(1).eTag(p1Resp.eTag()).build(),
-                                CompletedPart.builder().partNumber(2).eTag(p2Resp.eTag()).build()
-                        ).build())
-                        .build()
+        // Step 3: complete (ETags omitted from parts)
+        assertDoesNotThrow(() -> 
+            s3.completeMultipartUpload(
+                    CompleteMultipartUploadRequest.builder()
+                            .bucket(BUCKET).key(KEY).uploadId(uploadId)
+                            .multipartUpload(CompletedMultipartUpload.builder().parts(
+                                    CompletedPart.builder().partNumber(1).build(),
+                                    CompletedPart.builder().partNumber(2).build()
+                            ).build())
+                            .build()
+            )
         );
-        assertNotNull(completeResp.eTag());
 
         // Step 4: verify assembled object is retrievable
         ResponseBytes<GetObjectResponse> getResp = s3.getObject(
