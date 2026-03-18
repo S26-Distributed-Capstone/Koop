@@ -3,7 +3,6 @@ package com.github.koop.storagenode.db;
 public enum Operation {
     PUT,
     DELETE,
-    GET,
     CREATE_BUCKET,
     DELETE_BUCKET;
 
@@ -13,8 +12,6 @@ public enum Operation {
                 return PUT;
             case "DELETE":
                 return DELETE;
-            case "GET":
-                return GET;
             case "CREATE_BUCKET":
                 return CREATE_BUCKET;
             case "DELETE_BUCKET":

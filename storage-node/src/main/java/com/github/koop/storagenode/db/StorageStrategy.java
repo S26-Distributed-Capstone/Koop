@@ -9,7 +9,7 @@ public interface StorageStrategy extends AutoCloseable {
     Optional<OpLog> getLog(long seqNum) throws Exception;
     Stream<OpLog> getLogs(long from, long downTo) throws Exception;
 
-    // --- Table #2: Metadata ---
+    // --- Table #2: Metadata (includes version history & multipart state) ---
     void updateMetadata(Metadata metadata) throws Exception;
     void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception;
     Optional<Metadata> getMetadata(String fileKey) throws Exception;
@@ -20,9 +20,4 @@ public interface StorageStrategy extends AutoCloseable {
     Optional<Bucket> getBucket(String key) throws Exception;
     void deleteBucket(String key) throws Exception;
     Stream<Bucket> streamBuckets() throws Exception;
-
-    // --- Table #4: Multipart Uploads ---
-    void putMultipartUpload(MultipartUpload upload) throws Exception;
-    Optional<MultipartUpload> getMultipartUpload(String key) throws Exception;
-    void deleteMultipartUpload(String key) throws Exception;
 }

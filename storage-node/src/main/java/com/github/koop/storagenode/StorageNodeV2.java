@@ -8,15 +8,20 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.FileVersion;
 import com.github.koop.storagenode.db.Metadata;
+import com.github.koop.storagenode.db.MultipartFileVersion;
 import com.github.koop.storagenode.db.OpLog;
 import com.github.koop.storagenode.db.Operation;
+import com.github.koop.storagenode.db.RegularFileVersion;
 
 public class StorageNodeV2 {
     private final Database db;
@@ -52,30 +57,66 @@ public class StorageNodeV2 {
     }
 
     protected void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
-        db.atomicallyUpdate(new Metadata(key, requestID, partition, seqNumber), new OpLog(seqNumber, key, Operation.PUT));
+        var existingOpt = db.getMetadata(key);
+        List<FileVersion> versions = existingOpt
+                .map(m -> new ArrayList<>(m.versions()))
+                .orElse(new ArrayList<>());
+
+        versions.add(new RegularFileVersion(seqNumber, requestID));
+        db.atomicallyUpdate(
+                new Metadata(key, partition, versions),
+                new OpLog(seqNumber, key, Operation.PUT));
     }
 
     protected void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
-        db.atomicallyUpdate(new Metadata(key, Database.TOMBSTONE_LOCATION, partition, seqNumber), new OpLog(seqNumber, key, Operation.DELETE));
+        var existingOpt = db.getMetadata(key);
+        List<FileVersion> versions = existingOpt
+                .map(m -> new ArrayList<>(m.versions()))
+                .orElse(new ArrayList<>());
+
+        versions.add(new RegularFileVersion(seqNumber, Database.TOMBSTONE_LOCATION));
+        db.atomicallyUpdate(
+                new Metadata(key, partition, versions),
+                new OpLog(seqNumber, key, Operation.DELETE));
     }
 
     protected Optional<ObjectAndMeta> retrieve(String key) throws Exception {
         var metaOpt = db.getMetadata(key);
-        if (metaOpt.isEmpty() || metaOpt.get().location().equals(Database.TOMBSTONE_LOCATION)) {
+        if (metaOpt.isEmpty() || metaOpt.get().versions().isEmpty()) {
             return Optional.empty();
         }
         var meta = metaOpt.get();
-        Path path = getObjectPath(meta.location());
-        if (!Files.exists(path)) {
-            return Optional.empty();
+        FileVersion latest = meta.versions().get(meta.versions().size() - 1);
+
+        // Determine blob path based on version type
+        if (latest instanceof RegularFileVersion r) {
+            if (r.location().equals(Database.TOMBSTONE_LOCATION)) {
+                return Optional.empty();
+            }
+            Path path = getObjectPath(r.location());
+            if (!Files.exists(path)) {
+                return Optional.empty();
+            }
+            InputStream data = Files.newInputStream(path, StandardOpenOption.READ);
+            return Optional.of(new ObjectAndMeta(data, meta));
+        } else if (latest instanceof MultipartFileVersion m) {
+            // For multipart, the chunks are the content — retrieve the first chunk's path
+            // as a representative file (actual assembly is the caller's responsibility)
+            if (m.chunks().isEmpty()) {
+                return Optional.empty();
+            }
+            Path path = getObjectPath(m.chunks().get(0));
+            if (!Files.exists(path)) {
+                return Optional.empty();
+            }
+            InputStream data = Files.newInputStream(path, StandardOpenOption.READ);
+            return Optional.of(new ObjectAndMeta(data, meta));
         }
-        InputStream data = Files.newInputStream(path, StandardOpenOption.READ);
-        return Optional.of(new ObjectAndMeta(data, metaOpt.get()));
+
+        return Optional.empty();
     }
 
-
-
-private final void write(Path path, ReadableByteChannel data, long length) throws IOException {
+    private void write(Path path, ReadableByteChannel data, long length) throws IOException {
         try (FileChannel fc = FileChannel.open(
                 path,
                 StandardOpenOption.CREATE,
@@ -85,28 +126,24 @@ private final void write(Path path, ReadableByteChannel data, long length) throw
             long written = 0;
             while (written < length) {
                 long n = fc.transferFrom(data, written, length - written);
-                
+
                 if (n > 0) {
                     written += n;
                 } else if (!data.isOpen()) {
                     throw new IOException("Data channel closed before expected length was written");
                 } else {
-                    // n == 0. transferFrom can return 0 if the network buffer is empty, OR if we hit EOF.
-                    // To safely distinguish, we attempt to read a single byte.
                     java.nio.ByteBuffer checkBuf = java.nio.ByteBuffer.allocate(1);
                     int readBytes = data.read(checkBuf);
-                    
+
                     if (readBytes == -1) {
                         throw new EOFException("Unexpected EOF reading payload. Expected " + length + " bytes, but only received " + written);
                     } else if (readBytes > 0) {
-                        // We successfully read a byte. Write it to the file and increment our tracker.
                         checkBuf.flip();
                         while (checkBuf.hasRemaining()) {
                             fc.write(checkBuf, written);
                         }
                         written += readBytes;
                     } else {
-                        // readBytes == 0. The channel is open but truly has no data available right now. Yield virtual thread.
                         try {
                             Thread.sleep(1);
                         } catch (InterruptedException e) {
@@ -119,14 +156,12 @@ private final void write(Path path, ReadableByteChannel data, long length) throw
             fc.force(true);
 
         } catch (IOException e) {
-            // If there's an error during write, attempt to delete the file to avoid leaving partial data
             try {
                 Files.deleteIfExists(path);
             } catch (IOException ex) {
-                // Properly log the failure using Log4j2, passing the exception stack trace
                 logger.error("Failed to delete file after write error: {}", path, ex);
             }
-            throw e; // Rethrow the original exception
+            throw e;
         }
     }
 }

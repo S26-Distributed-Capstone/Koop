@@ -5,8 +5,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import io.etcd.jetcd.op.Cmp.Op;
-
 import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -24,7 +22,6 @@ class RocksDbStorageStrategyTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        // Initialize the strategy with a fresh temporary directory for RocksDB
         strategy = new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString());
     }
 
@@ -35,112 +32,149 @@ class RocksDbStorageStrategyTest {
         }
     }
 
-    @Test
-    void testUpdateAndGetMetadata() throws Exception {
-        String fileKey = "partition_1/fileA.dat";
-        Metadata meta = new Metadata(fileKey, "/data/p1/fileA.dat", 1, 100L);
+    // =========================================================================
+    // Table #2 — Metadata with FileVersion hierarchy
+    // =========================================================================
 
-        // Save metadata
+    @Test
+    void testUpdateAndGetMetadataWithRegularVersion() throws Exception {
+        String key = "partition_1/fileA.dat";
+        Metadata meta = new Metadata(key, 1,
+                List.of(new RegularFileVersion(100L, "/data/p1/fileA.dat")));
+
         strategy.updateMetadata(meta);
 
-        // Retrieve and verify
-        var retrieved = strategy.getMetadata(fileKey);
-        assertTrue(retrieved.isPresent(), "Metadata should be found");
-        var metadata = retrieved.get();
-        assertEquals(fileKey, metadata.fileName());
-        assertEquals("/data/p1/fileA.dat", metadata.location());
-        assertEquals(1, metadata.partition());
-        assertEquals(100L, metadata.sequenceNumber());
+        var retrieved = strategy.getMetadata(key).orElseThrow();
+        assertEquals(key, retrieved.key());
+        assertEquals(1, retrieved.partition());
+        assertEquals(1, retrieved.versions().size());
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
+        assertEquals(100L, retrieved.versions().get(0).sequenceNumber());
+        assertEquals("/data/p1/fileA.dat", ((RegularFileVersion) retrieved.versions().get(0)).location());
+    }
+
+    @Test
+    void testUpdateAndGetMetadataWithMultipartVersion() throws Exception {
+        String key = "animals/dog.jpg";
+        Metadata meta = new Metadata(key, 1,
+                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"))));
+
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata(key).orElseThrow();
+        assertEquals(1, retrieved.versions().size());
+        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(0));
+        MultipartFileVersion mpv = (MultipartFileVersion) retrieved.versions().get(0);
+        assertEquals(98L, mpv.sequenceNumber());
+        assertEquals(List.of("chunk-0.blob", "chunk-1.blob"), mpv.chunks());
+    }
+
+    @Test
+    void testUpdateAndGetMetadataMixedVersions() throws Exception {
+        String key = "mixed/key";
+        Metadata meta = new Metadata(key, 2, List.of(
+                new RegularFileVersion(10L, "/blob-10"),
+                new MultipartFileVersion(20L, List.of("chunk-a", "chunk-b")),
+                new RegularFileVersion(30L, "/blob-30")));
+
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata(key).orElseThrow();
+        assertEquals(3, retrieved.versions().size());
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
+        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(1));
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(2));
+        assertEquals(20L, retrieved.versions().get(1).sequenceNumber());
     }
 
     @Test
     void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
-        var retrieved = strategy.getMetadata("missing_file.dat");
-        assertTrue(retrieved.isEmpty(), "Missing keys should return an empty Optional");
-    }
-
-    @Test
-    void testAddLogAndGetLogsRange() throws Exception {
-        // Add 5 logs
-        for (long i = 1; i <= 5; i++) {
-            strategy.addLog(new OpLog(i, "file_" + i, Operation.PUT));
-        }
-
-        // Retrieve logs between sequence numbers 2 and 4
-        // According to the interface contract and our implementation, it iterates backwards
-        try (Stream<OpLog> logStream = strategy.getLogs(2L, 4L)) {
-            List<OpLog> logs = logStream.collect(Collectors.toList());
-
-            assertEquals(3, logs.size(), "Should retrieve exactly 3 logs");
-            
-            // Should be in descending order: 4, 3, 2
-            assertEquals(4L, logs.get(0).seqNum());
-            assertEquals(3L, logs.get(1).seqNum());
-            assertEquals(2L, logs.get(2).seqNum());
-            
-            assertEquals("file_4", logs.get(0).key());
-        }
+        assertTrue(strategy.getMetadata("missing_file.dat").isEmpty());
     }
 
     @Test
     void testAtomicallyUpdateLogAndMetadata() throws Exception {
         long seq = 42L;
-        String fileKey = "atomic_file.txt";
-        
-        OpLog log = new OpLog(seq, fileKey, Operation.DELETE);
-        Metadata meta = new Metadata(fileKey, "deleted", 2, seq);
+        String key = "atomic_file.txt";
 
-        // Perform atomic update
+        OpLog log = new OpLog(seq, key, Operation.DELETE);
+        Metadata meta = new Metadata(key, 2,
+                List.of(new RegularFileVersion(seq, Database.TOMBSTONE_LOCATION)));
+
         strategy.atomicallyUpdateLogAndMetadata(log, meta);
 
-        // Verify Metadata exists
-        var retrievedMetaOpt = strategy.getMetadata(fileKey);
-        assertTrue(retrievedMetaOpt.isPresent());
-        assertEquals(seq, retrievedMetaOpt.get().sequenceNumber());
+        var retrievedMeta = strategy.getMetadata(key).orElseThrow();
+        assertEquals(Database.TOMBSTONE_LOCATION,
+                ((RegularFileVersion) retrievedMeta.versions().get(0)).location());
 
-        // Verify Log exists
         try (Stream<OpLog> logStream = strategy.getLogs(seq, seq)) {
             List<OpLog> logs = logStream.collect(Collectors.toList());
             assertEquals(1, logs.size());
-            assertEquals(seq, logs.get(0).seqNum());
             assertEquals(Operation.DELETE, logs.get(0).operation());
         }
     }
 
     @Test
     void testStreamMetadataWithPrefix() throws Exception {
-        // Setup data with different prefixes
-        strategy.updateMetadata(new Metadata("videos/2023/vid1.mp4", "loc1", 1, 1L));
-        strategy.updateMetadata(new Metadata("videos/2023/vid2.mp4", "loc2", 1, 2L));
-        strategy.updateMetadata(new Metadata("videos/2024/vid3.mp4", "loc3", 1, 3L));
-        strategy.updateMetadata(new Metadata("documents/doc1.pdf", "loc4", 1, 4L));
-        strategy.updateMetadata(new Metadata("videos/202", "loc5", 1, 5L)); // Partial match trap
+        strategy.updateMetadata(new Metadata("videos/2023/vid1.mp4", 1, List.of(new RegularFileVersion(1L, "/l1"))));
+        strategy.updateMetadata(new Metadata("videos/2023/vid2.mp4", 1, List.of(new RegularFileVersion(2L, "/l2"))));
+        strategy.updateMetadata(new Metadata("videos/2024/vid3.mp4", 1, List.of(new RegularFileVersion(3L, "/l3"))));
+        strategy.updateMetadata(new Metadata("documents/doc1.pdf",   1, List.of(new RegularFileVersion(4L, "/l4"))));
+        strategy.updateMetadata(new Metadata("videos/202",           1, List.of(new RegularFileVersion(5L, "/l5"))));
 
-        // Query prefix "videos/2023/"
-        try (Stream<Metadata> metaStream = strategy.streamMetadataWithPrefix("videos/2023/")) {
-            List<Metadata> results = metaStream.collect(Collectors.toList());
-
-            assertEquals(2, results.size(), "Should find exactly 2 files matching the prefix");
-            
-            List<String> fileNames = results.stream().map(Metadata::fileName).collect(Collectors.toList());
-            assertTrue(fileNames.contains("videos/2023/vid1.mp4"));
-            assertTrue(fileNames.contains("videos/2023/vid2.mp4"));
+        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("videos/2023/")) {
+            List<String> keys = stream.map(Metadata::key).collect(Collectors.toList());
+            assertEquals(2, keys.size());
+            assertTrue(keys.containsAll(List.of("videos/2023/vid1.mp4", "videos/2023/vid2.mp4")));
         }
 
-        // Query prefix "videos/"
-        try (Stream<Metadata> metaStream = strategy.streamMetadataWithPrefix("videos/")) {
-            List<Metadata> results = metaStream.collect(Collectors.toList());
-            assertEquals(4, results.size(), "Should find all 4 video files");
+        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("videos/")) {
+            assertEquals(4, stream.collect(Collectors.toList()).size());
         }
     }
 
     @Test
     void testPrefixStreamReturnsEmptyForNoMatch() throws Exception {
-        strategy.updateMetadata(new Metadata("folderA/file1.txt", "loc1", 1, 1L));
-
-        try (Stream<Metadata> metaStream = strategy.streamMetadataWithPrefix("folderB/")) {
-            List<Metadata> results = metaStream.collect(Collectors.toList());
-            assertTrue(results.isEmpty(), "Prefix with no matches should return empty stream");
+        strategy.updateMetadata(new Metadata("folderA/file1.txt", 1, List.of()));
+        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("folderB/")) {
+            assertTrue(stream.collect(Collectors.toList()).isEmpty());
         }
+    }
+
+    // =========================================================================
+    // Table #1 — Operation Log
+    // =========================================================================
+
+    @Test
+    void testAddLogAndGetLogsRange() throws Exception {
+        for (long i = 1; i <= 5; i++) {
+            strategy.addLog(new OpLog(i, "file_" + i, Operation.PUT));
+        }
+        try (Stream<OpLog> stream = strategy.getLogs(2L, 4L)) {
+            List<OpLog> logs = stream.collect(Collectors.toList());
+            assertEquals(3, logs.size());
+            assertEquals(4L, logs.get(0).seqNum());
+            assertEquals(3L, logs.get(1).seqNum());
+            assertEquals(2L, logs.get(2).seqNum());
+        }
+    }
+
+    // =========================================================================
+    // Table #3 — Buckets
+    // =========================================================================
+
+    @Test
+    void testPutAndGetBucket() throws Exception {
+        strategy.putBucket(new Bucket("animals", 0, 5L));
+        var result = strategy.getBucket("animals").orElseThrow();
+        assertEquals("animals", result.key());
+        assertEquals(5L, result.sequenceNumber());
+    }
+
+    @Test
+    void testDeleteBucket() throws Exception {
+        strategy.putBucket(new Bucket("to-delete", 1, 10L));
+        strategy.deleteBucket("to-delete");
+        assertTrue(strategy.getBucket("to-delete").isEmpty());
     }
 }

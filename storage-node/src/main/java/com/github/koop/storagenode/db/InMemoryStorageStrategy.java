@@ -1,19 +1,17 @@
 package com.github.koop.storagenode.db;
 
+import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Stream;
 
 public class InMemoryStorageStrategy implements StorageStrategy {
     // Table #1 — operation log (sorted by seqNum for range scans)
     private final ConcurrentSkipListMap<Long, OpLog> opLogTable = new ConcurrentSkipListMap<>();
-    // Table #2 — metadata (sorted by key for prefix scans)
+    // Table #2 — metadata (sorted by key for prefix scans; includes versions + multipart)
     private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>();
     // Table #3 — buckets (sorted by key for streaming)
     private final ConcurrentSkipListMap<String, Bucket> bucketsTable = new ConcurrentSkipListMap<>();
-    // Table #4 — multipart uploads (unordered, keyed by object key)
-    private final ConcurrentHashMap<String, MultipartUpload> multipartTable = new ConcurrentHashMap<>();
 
     // --- Table #1: Operation Log ---
 
@@ -36,7 +34,7 @@ public class InMemoryStorageStrategy implements StorageStrategy {
 
     @Override
     public void updateMetadata(Metadata metadata) {
-        metadataTable.put(metadata.fileName(), metadata);
+        metadataTable.put(metadata.key(), metadata);
     }
 
     @Override
@@ -53,7 +51,7 @@ public class InMemoryStorageStrategy implements StorageStrategy {
     @Override
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) {
         return metadataTable.tailMap(prefix, true).values().stream()
-                .takeWhile(metadata -> metadata.fileName().startsWith(prefix));
+                .takeWhile(metadata -> metadata.key().startsWith(prefix));
     }
 
     // --- Table #3: Buckets ---
@@ -78,23 +76,6 @@ public class InMemoryStorageStrategy implements StorageStrategy {
         return bucketsTable.values().stream();
     }
 
-    // --- Table #4: Multipart Uploads ---
-
-    @Override
-    public void putMultipartUpload(MultipartUpload upload) {
-        multipartTable.put(upload.key(), upload);
-    }
-
-    @Override
-    public Optional<MultipartUpload> getMultipartUpload(String key) {
-        return Optional.ofNullable(multipartTable.get(key));
-    }
-
-    @Override
-    public void deleteMultipartUpload(String key) {
-        multipartTable.remove(key);
-    }
-
     // --- Lifecycle ---
 
     @Override
@@ -102,6 +83,5 @@ public class InMemoryStorageStrategy implements StorageStrategy {
         opLogTable.clear();
         metadataTable.clear();
         bucketsTable.clear();
-        multipartTable.clear();
     }
 }

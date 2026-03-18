@@ -16,7 +16,6 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     private final ColumnFamilyHandle logHandle;
     private final ColumnFamilyHandle metaHandle;
     private final ColumnFamilyHandle bucketsHandle;
-    private final ColumnFamilyHandle multipartHandle;
 
     public RocksDbStorageStrategy(String dbPath) throws RocksDBException {
         RocksDB.loadLibrary();
@@ -25,8 +24,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("op_log".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("metadata".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("multipart_uploads".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
+                new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
         try (DBOptions options = new DBOptions()
@@ -34,10 +32,9 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 .setCreateMissingColumnFamilies(true)) {
             db = RocksDB.open(options, dbPath, descriptors, handles);
 
-            logHandle      = handles.get(1);
-            metaHandle     = handles.get(2);
-            bucketsHandle  = handles.get(3);
-            multipartHandle = handles.get(4);
+            logHandle     = handles.get(1);
+            metaHandle    = handles.get(2);
+            bucketsHandle = handles.get(3);
         }
     }
 
@@ -97,7 +94,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
 
     @Override
     public void updateMetadata(Metadata metadata) throws Exception {
-        byte[] key = metadata.fileName().getBytes(StandardCharsets.UTF_8);
+        byte[] key = metadata.key().getBytes(StandardCharsets.UTF_8);
         byte[] value = metadata.serialize();
         db.put(metaHandle, key, value);
     }
@@ -107,7 +104,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         byte[] logKey = ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array();
         byte[] logValue = log.serialize();
 
-        byte[] metaKey = metadata.fileName().getBytes(StandardCharsets.UTF_8);
+        byte[] metaKey = metadata.key().getBytes(StandardCharsets.UTF_8);
         byte[] metaValue = metadata.serialize();
 
         try (WriteBatch writeBatch = new WriteBatch();
@@ -184,31 +181,6 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             iterator.next();
             return bucket;
         }).onClose(iterator::close).takeWhile(b -> b != null);
-    }
-
-    // --- Table #4: Multipart Uploads ---
-
-    @Override
-    public void putMultipartUpload(MultipartUpload upload) throws Exception {
-        byte[] key = upload.key().getBytes(StandardCharsets.UTF_8);
-        byte[] value = upload.serialize();
-        db.put(multipartHandle, key, value);
-    }
-
-    @Override
-    public Optional<MultipartUpload> getMultipartUpload(String key) throws Exception {
-        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        byte[] value = db.get(multipartHandle, keyBytes);
-        if (value == null) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(MultipartUpload.from(value));
-    }
-
-    @Override
-    public void deleteMultipartUpload(String key) throws Exception {
-        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        db.delete(multipartHandle, keyBytes);
     }
 
     // --- Helpers ---
