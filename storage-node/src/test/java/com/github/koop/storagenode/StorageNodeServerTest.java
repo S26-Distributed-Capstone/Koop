@@ -29,8 +29,8 @@ class StorageNodeServerTest {
     @BeforeEach
     void setUp() throws Exception {
         server = new StorageNodeServer(0, tempDir);  // port 0 → OS picks free port
-        Thread.ofVirtual().start(server::start);
-        Thread.sleep(500); // wait for Javalin to be ready
+        var t = Thread.ofVirtual().start(server::start);
+        t.join();  // Wait for server to start and set the port
         port = server.port();
         http = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())

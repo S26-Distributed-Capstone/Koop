@@ -3,7 +3,9 @@ package com.github.koop.storagenode.db;
 public enum Operation {
     PUT,
     DELETE,
-    GET;
+    GET,
+    CREATE_BUCKET,
+    DELETE_BUCKET;
 
     public static Operation fromString(String op) {
         switch (op.toUpperCase()) {
@@ -13,6 +15,10 @@ public enum Operation {
                 return DELETE;
             case "GET":
                 return GET;
+            case "CREATE_BUCKET":
+                return CREATE_BUCKET;
+            case "DELETE_BUCKET":
+                return DELETE_BUCKET;
             default:
                 throw new IllegalArgumentException("Unknown operation: " + op);
         }
