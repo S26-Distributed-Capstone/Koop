@@ -5,6 +5,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+/**
+ * High-level database facade exposing exactly the operations the storage node
+ * needs.
+ */
 public class Database implements AutoCloseable {
     public static final String TOMBSTONE_LOCATION = "DELETED";
     private final StorageStrategy strategy;
@@ -13,115 +17,111 @@ public class Database implements AutoCloseable {
         this.strategy = strategy;
     }
 
-    // --- Table #1: Operation Log ---
+    // -------------------------------------------------------------------------
+    // PUT item — atomic write into metadata and oplog
+    // -------------------------------------------------------------------------
 
-    public void logOperation(OpLog log) throws Exception {
-        strategy.addLog(log);
+    /** Commits a regular (single-blob) version of {@code key}. */
+    public void putItem(String key, int partition, long seqNumber, String location) throws Exception {
+        List<FileVersion> versions = currentVersions(key);
+        versions.add(new RegularFileVersion(seqNumber, location));
+        strategy.atomicallyUpdateLogAndMetadata(
+                new OpLog(seqNumber, key, Operation.PUT),
+                new Metadata(key, partition, versions));
     }
 
-    public Stream<OpLog> getLogs(long from, long downTo) throws Exception {
-        return strategy.getLogs(from, downTo);
+    /** Commits a completed multipart version of {@code key}. */
+    public void putMultipartItem(String key, int partition, long seqNumber, List<String> chunks) throws Exception {
+        List<FileVersion> versions = currentVersions(key);
+        versions.add(new MultipartFileVersion(seqNumber, chunks));
+        strategy.atomicallyUpdateLogAndMetadata(
+                new OpLog(seqNumber, key, Operation.PUT),
+                new Metadata(key, partition, versions));
     }
 
-    public Optional<OpLog> getOpLog(long seqNum) throws Exception {
-        return strategy.getLog(seqNum);
+    // -------------------------------------------------------------------------
+    // DELETE item — atomic tombstone write into metadata and oplog
+    // -------------------------------------------------------------------------
+
+    public void deleteItem(String key, int partition, long seqNumber) throws Exception {
+        List<FileVersion> versions = currentVersions(key);
+        versions.add(new RegularFileVersion(seqNumber, TOMBSTONE_LOCATION));
+        strategy.atomicallyUpdateLogAndMetadata(
+                new OpLog(seqNumber, key, Operation.DELETE),
+                new Metadata(key, partition, versions));
     }
 
-    // --- Table #2: Metadata ---
+    // -------------------------------------------------------------------------
+    // GET ITEM — return metadata row
+    // -------------------------------------------------------------------------
 
-    public void setMetadata(Metadata meta) throws Exception {
-        strategy.updateMetadata(meta);
+    public Optional<Metadata> getItem(String key) throws Exception {
+        return strategy.getMetadata(key);
     }
 
-    public void atomicallyUpdate(Metadata meta, OpLog log) throws Exception {
-        strategy.atomicallyUpdateLogAndMetadata(log, meta);
+    public Optional<FileVersion> getLatestFileVersion(String key) throws Exception {
+        var versions = currentVersions(key);
+        if (versions.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(versions.getLast());
     }
 
-    public Optional<Metadata> getMetadata(String fileKey) throws Exception {
-        return strategy.getMetadata(fileKey);
+    // -------------------------------------------------------------------------
+    // CREATE BUCKET — atomic write into bucket table and oplog
+    // -------------------------------------------------------------------------
+
+    public void createBucket(String bucketKey, int partition, long seqNumber) throws Exception {
+        strategy.atomicallyUpdateLogAndBucket(
+                new OpLog(seqNumber, bucketKey, Operation.CREATE_BUCKET),
+                new Bucket(bucketKey, partition, seqNumber, false));
     }
 
-    public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
-        return strategy.streamMetadataWithPrefix(prefix)
-                .takeWhile(meta -> meta.key().startsWith(prefix));
+    // -------------------------------------------------------------------------
+    // DELETE BUCKET — atomic tombstone write into bucket table and oplog
+    // -------------------------------------------------------------------------
+
+    public void deleteBucket(String bucketKey, int partition, long seqNumber) throws Exception {
+        strategy.atomicallyUpdateLogAndBucket(
+                new OpLog(seqNumber, bucketKey, Operation.DELETE_BUCKET),
+                new Bucket(bucketKey, partition, seqNumber, true));
     }
 
-    // --- Table #2: File-version helpers (read-modify-write on Metadata.versions) ---
+    // -------------------------------------------------------------------------
+    // BUCKET EXISTS — check bucket table (false for tombstoned rows)
+    // -------------------------------------------------------------------------
 
-    /**
-     * Replaces the version list for the given key.
-     * If no Metadata row exists yet, partition defaults to 0.
-     */
-    public void putFileVersions(String key, int partition, List<FileVersion> versions) throws Exception {
-        strategy.updateMetadata(new Metadata(key, partition, versions));
+    public boolean bucketExists(String bucketKey) throws Exception {
+        return strategy.getBucket(bucketKey)
+                .map(b -> !b.deleted())
+                .orElse(false);
     }
 
-    public Optional<List<FileVersion>> getFileVersions(String key) throws Exception {
-        return strategy.getMetadata(key).map(Metadata::versions);
+    // -------------------------------------------------------------------------
+    // LIST ITEMS IN BUCKET — prefix scan on metadata table
+    // -------------------------------------------------------------------------
+
+    public Stream<Metadata> listItemsInBucket(String bucketPrefix) throws Exception {
+        return strategy.streamMetadataWithPrefix(bucketPrefix);
     }
 
-    // --- Table #2: Multipart-upload helpers ---
-
-    /**
-     * Appends a {@link MultipartFileVersion} entry to the versions list for the given key.
-     * Preserves any existing {@link RegularFileVersion} entries.
-     */
-    public void putMultipartUpload(String key, int partition, long seqNum, List<String> chunks) throws Exception {
-        var existing = strategy.getMetadata(key);
-        List<FileVersion> versions = existing.map(m -> new ArrayList<>(m.versions())).orElse(new ArrayList<>());
-        versions.add(new MultipartFileVersion(seqNum, chunks));
-        strategy.updateMetadata(new Metadata(key, partition, versions));
-    }
-
-    /**
-     * Returns the chunk list of the latest {@link MultipartFileVersion} for the given key,
-     * or empty if no multipart version exists.
-     */
-    public Optional<List<String>> getMultipartUpload(String key) throws Exception {
-        return strategy.getMetadata(key)
-                .map(m -> m.versions().stream()
-                        .filter(v -> v instanceof MultipartFileVersion)
-                        .map(v -> ((MultipartFileVersion) v).chunks())
-                        .reduce((first, second) -> second) // latest multipart
-                        .orElse(null))
-                .filter(c -> c != null);
-    }
-
-    /**
-     * Removes all {@link MultipartFileVersion} entries from the versions list for the given key.
-     */
-    public void deleteMultipartUpload(String key) throws Exception {
-        var existing = strategy.getMetadata(key);
-        if (existing.isEmpty()) return;
-        Metadata m = existing.get();
-        List<FileVersion> pruned = m.versions().stream()
-                .filter(v -> !(v instanceof MultipartFileVersion))
-                .toList();
-        strategy.updateMetadata(new Metadata(m.key(), m.partition(), pruned));
-    }
-
-    // --- Table #3: Buckets ---
-
-    public void putBucket(Bucket bucket) throws Exception {
-        strategy.putBucket(bucket);
-    }
-
-    public Optional<Bucket> getBucket(String key) throws Exception {
-        return strategy.getBucket(key);
-    }
-
-    public void deleteBucket(String key) throws Exception {
-        strategy.deleteBucket(key);
-    }
-
-    public Stream<Bucket> streamBuckets() throws Exception {
-        return strategy.streamBuckets();
-    }
-
-    // --- Lifecycle ---
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
 
     @Override
     public void close() throws Exception {
         strategy.close();
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    /** Returns a mutable copy of the existing versions list, or an empty list. */
+    private List<FileVersion> currentVersions(String key) throws Exception {
+        return strategy.getMetadata(key)
+                .map(m -> new ArrayList<>(m.versions()))
+                .orElse(new ArrayList<>());
     }
 }

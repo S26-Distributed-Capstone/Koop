@@ -5,44 +5,35 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Table #3 — Buckets.
- * Stores bucket metadata keyed by bucket name.
+ * {@code deleted = true} marks a tombstone (logically deleted, pending GC).
  */
 public record Bucket(
         String key,
         int partition,
-        long sequenceNumber) {
+        long sequenceNumber,
+        boolean deleted) {
 
     public byte[] serialize() {
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-
-        int totalLength = 4 + keyBytes.length +
-                          4 + // partition (int)
-                          8;  // sequenceNumber (long)
-
+        int totalLength = 4 + keyBytes.length + 4 + 8 + 1; // key + partition + seqNum + deleted flag
         ByteBuffer buffer = ByteBuffer.allocate(totalLength);
-        writeString(buffer, keyBytes);
+        buffer.putInt(keyBytes.length);
+        buffer.put(keyBytes);
         buffer.putInt(partition);
         buffer.putLong(sequenceNumber);
+        buffer.put(deleted ? (byte) 1 : (byte) 0);
         return buffer.array();
     }
 
     public static Bucket from(byte[] rawData) {
         ByteBuffer buffer = ByteBuffer.wrap(rawData);
-        String key = readString(buffer);
+        int len = buffer.getInt();
+        byte[] keyBytes = new byte[len];
+        buffer.get(keyBytes);
+        String key = new String(keyBytes, StandardCharsets.UTF_8);
         int partition = buffer.getInt();
         long sequenceNumber = buffer.getLong();
-        return new Bucket(key, partition, sequenceNumber);
-    }
-
-    private static void writeString(ByteBuffer buffer, byte[] bytes) {
-        buffer.putInt(bytes.length);
-        buffer.put(bytes);
-    }
-
-    private static String readString(ByteBuffer buffer) {
-        int len = buffer.getInt();
-        byte[] bytes = new byte[len];
-        buffer.get(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
+        boolean deleted = buffer.get() == 1;
+        return new Bucket(key, partition, sequenceNumber, deleted);
     }
 }

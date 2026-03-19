@@ -31,7 +31,6 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true)) {
             db = RocksDB.open(options, dbPath, descriptors, handles);
-
             logHandle     = handles.get(1);
             metaHandle    = handles.get(2);
             bucketsHandle = handles.get(3);
@@ -41,13 +40,9 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     @Override
     public void close() throws Exception {
         for (ColumnFamilyHandle handle : handles) {
-            if (handle != null) {
-                handle.close();
-            }
+            if (handle != null) handle.close();
         }
-        if (db != null) {
-            db.close();
-        }
+        if (db != null) db.close();
     }
 
     // --- Table #1: Operation Log ---
@@ -55,18 +50,14 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     @Override
     public void addLog(OpLog log) throws Exception {
         byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array();
-        byte[] value = log.serialize();
-        db.put(logHandle, key, value);
+        db.put(logHandle, key, log.serialize());
     }
 
     @Override
     public Optional<OpLog> getLog(long seqNum) throws Exception {
         byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(seqNum).array();
         byte[] value = db.get(logHandle, key);
-        if (value == null) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(OpLog.from(value));
+        return value == null ? Optional.empty() : Optional.of(OpLog.from(value));
     }
 
     @Override
@@ -74,20 +65,14 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         byte[] endKey = ByteBuffer.allocate(Long.BYTES).putLong(downTo).array();
         RocksIterator iterator = db.newIterator(logHandle);
         iterator.seekForPrev(endKey);
-
         return Stream.generate(() -> {
-            if (!iterator.isValid()) {
-                return null;
-            }
-            long currentSeq = ByteBuffer.wrap(iterator.key()).getLong();
-            if (currentSeq < from) {
-                return null;
-            }
+            if (!iterator.isValid()) return null;
+            long seq = ByteBuffer.wrap(iterator.key()).getLong();
+            if (seq < from) return null;
             OpLog log = OpLog.from(iterator.value());
             iterator.prev();
             return log;
-        }).onClose(iterator::close)
-                .takeWhile(log -> log != null);
+        }).onClose(iterator::close).takeWhile(log -> log != null);
     }
 
     // --- Table #2: Metadata ---
@@ -95,34 +80,26 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     @Override
     public void updateMetadata(Metadata metadata) throws Exception {
         byte[] key = metadata.key().getBytes(StandardCharsets.UTF_8);
-        byte[] value = metadata.serialize();
-        db.put(metaHandle, key, value);
+        db.put(metaHandle, key, metadata.serialize());
     }
 
     @Override
     public void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception {
-        byte[] logKey = ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array();
-        byte[] logValue = log.serialize();
-
-        byte[] metaKey = metadata.key().getBytes(StandardCharsets.UTF_8);
-        byte[] metaValue = metadata.serialize();
-
-        try (WriteBatch writeBatch = new WriteBatch();
-                WriteOptions writeOptions = new WriteOptions()) {
-            writeBatch.put(logHandle, logKey, logValue);
-            writeBatch.put(metaHandle, metaKey, metaValue);
-            db.write(writeOptions, writeBatch);
+        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
+            batch.put(logHandle,
+                    ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array(),
+                    log.serialize());
+            batch.put(metaHandle,
+                    metadata.key().getBytes(StandardCharsets.UTF_8),
+                    metadata.serialize());
+            db.write(opts, batch);
         }
     }
 
     @Override
-    public Optional<Metadata> getMetadata(String fileKey) throws Exception {
-        byte[] key = fileKey.getBytes(StandardCharsets.UTF_8);
-        byte[] value = db.get(metaHandle, key);
-        if (value == null) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(Metadata.from(value));
+    public Optional<Metadata> getMetadata(String key) throws Exception {
+        byte[] value = db.get(metaHandle, key.getBytes(StandardCharsets.UTF_8));
+        return value == null ? Optional.empty() : Optional.of(Metadata.from(value));
     }
 
     @Override
@@ -131,42 +108,39 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         RocksIterator iterator = db.newIterator(metaHandle);
         iterator.seek(prefixBytes);
         return Stream.generate(() -> {
-            if (!iterator.isValid()) {
-                return null;
-            }
-            byte[] key = iterator.key();
-            if (!startsWith(key, prefixBytes)) {
-                return null;
-            }
-            var res = Metadata.from(iterator.value());
+            if (!iterator.isValid()) return null;
+            if (!startsWith(iterator.key(), prefixBytes)) return null;
+            Metadata m = Metadata.from(iterator.value());
             iterator.next();
-            return res;
-        }).onClose(iterator::close).takeWhile(it -> it != null);
+            return m;
+        }).onClose(iterator::close).takeWhile(m -> m != null);
     }
 
     // --- Table #3: Buckets ---
 
     @Override
-    public void putBucket(Bucket bucket) throws Exception {
+    public void updateBucket(Bucket bucket) throws Exception {
         byte[] key = bucket.key().getBytes(StandardCharsets.UTF_8);
-        byte[] value = bucket.serialize();
-        db.put(bucketsHandle, key, value);
+        db.put(bucketsHandle, key, bucket.serialize());
+    }
+
+    @Override
+    public void atomicallyUpdateLogAndBucket(OpLog log, Bucket bucket) throws Exception {
+        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
+            batch.put(logHandle,
+                    ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array(),
+                    log.serialize());
+            batch.put(bucketsHandle,
+                    bucket.key().getBytes(StandardCharsets.UTF_8),
+                    bucket.serialize());
+            db.write(opts, batch);
+        }
     }
 
     @Override
     public Optional<Bucket> getBucket(String key) throws Exception {
-        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        byte[] value = db.get(bucketsHandle, keyBytes);
-        if (value == null) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(Bucket.from(value));
-    }
-
-    @Override
-    public void deleteBucket(String key) throws Exception {
-        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        db.delete(bucketsHandle, keyBytes);
+        byte[] value = db.get(bucketsHandle, key.getBytes(StandardCharsets.UTF_8));
+        return value == null ? Optional.empty() : Optional.of(Bucket.from(value));
     }
 
     @Override
@@ -174,28 +148,19 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         RocksIterator iterator = db.newIterator(bucketsHandle);
         iterator.seekToFirst();
         return Stream.generate(() -> {
-            if (!iterator.isValid()) {
-                return null;
-            }
-            Bucket bucket = Bucket.from(iterator.value());
+            if (!iterator.isValid()) return null;
+            Bucket b = Bucket.from(iterator.value());
             iterator.next();
-            return bucket;
+            return b;
         }).onClose(iterator::close).takeWhile(b -> b != null);
     }
 
     // --- Helpers ---
 
-    /**
-     * Returns true if {@code source} starts with the bytes in {@code match}.
-     */
     private boolean startsWith(byte[] source, byte[] match) {
-        if (match.length > source.length) {
-            return false;
-        }
+        if (match.length > source.length) return false;
         for (int i = 0; i < match.length; i++) {
-            if (source[i] != match[i]) {
-                return false;
-            }
+            if (source[i] != match[i]) return false;
         }
         return true;
     }

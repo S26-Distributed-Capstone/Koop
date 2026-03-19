@@ -1,6 +1,5 @@
 package com.github.koop.storagenode.db;
 
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Stream;
@@ -8,7 +7,7 @@ import java.util.stream.Stream;
 public class InMemoryStorageStrategy implements StorageStrategy {
     // Table #1 — operation log (sorted by seqNum for range scans)
     private final ConcurrentSkipListMap<Long, OpLog> opLogTable = new ConcurrentSkipListMap<>();
-    // Table #2 — metadata (sorted by key for prefix scans; includes versions + multipart)
+    // Table #2 — metadata (sorted by key for prefix scans)
     private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>();
     // Table #3 — buckets (sorted by key for streaming)
     private final ConcurrentSkipListMap<String, Bucket> bucketsTable = new ConcurrentSkipListMap<>();
@@ -44,31 +43,32 @@ public class InMemoryStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public Optional<Metadata> getMetadata(String fileKey) {
-        return Optional.ofNullable(metadataTable.get(fileKey));
+    public Optional<Metadata> getMetadata(String key) {
+        return Optional.ofNullable(metadataTable.get(key));
     }
 
     @Override
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) {
         return metadataTable.tailMap(prefix, true).values().stream()
-                .takeWhile(metadata -> metadata.key().startsWith(prefix));
+                .takeWhile(m -> m.key().startsWith(prefix));
     }
 
     // --- Table #3: Buckets ---
 
     @Override
-    public void putBucket(Bucket bucket) {
+    public void updateBucket(Bucket bucket) {
         bucketsTable.put(bucket.key(), bucket);
+    }
+
+    @Override
+    public void atomicallyUpdateLogAndBucket(OpLog log, Bucket bucket) {
+        addLog(log);
+        updateBucket(bucket);
     }
 
     @Override
     public Optional<Bucket> getBucket(String key) {
         return Optional.ofNullable(bucketsTable.get(key));
-    }
-
-    @Override
-    public void deleteBucket(String key) {
-        bucketsTable.remove(key);
     }
 
     @Override

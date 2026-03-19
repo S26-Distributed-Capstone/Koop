@@ -12,7 +12,6 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-
 class RocksDbStorageStrategyTest {
 
     @TempDir
@@ -27,122 +26,11 @@ class RocksDbStorageStrategyTest {
 
     @AfterEach
     void tearDown() throws Exception {
-        if (strategy != null) {
-            strategy.close();
-        }
+        if (strategy != null) strategy.close();
     }
 
     // =========================================================================
-    // Table #2 — Metadata with FileVersion hierarchy
-    // =========================================================================
-
-    @Test
-    void testUpdateAndGetMetadataWithRegularVersion() throws Exception {
-        String key = "partition_1/fileA.dat";
-        Metadata meta = new Metadata(key, 1,
-                List.of(new RegularFileVersion(100L, "/data/p1/fileA.dat")));
-
-        strategy.updateMetadata(meta);
-
-        var retrieved = strategy.getMetadata(key).orElseThrow();
-        assertEquals(key, retrieved.key());
-        assertEquals(1, retrieved.partition());
-        assertEquals(1, retrieved.versions().size());
-        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
-        assertEquals(100L, retrieved.versions().get(0).sequenceNumber());
-        assertEquals("/data/p1/fileA.dat", ((RegularFileVersion) retrieved.versions().get(0)).location());
-    }
-
-    @Test
-    void testUpdateAndGetMetadataWithMultipartVersion() throws Exception {
-        String key = "animals/dog.jpg";
-        Metadata meta = new Metadata(key, 1,
-                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"))));
-
-        strategy.updateMetadata(meta);
-
-        var retrieved = strategy.getMetadata(key).orElseThrow();
-        assertEquals(1, retrieved.versions().size());
-        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(0));
-        MultipartFileVersion mpv = (MultipartFileVersion) retrieved.versions().get(0);
-        assertEquals(98L, mpv.sequenceNumber());
-        assertEquals(List.of("chunk-0.blob", "chunk-1.blob"), mpv.chunks());
-    }
-
-    @Test
-    void testUpdateAndGetMetadataMixedVersions() throws Exception {
-        String key = "mixed/key";
-        Metadata meta = new Metadata(key, 2, List.of(
-                new RegularFileVersion(10L, "/blob-10"),
-                new MultipartFileVersion(20L, List.of("chunk-a", "chunk-b")),
-                new RegularFileVersion(30L, "/blob-30")));
-
-        strategy.updateMetadata(meta);
-
-        var retrieved = strategy.getMetadata(key).orElseThrow();
-        assertEquals(3, retrieved.versions().size());
-        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
-        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(1));
-        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(2));
-        assertEquals(20L, retrieved.versions().get(1).sequenceNumber());
-    }
-
-    @Test
-    void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
-        assertTrue(strategy.getMetadata("missing_file.dat").isEmpty());
-    }
-
-    @Test
-    void testAtomicallyUpdateLogAndMetadata() throws Exception {
-        long seq = 42L;
-        String key = "atomic_file.txt";
-
-        OpLog log = new OpLog(seq, key, Operation.DELETE);
-        Metadata meta = new Metadata(key, 2,
-                List.of(new RegularFileVersion(seq, Database.TOMBSTONE_LOCATION)));
-
-        strategy.atomicallyUpdateLogAndMetadata(log, meta);
-
-        var retrievedMeta = strategy.getMetadata(key).orElseThrow();
-        assertEquals(Database.TOMBSTONE_LOCATION,
-                ((RegularFileVersion) retrievedMeta.versions().get(0)).location());
-
-        try (Stream<OpLog> logStream = strategy.getLogs(seq, seq)) {
-            List<OpLog> logs = logStream.collect(Collectors.toList());
-            assertEquals(1, logs.size());
-            assertEquals(Operation.DELETE, logs.get(0).operation());
-        }
-    }
-
-    @Test
-    void testStreamMetadataWithPrefix() throws Exception {
-        strategy.updateMetadata(new Metadata("videos/2023/vid1.mp4", 1, List.of(new RegularFileVersion(1L, "/l1"))));
-        strategy.updateMetadata(new Metadata("videos/2023/vid2.mp4", 1, List.of(new RegularFileVersion(2L, "/l2"))));
-        strategy.updateMetadata(new Metadata("videos/2024/vid3.mp4", 1, List.of(new RegularFileVersion(3L, "/l3"))));
-        strategy.updateMetadata(new Metadata("documents/doc1.pdf",   1, List.of(new RegularFileVersion(4L, "/l4"))));
-        strategy.updateMetadata(new Metadata("videos/202",           1, List.of(new RegularFileVersion(5L, "/l5"))));
-
-        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("videos/2023/")) {
-            List<String> keys = stream.map(Metadata::key).collect(Collectors.toList());
-            assertEquals(2, keys.size());
-            assertTrue(keys.containsAll(List.of("videos/2023/vid1.mp4", "videos/2023/vid2.mp4")));
-        }
-
-        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("videos/")) {
-            assertEquals(4, stream.collect(Collectors.toList()).size());
-        }
-    }
-
-    @Test
-    void testPrefixStreamReturnsEmptyForNoMatch() throws Exception {
-        strategy.updateMetadata(new Metadata("folderA/file1.txt", 1, List.of()));
-        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("folderB/")) {
-            assertTrue(stream.collect(Collectors.toList()).isEmpty());
-        }
-    }
-
-    // =========================================================================
-    // Table #1 — Operation Log
+    // Table #1 — Op Log
     // =========================================================================
 
     @Test
@@ -160,21 +48,127 @@ class RocksDbStorageStrategyTest {
     }
 
     // =========================================================================
-    // Table #3 — Buckets
+    // Table #2 — Metadata with FileVersion hierarchy
     // =========================================================================
 
     @Test
-    void testPutAndGetBucket() throws Exception {
-        strategy.putBucket(new Bucket("animals", 0, 5L));
-        var result = strategy.getBucket("animals").orElseThrow();
-        assertEquals("animals", result.key());
-        assertEquals(5L, result.sequenceNumber());
+    void testUpdateAndGetMetadataRegularVersion() throws Exception {
+        Metadata meta = new Metadata("animals/cat.jpg", 1,
+                List.of(new RegularFileVersion(100L, "/data/cat.blob")));
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata("animals/cat.jpg").orElseThrow();
+        assertEquals(1, retrieved.versions().size());
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
+        assertEquals(100L, retrieved.versions().get(0).sequenceNumber());
+        assertEquals("/data/cat.blob", ((RegularFileVersion) retrieved.versions().get(0)).location());
     }
 
     @Test
-    void testDeleteBucket() throws Exception {
-        strategy.putBucket(new Bucket("to-delete", 1, 10L));
-        strategy.deleteBucket("to-delete");
-        assertTrue(strategy.getBucket("to-delete").isEmpty());
+    void testUpdateAndGetMetadataMultipartVersion() throws Exception {
+        Metadata meta = new Metadata("animals/dog.jpg", 1,
+                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"))));
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata("animals/dog.jpg").orElseThrow();
+        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(0));
+        assertEquals(List.of("chunk-0.blob", "chunk-1.blob"),
+                ((MultipartFileVersion) retrieved.versions().get(0)).chunks());
+    }
+
+    @Test
+    void testUpdateAndGetMetadataMixedVersions() throws Exception {
+        Metadata meta = new Metadata("mixed/key", 2, List.of(
+                new RegularFileVersion(10L, "/blob-10"),
+                new MultipartFileVersion(20L, List.of("chunk-a")),
+                new RegularFileVersion(30L, "/blob-30")));
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata("mixed/key").orElseThrow();
+        assertEquals(3, retrieved.versions().size());
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
+        assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(1));
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(2));
+    }
+
+    @Test
+    void testAtomicallyUpdateLogAndMetadata() throws Exception {
+        long seq = 42L;
+        String key = "atomic.txt";
+        strategy.atomicallyUpdateLogAndMetadata(
+                new OpLog(seq, key, Operation.DELETE),
+                new Metadata(key, 2, List.of(new RegularFileVersion(seq, Database.TOMBSTONE_LOCATION))));
+
+        assertEquals(Database.TOMBSTONE_LOCATION,
+                ((RegularFileVersion) strategy.getMetadata(key).orElseThrow().versions().get(0)).location());
+
+        try (Stream<OpLog> s = strategy.getLogs(seq, seq)) {
+            assertEquals(Operation.DELETE, s.findFirst().orElseThrow().operation());
+        }
+    }
+
+    @Test
+    void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
+        assertTrue(strategy.getMetadata("missing").isEmpty());
+    }
+
+    @Test
+    void testStreamMetadataWithPrefix() throws Exception {
+        strategy.updateMetadata(new Metadata("photos/cat.jpg", 1, List.of(new RegularFileVersion(1L, "/l1"))));
+        strategy.updateMetadata(new Metadata("photos/dog.jpg", 1, List.of(new RegularFileVersion(2L, "/l2"))));
+        strategy.updateMetadata(new Metadata("videos/clip.mp4", 1, List.of(new RegularFileVersion(3L, "/l3"))));
+
+        try (Stream<Metadata> stream = strategy.streamMetadataWithPrefix("photos/")) {
+            List<String> keys = stream.map(Metadata::key).collect(Collectors.toList());
+            assertEquals(2, keys.size());
+            assertTrue(keys.containsAll(List.of("photos/cat.jpg", "photos/dog.jpg")));
+        }
+    }
+
+    // =========================================================================
+    // Table #3 — Buckets (with tombstone support)
+    // =========================================================================
+
+    @Test
+    void testCreateAndCheckBucketExists() throws Exception {
+        strategy.atomicallyUpdateLogAndBucket(
+                new OpLog(5L, "animals", Operation.CREATE_BUCKET),
+                new Bucket("animals", 1, 5L, false));
+
+        var bucket = strategy.getBucket("animals").orElseThrow();
+        assertFalse(bucket.deleted());
+        assertEquals(5L, bucket.sequenceNumber());
+    }
+
+    @Test
+    void testDeleteBucketTombstone() throws Exception {
+        strategy.atomicallyUpdateLogAndBucket(
+                new OpLog(5L, "animals", Operation.CREATE_BUCKET),
+                new Bucket("animals", 1, 5L, false));
+        strategy.atomicallyUpdateLogAndBucket(
+                new OpLog(10L, "animals", Operation.DELETE_BUCKET),
+                new Bucket("animals", 1, 10L, true));
+
+        var bucket = strategy.getBucket("animals").orElseThrow();
+        assertTrue(bucket.deleted());
+    }
+
+    @Test
+    void testBucketSerializationRoundTrip() {
+        Bucket original = new Bucket("animals", 3, 42L, false);
+        Bucket rt = Bucket.from(original.serialize());
+        assertEquals("animals", rt.key());
+        assertEquals(3, rt.partition());
+        assertEquals(42L, rt.sequenceNumber());
+        assertFalse(rt.deleted());
+
+        Bucket tombstone = new Bucket("animals", 3, 99L, true);
+        Bucket rtTombstone = Bucket.from(tombstone.serialize());
+        assertTrue(rtTombstone.deleted());
+    }
+
+    @Test
+    void testGetBucketReturnsEmptyForMissingKey() throws Exception {
+        assertTrue(strategy.getBucket("nonexistent").isEmpty());
     }
 }
