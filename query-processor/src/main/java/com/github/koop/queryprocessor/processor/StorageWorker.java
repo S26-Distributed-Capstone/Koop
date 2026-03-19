@@ -18,6 +18,8 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -101,12 +103,16 @@ public final class StorageWorker {
 
         String storageKey = bucket + "-" + key;
         ErasureRouting r = getRouting();
-        int partition = r.getPartition(storageKey);
-        List<InetSocketAddress> nodes = r.getNodes(partition);
-        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+        OptionalInt partition = r.getPartition(storageKey);
+        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
+                ? r.getNodes(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || nodes.isEmpty()) {
             logger.error("Routing failed for key {}, aborting put", storageKey);
             return false;
         }
+        int resolvedPartition = partition.getAsInt();
+        List<InetSocketAddress> resolvedNodes = nodes.get();
 
         // Shard the incoming stream — each InputStream carries shard data.
         // IMPORTANT: all shard streams must be drained concurrently because
@@ -118,9 +124,9 @@ public final class StorageWorker {
             final int index = i;
             tasks.add(() -> {
                 try {
-                    InetSocketAddress node = nodes.get(index);
+                    InetSocketAddress node = resolvedNodes.get(index);
                     URI uri = URI.create(String.format("http://%s:%d/store/%d/%s?requestId=%s",
-                            node.getHostString(), node.getPort(), partition, storageKey, requestID));
+                            node.getHostString(), node.getPort(), resolvedPartition, storageKey, requestID));
 
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
@@ -169,19 +175,23 @@ public final class StorageWorker {
 
         String storageKey = bucket + "-" + key;
         ErasureRouting r = getRouting();
-        int partition = r.getPartition(storageKey);
-        List<InetSocketAddress> nodes = r.getNodes(partition);
-        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+        OptionalInt partition = r.getPartition(storageKey);
+        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
+                ? r.getNodes(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || nodes.isEmpty()) {
             logger.error("Routing failed for key {}, aborting get", storageKey);
             return InputStream.nullInputStream();
         }
+        int resolvedPartition = partition.getAsInt();
+        List<InetSocketAddress> resolvedNodes = nodes.get();
 
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
         executor.execute(() -> {
             try (pos) {
-                streamReconstruct(partition, storageKey, nodes, pos);
+                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, pos);
             } catch (Exception e) {
                 try { pos.close(); } catch (IOException ignored) {}
             }
@@ -197,21 +207,25 @@ public final class StorageWorker {
 
         String storageKey = bucket + "-" + key;
         ErasureRouting r = getRouting();
-        int partition = r.getPartition(storageKey);
-        List<InetSocketAddress> nodes = r.getNodes(partition);
-        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+        OptionalInt partition = r.getPartition(storageKey);
+        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
+                ? r.getNodes(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || nodes.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
+        int resolvedPartition = partition.getAsInt();
+        List<InetSocketAddress> resolvedNodes = nodes.get();
 
         List<Callable<Boolean>> tasks = new LinkedList<>();
         for (int i = 0; i < TOTAL; i++) {
             final int index = i;
             tasks.add(() -> {
                 try {
-                    InetSocketAddress node = nodes.get(index);
+                    InetSocketAddress node = resolvedNodes.get(index);
                     URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
-                            node.getHostString(), node.getPort(), partition, storageKey));
+                            node.getHostString(), node.getPort(), resolvedPartition, storageKey));
 
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
@@ -226,7 +240,7 @@ public final class StorageWorker {
                     }
                     return true;
                 } catch (Exception e) {
-                    logger.warn("Exception in delete task for node {}: {}", nodes.get(index), e.getMessage());
+                    logger.warn("Exception in delete task for node {}: {}", resolvedNodes.get(index), e.getMessage());
                     return false;
                 }
             });
@@ -263,13 +277,13 @@ public final class StorageWorker {
             erasureSetConfig.set(current);
             logger.info("ErasureSetConfiguration updated: {} erasure sets",
                     current.getErasureSets() == null ? 0 : current.getErasureSets().size());
-            tryRebuildRouting();
+            tryRebuildRouting(partitionSpreadConfig.get(), current);
         });
         this.metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
             partitionSpreadConfig.set(current);
             logger.info("PartitionSpreadConfiguration updated: {} spread entries",
                     current.getPartitionSpread() == null ? 0 : current.getPartitionSpread().size());
-            tryRebuildRouting();
+            tryRebuildRouting(current, erasureSetConfig.get());
         });
     }
 
@@ -279,9 +293,7 @@ public final class StorageWorker {
      * if one hasn't arrived yet this is a no-op and the first update of the
      * lagging config will trigger the rebuild instead.
      */
-    private void tryRebuildRouting() {
-        PartitionSpreadConfiguration ps = partitionSpreadConfig.get();
-        ErasureSetConfiguration es = erasureSetConfig.get();
+    private void tryRebuildRouting(PartitionSpreadConfiguration ps, ErasureSetConfiguration es) {
         if (ps != null && es != null) {
             routing.set(new ErasureRouting(ps, es));
             logger.info("ErasureRouting rebuilt");
