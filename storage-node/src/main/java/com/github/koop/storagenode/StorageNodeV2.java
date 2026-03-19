@@ -33,7 +33,11 @@ public class StorageNodeV2 {
     }
 
     private Path getObjectPath(String id) {
-        return storageDir.resolve(String.format("blobs/%s", id));
+        // Use the first two characters of the ID to create a sharded subdirectory
+        // structure.
+        // Fallback to "00" if the ID is unexpectedly short.
+        String prefixDir = (id != null && id.length() >= 2) ? id.substring(0, 2) : "00";
+        return storageDir.resolve(String.format("blobs/%s/%s", prefixDir, id));
     }
 
     static sealed interface GetObjectResponse permits VersionedObject, MultipartData {
@@ -42,7 +46,7 @@ public class StorageNodeV2 {
     static record MultipartData(MultipartFileVersion version) implements GetObjectResponse {
     }
 
-    static record VersionedObject(InputStream data, FileVersion version) implements AutoCloseable, GetObjectResponse {
+    static record VersionedObject(FileChannel data, FileVersion version) implements AutoCloseable, GetObjectResponse {
         @Override
         public void close() throws Exception {
             data.close();
@@ -86,7 +90,7 @@ public class StorageNodeV2 {
             Path path = getObjectPath(r.location());
             if (!Files.exists(path))
                 return Optional.empty();
-            return Optional.of(new VersionedObject(Files.newInputStream(path, StandardOpenOption.READ), latest));
+            return Optional.of(new VersionedObject(FileChannel.open(path, StandardOpenOption.READ), latest));
         } else if (latest instanceof MultipartFileVersion m) {
             if (m.chunks().isEmpty())
                 return Optional.empty();
@@ -119,11 +123,15 @@ public class StorageNodeV2 {
 
     private void write(Path path, ReadableByteChannel data, long length) throws IOException {
         try (FileChannel fc = FileChannel.open(path,
+
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE)) {
 
             long written = 0;
+            // Pre-allocate a 64KB direct buffer outside the loop for fallback reads
+            java.nio.ByteBuffer fallbackBuffer = java.nio.ByteBuffer.allocateDirect(64 * 1024);
+
             while (written < length) {
                 long n = fc.transferFrom(data, written, length - written);
                 if (n > 0) {
@@ -131,15 +139,20 @@ public class StorageNodeV2 {
                 } else if (!data.isOpen()) {
                     throw new IOException("Data channel closed before expected length was written");
                 } else {
-                    java.nio.ByteBuffer checkBuf = java.nio.ByteBuffer.allocate(1);
-                    int readBytes = data.read(checkBuf);
+                    fallbackBuffer.clear();
+
+                    // Cap the buffer limit to avoid reading past the expected length
+                    int remaining = (int) Math.min((long) fallbackBuffer.capacity(), length - written);
+                    fallbackBuffer.limit(remaining);
+
+                    int readBytes = data.read(fallbackBuffer);
                     if (readBytes == -1) {
                         throw new EOFException("Unexpected EOF. Expected " + length + " bytes, got " + written);
                     } else if (readBytes > 0) {
-                        checkBuf.flip();
-                        while (checkBuf.hasRemaining())
-                            fc.write(checkBuf, written);
-                        written += readBytes;
+                        fallbackBuffer.flip();
+                        while (fallbackBuffer.hasRemaining()) {
+                            written += fc.write(fallbackBuffer, written);
+                        }
                     } else {
                         try {
                             Thread.sleep(1);
