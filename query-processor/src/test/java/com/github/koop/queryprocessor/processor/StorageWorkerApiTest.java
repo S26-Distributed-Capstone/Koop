@@ -4,9 +4,9 @@ import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
-import com.github.koop.common.metadata.ReplicaSetConfiguration;
-import com.github.koop.common.metadata.ReplicaSetConfiguration.Machine;
-import com.github.koop.common.metadata.ReplicaSetConfiguration.ReplicaSet;
+import com.github.koop.common.metadata.ErasureSetConfiguration;
+import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
+import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
 
 import org.junit.jupiter.api.*;
 
@@ -49,7 +49,7 @@ public class StorageWorkerApiTest {
         MetadataClient metadataClient = new MetadataClient(memoryFetcher);
         liveWorker = new StorageWorker(metadataClient);
         // Push both configs — order doesn't matter, both listeners are already registered.
-        memoryFetcher.update(buildReplicaSetConfiguration(set, set, set));
+        memoryFetcher.update(buildErasureSetConfiguration(set, set, set));
         memoryFetcher.update(buildPartitionSpreadConfiguration());
     }
 
@@ -130,7 +130,7 @@ public class StorageWorkerApiTest {
             List<InetSocketAddress> newSet = newNodes.stream().map(FakeStorageNodeServer::address).toList();
 
             // Push updated replica set and partition spread — listeners fire synchronously.
-            memoryFetcher.update(buildReplicaSetConfiguration(newSet, newSet, newSet));
+            memoryFetcher.update(buildErasureSetConfiguration(newSet, newSet, newSet));
             memoryFetcher.update(buildPartitionSpreadConfiguration());
 
             byte[] data = new byte[DATA_SIZE];
@@ -165,7 +165,7 @@ public class StorageWorkerApiTest {
             MemoryFetcher fetcher = new MemoryFetcher();
             MetadataClient client = new MetadataClient(fetcher);
             StorageWorker prodWorker = new StorageWorker(client);
-            fetcher.update(buildReplicaSetConfiguration(set, set, set));
+            fetcher.update(buildErasureSetConfiguration(set, set, set));
             fetcher.update(buildPartitionSpreadConfiguration());
 
             byte[] data = new byte[DATA_SIZE];
@@ -199,15 +199,15 @@ public class StorageWorkerApiTest {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private static ReplicaSetConfiguration buildReplicaSetConfiguration(
+    private static ErasureSetConfiguration buildErasureSetConfiguration(
             List<InetSocketAddress> set1,
             List<InetSocketAddress> set2,
             List<InetSocketAddress> set3) {
-        ReplicaSetConfiguration config = new ReplicaSetConfiguration();
-        config.setReplicaSets(List.of(
-                toReplicaSet(1, set1),
-                toReplicaSet(2, set2),
-                toReplicaSet(3, set3)));
+        ErasureSetConfiguration config = new ErasureSetConfiguration();
+        config.setErasureSets(List.of(
+                toErasureSet(1, set1),
+                toErasureSet(2, set2),
+                toErasureSet(3, set3)));
         return config;
     }
 
@@ -218,10 +218,10 @@ public class StorageWorkerApiTest {
     private static PartitionSpreadConfiguration buildPartitionSpreadConfiguration() {
         PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
         List<PartitionSpread> spreads = new ArrayList<>();
-        String[] setNames = {"set1", "set2", "set3"};
+
         for (int s = 0; s < 3; s++) {
             PartitionSpread spread = new PartitionSpread();
-            spread.setErasureSet(setNames[s]);
+            spread.setErasureSet(s + 1);
             List<Integer> partitions = new ArrayList<>();
             for (int p = s * 33; p < (s + 1) * 33; p++) partitions.add(p);
             spread.setPartitions(partitions);
@@ -231,15 +231,15 @@ public class StorageWorkerApiTest {
         return ps;
     }
 
-    private static ReplicaSet toReplicaSet(int number, List<InetSocketAddress> addresses) {
-        ReplicaSet rs = new ReplicaSet();
-        rs.setNumber(number);
-        rs.setMachines(addresses.stream().map(addr -> {
+    private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
+        ErasureSet es = new ErasureSet();
+        es.setNumber(number);
+        es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();
             m.setIp(addr.getHostString());
             m.setPort(addr.getPort());
             return m;
         }).toList());
-        return rs;
+        return es;
     }
 }

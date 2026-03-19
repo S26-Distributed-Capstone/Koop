@@ -1,13 +1,13 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
+import com.github.koop.common.metadata.ErasureSetConfiguration;
+import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
+import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
 import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
-import com.github.koop.common.metadata.ReplicaSetConfiguration;
-import com.github.koop.common.metadata.ReplicaSetConfiguration.Machine;
-import com.github.koop.common.metadata.ReplicaSetConfiguration.ReplicaSet;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -44,7 +44,7 @@ public final class StorageWorker {
     private final ExecutorService executor;
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
-    private final AtomicReference<ReplicaSetConfiguration> replicaSetConfig = new AtomicReference<>();
+    private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
     private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
@@ -55,7 +55,7 @@ public final class StorageWorker {
     }
 
     // FOR TESTING ONLY - builds a MetadataClient backed by a MemoryFetcher and
-    // pre-populates it with a ReplicaSetConfiguration derived from the three
+    // pre-populates it with an ErasureSetConfiguration derived from the three
     // address lists (set numbers 1, 2, 3) and a matching PartitionSpreadConfiguration
     // with 99 partitions spread evenly across the three sets (33 each).
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
@@ -69,12 +69,12 @@ public final class StorageWorker {
         this.metadataClient.start();
         // update() must come after start() so the listeners registered above are
         // already in place when MemoryFetcher fires them synchronously.
-        ReplicaSetConfiguration rsConfig = new ReplicaSetConfiguration();
-        rsConfig.setReplicaSets(List.of(
-                toReplicaSet(1, set1),
-                toReplicaSet(2, set2),
-                toReplicaSet(3, set3)));
-        fetcher.update(rsConfig);
+        ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
+        esConfig.setErasureSets(List.of(
+                toErasureSet(1, set1),
+                toErasureSet(2, set2),
+                toErasureSet(3, set3)));
+        fetcher.update(esConfig);
         fetcher.update(buildTestPartitionSpread());
     }
 
@@ -103,6 +103,10 @@ public final class StorageWorker {
         ErasureRouting r = getRouting();
         int partition = r.getPartition(storageKey);
         List<InetSocketAddress> nodes = r.getNodes(partition);
+        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+            logger.error("Routing failed for key {}, aborting put", storageKey);
+            return false;
+        }
 
         // Shard the incoming stream — each InputStream carries shard data.
         // IMPORTANT: all shard streams must be drained concurrently because
@@ -167,6 +171,10 @@ public final class StorageWorker {
         ErasureRouting r = getRouting();
         int partition = r.getPartition(storageKey);
         List<InetSocketAddress> nodes = r.getNodes(partition);
+        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+            logger.error("Routing failed for key {}, aborting get", storageKey);
+            return InputStream.nullInputStream();
+        }
 
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
@@ -191,6 +199,10 @@ public final class StorageWorker {
         ErasureRouting r = getRouting();
         int partition = r.getPartition(storageKey);
         List<InetSocketAddress> nodes = r.getNodes(partition);
+        if (partition == ErasureRouting.INVALID_PARTITION || nodes == ErasureRouting.INVALID_NODES) {
+            logger.error("Routing failed for key {}, aborting delete", storageKey);
+            return false;
+        }
 
         List<Callable<Boolean>> tasks = new LinkedList<>();
         for (int i = 0; i < TOTAL; i++) {
@@ -247,10 +259,10 @@ public final class StorageWorker {
     // -------------------------------------------------------------------------
 
     private void registerListeners() {
-        this.metadataClient.listen(ReplicaSetConfiguration.class, (prev, current) -> {
-            replicaSetConfig.set(current);
-            logger.info("ReplicaSetConfiguration updated: {} replica sets",
-                    current.getReplicaSets() == null ? 0 : current.getReplicaSets().size());
+        this.metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
+            erasureSetConfig.set(current);
+            logger.info("ErasureSetConfiguration updated: {} erasure sets",
+                    current.getErasureSets() == null ? 0 : current.getErasureSets().size());
             tryRebuildRouting();
         });
         this.metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
@@ -269,9 +281,9 @@ public final class StorageWorker {
      */
     private void tryRebuildRouting() {
         PartitionSpreadConfiguration ps = partitionSpreadConfig.get();
-        ReplicaSetConfiguration rs = replicaSetConfig.get();
-        if (ps != null && rs != null) {
-            routing.set(new ErasureRouting(ps, rs));
+        ErasureSetConfiguration es = erasureSetConfig.get();
+        if (ps != null && es != null) {
+            routing.set(new ErasureRouting(ps, es));
             logger.info("ErasureRouting rebuilt");
         }
     }
@@ -284,7 +296,7 @@ public final class StorageWorker {
         ErasureRouting r = routing.get();
         if (r == null)
             throw new IllegalStateException(
-                    "ErasureRouting is not ready — waiting for PartitionSpreadConfiguration and ReplicaSetConfiguration");
+                    "ErasureRouting is not ready — waiting for PartitionSpreadConfiguration and ErasureSetConfiguration");
         return r;
     }
 
@@ -329,15 +341,14 @@ public final class StorageWorker {
 
     /**
      * FOR TESTING ONLY - builds a PartitionSpreadConfiguration with 99 partitions
-     * spread evenly: partitions 0-32 → set1, 33-65 → set2, 66-98 → set3.
+     * spread evenly: partitions 0-32 → erasure set 1, 33-65 → erasure set 2, 66-98 → erasure set 3.
      */
     private static PartitionSpreadConfiguration buildTestPartitionSpread() {
         PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
         List<PartitionSpread> spreads = new ArrayList<>();
-        String[] setNames = {"set1", "set2", "set3"};
         for (int s = 0; s < 3; s++) {
             PartitionSpread spread = new PartitionSpread();
-            spread.setErasureSet(setNames[s]);
+            spread.setErasureSet(s + 1); // set numbers 1, 2, 3
             List<Integer> partitions = new ArrayList<>();
             for (int p = s * 33; p < (s + 1) * 33; p++) partitions.add(p);
             spread.setPartitions(partitions);
@@ -347,15 +358,15 @@ public final class StorageWorker {
         return ps;
     }
 
-    private static ReplicaSet toReplicaSet(int number, List<InetSocketAddress> addresses) {
-        ReplicaSet rs = new ReplicaSet();
-        rs.setNumber(number);
-        rs.setMachines(addresses.stream().map(addr -> {
+    private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
+        ErasureSet es = new ErasureSet();
+        es.setNumber(number);
+        es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();
             m.setIp(addr.getHostString());
             m.setPort(addr.getPort());
             return m;
         }).toList());
-        return rs;
+        return es;
     }
 }
