@@ -62,11 +62,11 @@ public class StorageNodeV2 {
         write(path, data, length);
     }
 
-    private void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
+    protected void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
         db.putItem(key, partition, seqNumber, requestID);
     }
 
-    private void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
+    protected void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
         db.deleteItem(key, partition, seqNumber);
     }
 
@@ -96,16 +96,16 @@ public class StorageNodeV2 {
         return Optional.empty();
     }
 
-    private void multipartCommit(int partition, String key, String requestID, long seqNumber, List<String> chunks)
+    protected void multipartCommit(int partition, String key, String requestID, long seqNumber, List<String> chunks)
             throws Exception {
         db.putMultipartItem(key, partition, seqNumber, chunks);
     }
 
-    private void createBucket(int partition, String bucketKey, long seqNumber) throws Exception {
+    protected void createBucket(int partition, String bucketKey, long seqNumber) throws Exception {
         db.createBucket(bucketKey, partition, seqNumber);
     }
 
-    private void deleteBucket(int partition, String bucketKey, long seqNumber) throws Exception {
+    protected void deleteBucket(int partition, String bucketKey, long seqNumber) throws Exception {
         db.deleteBucket(bucketKey, partition, seqNumber);
     }
 
