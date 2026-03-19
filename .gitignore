@@ -3,3 +3,5 @@ target/
 .vscode/
 .idea/
 **/.settings/
+.roo/mcp.json
+plans/
