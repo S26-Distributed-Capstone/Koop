@@ -6,7 +6,8 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 /**
- * High-level database facade exposing exactly the operations the storage node needs.
+ * High-level database facade exposing exactly the operations the storage node
+ * needs.
  */
 public class Database implements AutoCloseable {
     private final StorageStrategy strategy;
@@ -63,6 +64,14 @@ public class Database implements AutoCloseable {
             return Optional.empty();
         }
         return Optional.of(versions.getLast());
+    }
+
+    public Optional<FileVersion> getFileVersion(String key, long seqNumber) throws Exception {
+        var versions = currentVersions(key);
+        if (versions.isEmpty()) {
+            return Optional.empty();
+        }
+        return versions.stream().filter(v -> v.sequenceNumber() == seqNumber).findFirst();
     }
 
     // -------------------------------------------------------------------------

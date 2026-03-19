@@ -8,7 +8,9 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -34,11 +36,18 @@ public class StorageNodeV2 {
         return storageDir.resolve(String.format("blobs/%s", id));
     }
 
-    static record ObjectAndMeta(InputStream data, Metadata meta) implements AutoCloseable {
+    static sealed interface GetObjectResponse permits VersionedObject, MultipartData {
+    }
+
+    static record MultipartData(MultipartFileVersion version) implements GetObjectResponse {
+    }
+
+    static record VersionedObject(InputStream data, FileVersion version) implements AutoCloseable, GetObjectResponse {
         @Override
         public void close() throws Exception {
             data.close();
         }
+
     }
 
     protected void store(
@@ -53,36 +62,59 @@ public class StorageNodeV2 {
         write(path, data, length);
     }
 
-    protected void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
+    private void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
         db.putItem(key, partition, seqNumber, requestID);
     }
 
-    protected void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
+    private void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
         db.deleteItem(key, partition, seqNumber);
     }
 
-    protected Optional<ObjectAndMeta> retrieve(String key) throws Exception {
-        var metaOpt = db.getItem(key);
-        if (metaOpt.isEmpty() || metaOpt.get().versions().isEmpty()) {
+    protected Optional<GetObjectResponse> retrieve(String key) throws Exception {
+        return retrieve(key, -1);
+    }
+
+    protected Optional<GetObjectResponse> retrieve(String key, long seqNumber) throws Exception {
+        var latestOpt = seqNumber == -1 ? db.getLatestFileVersion(key) : db.getFileVersion(key, seqNumber);
+        if (latestOpt.isEmpty()) {
             return Optional.empty();
         }
-        var meta = metaOpt.get();
-        FileVersion latest = meta.versions().get(meta.versions().size() - 1);
-
+        var latest = latestOpt.get();
         if (latest instanceof TombstoneFileVersion) {
             return Optional.empty();
         } else if (latest instanceof RegularFileVersion r) {
             Path path = getObjectPath(r.location());
-            if (!Files.exists(path)) return Optional.empty();
-            return Optional.of(new ObjectAndMeta(Files.newInputStream(path, StandardOpenOption.READ), meta));
+            if (!Files.exists(path))
+                return Optional.empty();
+            return Optional.of(new VersionedObject(Files.newInputStream(path, StandardOpenOption.READ), latest));
         } else if (latest instanceof MultipartFileVersion m) {
-            if (m.chunks().isEmpty()) return Optional.empty();
-            Path path = getObjectPath(m.chunks().get(0));
-            if (!Files.exists(path)) return Optional.empty();
-            return Optional.of(new ObjectAndMeta(Files.newInputStream(path, StandardOpenOption.READ), meta));
+            if (m.chunks().isEmpty())
+                return Optional.empty();
+            return Optional.of(new MultipartData(m));
         }
 
         return Optional.empty();
+    }
+
+    private void multipartCommit(int partition, String key, String requestID, long seqNumber, List<String> chunks)
+            throws Exception {
+        db.putMultipartItem(key, partition, seqNumber, chunks);
+    }
+
+    private void createBucket(int partition, String bucketKey, long seqNumber) throws Exception {
+        db.createBucket(bucketKey, partition, seqNumber);
+    }
+
+    private void deleteBucket(int partition, String bucketKey, long seqNumber) throws Exception {
+        db.deleteBucket(bucketKey, partition, seqNumber);
+    }
+
+    protected boolean bucketExists(String bucketKey) throws Exception {
+        return db.bucketExists(bucketKey);
+    }
+
+    protected Stream<Metadata> listItemsInBucket(String bucketPrefix) throws Exception {
+        return db.listItemsInBucket(bucketPrefix);
     }
 
     private void write(Path path, ReadableByteChannel data, long length) throws IOException {
@@ -105,11 +137,13 @@ public class StorageNodeV2 {
                         throw new EOFException("Unexpected EOF. Expected " + length + " bytes, got " + written);
                     } else if (readBytes > 0) {
                         checkBuf.flip();
-                        while (checkBuf.hasRemaining()) fc.write(checkBuf, written);
+                        while (checkBuf.hasRemaining())
+                            fc.write(checkBuf, written);
                         written += readBytes;
                     } else {
-                        try { Thread.sleep(1); }
-                        catch (InterruptedException e) {
+                        try {
+                            Thread.sleep(1);
+                        } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             throw new IOException("Transfer interrupted", e);
                         }
@@ -118,8 +152,11 @@ public class StorageNodeV2 {
             }
             fc.force(true);
         } catch (IOException e) {
-            try { Files.deleteIfExists(path); }
-            catch (IOException ex) { logger.error("Failed to delete file after write error: {}", path, ex); }
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException ex) {
+                logger.error("Failed to delete file after write error: {}", path, ex);
+            }
             throw e;
         }
     }
