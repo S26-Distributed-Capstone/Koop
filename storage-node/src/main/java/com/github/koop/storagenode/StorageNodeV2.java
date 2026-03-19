@@ -18,6 +18,7 @@ import com.github.koop.storagenode.db.FileVersion;
 import com.github.koop.storagenode.db.Metadata;
 import com.github.koop.storagenode.db.MultipartFileVersion;
 import com.github.koop.storagenode.db.RegularFileVersion;
+import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 public class StorageNodeV2 {
     private final Database db;
@@ -68,8 +69,9 @@ public class StorageNodeV2 {
         var meta = metaOpt.get();
         FileVersion latest = meta.versions().get(meta.versions().size() - 1);
 
-        if (latest instanceof RegularFileVersion r) {
-            if (r.location().equals(Database.TOMBSTONE_LOCATION)) return Optional.empty();
+        if (latest instanceof TombstoneFileVersion) {
+            return Optional.empty();
+        } else if (latest instanceof RegularFileVersion r) {
             Path path = getObjectPath(r.location());
             if (!Files.exists(path)) return Optional.empty();
             return Optional.of(new ObjectAndMeta(Files.newInputStream(path, StandardOpenOption.READ), meta));

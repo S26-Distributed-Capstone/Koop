@@ -6,11 +6,9 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 /**
- * High-level database facade exposing exactly the operations the storage node
- * needs.
+ * High-level database facade exposing exactly the operations the storage node needs.
  */
 public class Database implements AutoCloseable {
-    public static final String TOMBSTONE_LOCATION = "DELETED";
     private final StorageStrategy strategy;
 
     public Database(StorageStrategy strategy) {
@@ -45,7 +43,7 @@ public class Database implements AutoCloseable {
 
     public void deleteItem(String key, int partition, long seqNumber) throws Exception {
         List<FileVersion> versions = currentVersions(key);
-        versions.add(new RegularFileVersion(seqNumber, TOMBSTONE_LOCATION));
+        versions.add(new TombstoneFileVersion(seqNumber));
         strategy.atomicallyUpdateLogAndMetadata(
                 new OpLog(seqNumber, key, Operation.DELETE),
                 new Metadata(key, partition, versions));
@@ -118,7 +116,6 @@ public class Database implements AutoCloseable {
     // Private helpers
     // -------------------------------------------------------------------------
 
-    /** Returns a mutable copy of the existing versions list, or an empty list. */
     private List<FileVersion> currentVersions(String key) throws Exception {
         return strategy.getMetadata(key)
                 .map(m -> new ArrayList<>(m.versions()))

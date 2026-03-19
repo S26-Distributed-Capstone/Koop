@@ -44,10 +44,10 @@ class DatabaseTest {
         database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
         database.putItem("animals/cat.jpg", 1, 101L, "/uuid-101.blob");
 
-        var meta = database.getItem("animals/cat.jpg").orElseThrow();
-        assertEquals(2, meta.versions().size());
-        assertEquals(100L, meta.versions().get(0).sequenceNumber());
-        assertEquals(101L, meta.versions().get(1).sequenceNumber());
+        var versions = database.getItem("animals/cat.jpg").orElseThrow().versions();
+        assertEquals(2, versions.size());
+        assertEquals(100L, versions.get(0).sequenceNumber());
+        assertEquals(101L, versions.get(1).sequenceNumber());
     }
 
     // =========================================================================
@@ -89,20 +89,19 @@ class DatabaseTest {
 
         var versions = database.getItem("animals/cat.jpg").orElseThrow().versions();
         assertEquals(2, versions.size());
-        var latest = (RegularFileVersion) versions.get(1);
-        assertEquals(Database.TOMBSTONE_LOCATION, latest.location());
-        assertEquals(101L, latest.sequenceNumber());
+        assertInstanceOf(RegularFileVersion.class, versions.get(0));
+        assertInstanceOf(TombstoneFileVersion.class, versions.get(1));
+        assertEquals(101L, versions.get(1).sequenceNumber());
     }
 
     @Test
-    void testDeleteItemOnNonExistentKeyCreatesRow() throws Exception {
-        // Delete on a key that never existed — creates a tombstone row
+    void testDeleteItemOnNonExistentKeyCreatesTombstoneRow() throws Exception {
         database.deleteItem("ghost/file.txt", 1, 50L);
-        var meta = database.getItem("ghost/file.txt");
-        assertTrue(meta.isPresent());
-        assertEquals(1, meta.get().versions().size());
-        assertEquals(Database.TOMBSTONE_LOCATION,
-                ((RegularFileVersion) meta.get().versions().get(0)).location());
+
+        var versions = database.getItem("ghost/file.txt").orElseThrow().versions();
+        assertEquals(1, versions.size());
+        assertInstanceOf(TombstoneFileVersion.class, versions.get(0));
+        assertEquals(50L, versions.get(0).sequenceNumber());
     }
 
     // =========================================================================
@@ -161,8 +160,7 @@ class DatabaseTest {
         database.deleteItem("animals/cat.jpg", 1, 101L);
 
         var latest = database.getLatestFileVersion("animals/cat.jpg").orElseThrow();
-        assertInstanceOf(RegularFileVersion.class, latest);
-        assertEquals(Database.TOMBSTONE_LOCATION, ((RegularFileVersion) latest).location());
+        assertInstanceOf(TombstoneFileVersion.class, latest);
         assertEquals(101L, latest.sequenceNumber());
     }
 
@@ -177,14 +175,6 @@ class DatabaseTest {
         assertTrue(database.bucketExists("animals"));
     }
 
-    @Test
-    void testCreateBucketStoresCorrectFields() throws Exception {
-        database.createBucket("animals", 1, 5L);
-        // Verify via the strategy directly (not exposed in Database)
-        // True verification is bucketExists returning true
-        assertTrue(database.bucketExists("animals"));
-    }
-
     // =========================================================================
     // DELETE BUCKET
     // =========================================================================
@@ -193,14 +183,12 @@ class DatabaseTest {
     void testDeleteBucketTombstones() throws Exception {
         database.createBucket("animals", 1, 5L);
         assertTrue(database.bucketExists("animals"));
-
         database.deleteBucket("animals", 1, 10L);
         assertFalse(database.bucketExists("animals"));
     }
 
     @Test
     void testDeleteBucketOnNonExistentKeyIsHandled() throws Exception {
-        // Writing a tombstone for a key that never existed is allowed
         assertDoesNotThrow(() -> database.deleteBucket("ghost-bucket", 1, 1L));
         assertFalse(database.bucketExists("ghost-bucket"));
     }
@@ -266,16 +254,29 @@ class DatabaseTest {
     }
 
     @Test
-    void testMetadataSerializationRoundTripMixed() {
+    void testMetadataSerializationRoundTripTombstone() {
+        Metadata original = new Metadata("animals/cat.jpg", 1,
+                List.of(new RegularFileVersion(100L, "/uuid1.blob"),
+                        new TombstoneFileVersion(101L)));
+        Metadata rt = Metadata.from(original.serialize());
+        assertEquals(2, rt.versions().size());
+        assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
+        assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(1));
+        assertEquals(101L, rt.versions().get(1).sequenceNumber());
+    }
+
+    @Test
+    void testMetadataSerializationRoundTripAllThreeTypes() {
         Metadata original = new Metadata("mixed/key", 2, List.of(
                 new RegularFileVersion(10L, "/blob-10"),
                 new MultipartFileVersion(20L, List.of("chunk-a", "chunk-b")),
-                new RegularFileVersion(30L, "/blob-30")));
+                new TombstoneFileVersion(30L)));
         Metadata rt = Metadata.from(original.serialize());
         assertEquals(3, rt.versions().size());
         assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
         assertInstanceOf(MultipartFileVersion.class, rt.versions().get(1));
-        assertInstanceOf(RegularFileVersion.class, rt.versions().get(2));
+        assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(2));
+        assertEquals(30L, rt.versions().get(2).sequenceNumber());
     }
 
     // =========================================================================

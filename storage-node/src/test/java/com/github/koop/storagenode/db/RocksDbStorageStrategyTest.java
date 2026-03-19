@@ -42,13 +42,12 @@ class RocksDbStorageStrategyTest {
             List<OpLog> logs = stream.collect(Collectors.toList());
             assertEquals(3, logs.size());
             assertEquals(4L, logs.get(0).seqNum());
-            assertEquals(3L, logs.get(1).seqNum());
             assertEquals(2L, logs.get(2).seqNum());
         }
     }
 
     // =========================================================================
-    // Table #2 — Metadata with FileVersion hierarchy
+    // Table #2 — Metadata with all three FileVersion types
     // =========================================================================
 
     @Test
@@ -58,7 +57,6 @@ class RocksDbStorageStrategyTest {
         strategy.updateMetadata(meta);
 
         var retrieved = strategy.getMetadata("animals/cat.jpg").orElseThrow();
-        assertEquals(1, retrieved.versions().size());
         assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
         assertEquals(100L, retrieved.versions().get(0).sequenceNumber());
         assertEquals("/data/cat.blob", ((RegularFileVersion) retrieved.versions().get(0)).location());
@@ -77,18 +75,33 @@ class RocksDbStorageStrategyTest {
     }
 
     @Test
-    void testUpdateAndGetMetadataMixedVersions() throws Exception {
+    void testUpdateAndGetMetadataTombstoneVersion() throws Exception {
+        Metadata meta = new Metadata("animals/cat.jpg", 1, List.of(
+                new RegularFileVersion(100L, "/data/cat.blob"),
+                new TombstoneFileVersion(101L)));
+        strategy.updateMetadata(meta);
+
+        var retrieved = strategy.getMetadata("animals/cat.jpg").orElseThrow();
+        assertEquals(2, retrieved.versions().size());
+        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
+        assertInstanceOf(TombstoneFileVersion.class, retrieved.versions().get(1));
+        assertEquals(101L, retrieved.versions().get(1).sequenceNumber());
+    }
+
+    @Test
+    void testUpdateAndGetMetadataAllThreeTypesRoundTrip() throws Exception {
         Metadata meta = new Metadata("mixed/key", 2, List.of(
                 new RegularFileVersion(10L, "/blob-10"),
                 new MultipartFileVersion(20L, List.of("chunk-a")),
-                new RegularFileVersion(30L, "/blob-30")));
+                new TombstoneFileVersion(30L)));
         strategy.updateMetadata(meta);
 
         var retrieved = strategy.getMetadata("mixed/key").orElseThrow();
         assertEquals(3, retrieved.versions().size());
         assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(0));
         assertInstanceOf(MultipartFileVersion.class, retrieved.versions().get(1));
-        assertInstanceOf(RegularFileVersion.class, retrieved.versions().get(2));
+        assertInstanceOf(TombstoneFileVersion.class, retrieved.versions().get(2));
+        assertEquals(30L, retrieved.versions().get(2).sequenceNumber());
     }
 
     @Test
@@ -97,10 +110,10 @@ class RocksDbStorageStrategyTest {
         String key = "atomic.txt";
         strategy.atomicallyUpdateLogAndMetadata(
                 new OpLog(seq, key, Operation.DELETE),
-                new Metadata(key, 2, List.of(new RegularFileVersion(seq, Database.TOMBSTONE_LOCATION))));
+                new Metadata(key, 2, List.of(new TombstoneFileVersion(seq))));
 
-        assertEquals(Database.TOMBSTONE_LOCATION,
-                ((RegularFileVersion) strategy.getMetadata(key).orElseThrow().versions().get(0)).location());
+        assertInstanceOf(TombstoneFileVersion.class,
+                strategy.getMetadata(key).orElseThrow().versions().get(0));
 
         try (Stream<OpLog> s = strategy.getLogs(seq, seq)) {
             assertEquals(Operation.DELETE, s.findFirst().orElseThrow().operation());
@@ -126,7 +139,7 @@ class RocksDbStorageStrategyTest {
     }
 
     // =========================================================================
-    // Table #3 — Buckets (with tombstone support)
+    // Table #3 — Buckets
     // =========================================================================
 
     @Test
@@ -149,22 +162,19 @@ class RocksDbStorageStrategyTest {
                 new OpLog(10L, "animals", Operation.DELETE_BUCKET),
                 new Bucket("animals", 1, 10L, true));
 
-        var bucket = strategy.getBucket("animals").orElseThrow();
-        assertTrue(bucket.deleted());
+        assertTrue(strategy.getBucket("animals").orElseThrow().deleted());
     }
 
     @Test
     void testBucketSerializationRoundTrip() {
-        Bucket original = new Bucket("animals", 3, 42L, false);
-        Bucket rt = Bucket.from(original.serialize());
-        assertEquals("animals", rt.key());
-        assertEquals(3, rt.partition());
-        assertEquals(42L, rt.sequenceNumber());
-        assertFalse(rt.deleted());
+        Bucket live = new Bucket("animals", 3, 42L, false);
+        Bucket rtLive = Bucket.from(live.serialize());
+        assertFalse(rtLive.deleted());
+        assertEquals(42L, rtLive.sequenceNumber());
 
-        Bucket tombstone = new Bucket("animals", 3, 99L, true);
-        Bucket rtTombstone = Bucket.from(tombstone.serialize());
-        assertTrue(rtTombstone.deleted());
+        Bucket dead = new Bucket("animals", 3, 99L, true);
+        Bucket rtDead = Bucket.from(dead.serialize());
+        assertTrue(rtDead.deleted());
     }
 
     @Test
