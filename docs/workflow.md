@@ -29,13 +29,14 @@ This document displays workflow diagrams for each supported use case in the Koop
 
 ## System Component Overview
 
-The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Redis acts as the global sequencer for write/delete ordering. Each storage node persists shard data to disk and records metadata + operation logs atomically in RocksDB via the [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) layer.
+The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Kafka acts as the global sequencer for write/delete ordering, delivering an ordered operation log to every storage node. Redis is used separately by the Query Processor for multipart upload session tracking. Each storage node persists shard data to disk and records metadata + operation logs atomically in RocksDB via the [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) layer.
 
 ```mermaid
 graph TD
     Client["S3 Client"]
     QP["Query Processor\n(Javalin Gateway + StorageWorker)"]
-    Redis["Redis\n(Write Sequencer)"]
+    Kafka["Kafka\n(Write/Delete Sequencer)"]
+    Redis["Redis\n(Multipart Upload Cache)"]
     Etcd["etcd\n(Partition & Erasure Set Config)"]
     SN1["Storage Node 1"]
     SN2["Storage Node 2"]
@@ -45,7 +46,8 @@ graph TD
 
     Client -->|"S3 HTTP"| QP
     QP -->|"reads config"| Etcd
-    QP -->|"sequence number"| Redis
+    QP -->|"publish operation"| Kafka
+    QP -->|"multipart session state"| Redis
     QP -->|"erasure-coded shards"| SN1
     QP -->|"erasure-coded shards"| SN2
     QP -->|"erasure-coded shards"| SN3
@@ -55,9 +57,9 @@ graph TD
     SN2 --> Disk
     SN3 --> RocksDB
     SN3 --> Disk
-    Redis -->|"pub/sub update"| SN1
-    Redis -->|"pub/sub update"| SN2
-    Redis -->|"pub/sub update"| SN3
+    Kafka -->|"consume ordered ops"| SN1
+    Kafka -->|"consume ordered ops"| SN2
+    Kafka -->|"consume ordered ops"| SN3
 ```
 
 ---
@@ -66,7 +68,7 @@ graph TD
 
 **Route:** `PUT /{bucket}/{key}`
 
-The QP erasure-encodes the object into 9 shards and streams them concurrently to all storage nodes. Redis then publishes the sequence number so every node atomically commits the operation log and metadata in RocksDB. A write quorum of ≥ 6 out of 9 nodes must acknowledge before the client receives a response.
+The QP erasure-encodes the object into 9 shards and streams them concurrently to all storage nodes. The QP then publishes the PUT operation to Kafka, which assigns a sequence number and delivers it to every storage node in order. Each node atomically commits the operation log and metadata in RocksDB. A write quorum of ≥ 6 out of 9 nodes must acknowledge before the client receives a response.
 
 See [`StorageWorker.put()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java:65) and [`StorageNode.store()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java:122).
 
@@ -74,7 +76,7 @@ See [`StorageWorker.put()`](../query-processor/src/main/java/com/github/koop/que
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant Redis as Redis (Sequencer)
+    participant Kafka as Kafka (Sequencer)
     participant SN as Storage Nodes (×9)
     participant RDB as RocksDB (each SN)
     participant Disk as Disk (each SN)
@@ -87,8 +89,8 @@ sequenceDiagram
     SN-->>QP: ACK (shard written to disk)
     Note over QP: Wait for ≥6 ACKs (write quorum)
 
-    QP->>Redis: PUBLISH sequence number for key
-    Redis->>SN: Notify all nodes (pub/sub)
+    QP->>Kafka: Publish PUT operation for key
+    Kafka->>SN: Deliver ordered operation to all nodes (consumer group)
 
     alt Node has shard data
         SN->>RDB: Atomic write → OpLog + Metadata
@@ -113,10 +115,10 @@ flowchart TD
     D -- No --> E[Retry remaining nodes]
     E --> F{Retry succeeded?}
     F -- No --> Z2[500 Internal Error to client]
-    F -- Yes --> G[Publish to Redis]
+    F -- Yes --> G[Publish to Kafka]
     D -- Yes --> G
-    G --> H{Redis ACK received?}
-    H -- No --> I[Resend to Redis]
+    G --> H{Kafka publish ACK received?}
+    H -- No --> I[Retry publish to Kafka]
     I --> G
     H -- Yes --> J{≥6 metadata ACKs?}
     J -- No --> Z2
@@ -159,7 +161,7 @@ sequenceDiagram
 
 ### Conflicting Versions
 
-When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum (6/9) of nodes agree on. If the newer version is only present on a minority of nodes, the QP waits for stabilization before returning.
+When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum (6/9) of nodes agree on. If no version reaches quorum, the operation fails immediately — the system does **not** wait for stabilization.
 
 ```mermaid
 flowchart TD
@@ -167,10 +169,7 @@ flowchart TD
     B -- Yes --> C[Erasure-decode + return to client]
     B -- No --> D{Does a read quorum ≥6 share the same version?}
     D -- Yes --> E[Use quorum version → decode + return]
-    D -- No --> F[Mid-commit detected: wait for stabilization]
-    F --> G{Stabilized within timeout?}
-    G -- Yes --> E
-    G -- No --> H[500 Internal Error]
+    D -- No --> F[500 Internal Error\nNo quorum version available]
 ```
 
 ---
@@ -179,7 +178,7 @@ flowchart TD
 
 **Route:** `DELETE /{bucket}/{key}`
 
-DELETE is sequenced through Redis before storage nodes apply a tombstone to their metadata and operation log. No shard data is immediately removed from disk; physical deletion is handled asynchronously.
+DELETE is sequenced through Kafka before storage nodes apply a tombstone to their metadata and operation log. No shard data is immediately removed from disk; physical deletion is handled asynchronously.
 
 See [`StorageWorker.delete()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java:175) and [`StorageNode.delete()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java:187).
 
@@ -187,13 +186,13 @@ See [`StorageWorker.delete()`](../query-processor/src/main/java/com/github/koop/
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant Redis as Redis (Sequencer)
+    participant Kafka as Kafka (Sequencer)
     participant SN as Storage Nodes (×9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: DELETE /{bucket}/{key}
-    QP->>Redis: PUBLISH delete command for key
-    Redis->>SN: Notify all nodes (pub/sub)
+    QP->>Kafka: Publish DELETE operation for key
+    Kafka->>SN: Deliver ordered operation to all nodes
     SN->>RDB: Atomic write → Tombstone in Metadata + OpLog entry
     SN-->>QP: ACK
     Note over QP: Wait for ≥6 ACKs
@@ -208,13 +207,13 @@ sequenceDiagram
 
 **Route:** `PUT /{bucket}`
 
-Bucket creation is sequenced through Redis. Storage nodes store the bucket record in their RocksDB bucket table. A write quorum must acknowledge before the client is notified.
+Bucket creation is sequenced through Kafka. Storage nodes store the bucket record in their RocksDB bucket table. A write quorum must acknowledge before the client is notified.
 
 ```mermaid
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant Redis as Redis (Sequencer)
+    participant Kafka as Kafka (Sequencer)
     participant SN as Storage Nodes (×9)
     participant RDB as RocksDB (each SN)
 
@@ -223,8 +222,8 @@ sequenceDiagram
     alt Bucket already exists
         QP-->>C: 409 Conflict (S3 BucketAlreadyExists)
     else Bucket does not exist
-        QP->>Redis: PUBLISH create_bucket command
-        Redis->>SN: Notify all nodes
+        QP->>Kafka: Publish CREATE_BUCKET operation
+        Kafka->>SN: Deliver ordered operation to all nodes
         SN->>RDB: Atomic write → Bucket table + OpLog entry
         SN-->>QP: ACK
         Note over QP: Wait for write quorum ACKs
