@@ -6,7 +6,7 @@ import java.util.stream.Collectors;
 
 public enum MetadataObjects {
     PARTITION_SPREAD(PartitionSpreadConfiguration.class),
-    REPLICA_SETS(ReplicaSetConfiguration.class);
+    ERASURE_SETS(ErasureSetConfiguration.class);
 
     private final Class<?> objectClass;
     private final String metadataKey;
@@ -19,7 +19,7 @@ public enum MetadataObjects {
         for (int i = 0; i < simpleName.length(); i++) {
             char c = simpleName.charAt(i);
             if (Character.isUpperCase(c) && i > 0) {
-            sb.append('_');
+                sb.append('_');
             }
             sb.append(Character.toLowerCase(c));
         }
