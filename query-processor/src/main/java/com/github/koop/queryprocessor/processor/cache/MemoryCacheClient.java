@@ -1,4 +1,4 @@
-package com.github.koop.queryprocessor.gateway.cache;
+package com.github.koop.queryprocessor.processor.cache;
 
 import java.util.Collections;
 import java.util.Set;
