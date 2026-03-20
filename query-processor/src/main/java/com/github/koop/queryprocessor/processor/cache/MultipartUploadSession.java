@@ -1,23 +1,6 @@
 package com.github.koop.queryprocessor.processor.cache;
 
 /**
- * Lifecycle status of a multipart upload session.
- *
- * <ul>
- *   <li>{@code ACTIVE}     — upload is in progress; parts may be uploaded.</li>
- *   <li>{@code COMPLETING} — {@code CompleteMultipartUpload} is in flight;
- *       no further parts should be accepted.</li>
- *   <li>{@code ABORTING}   — {@code AbortMultipartUpload} has been acknowledged
- *       to the client; cleanup of part shards is in progress.</li>
- * </ul>
- */
-enum UploadStatus {
-    ACTIVE,
-    COMPLETING,
-    ABORTING
-}
-
-/**
  * Immutable value type that captures the state of a single multipart upload.
  *
  * <p>Instances are serialized to/from the {@link CacheClient} using the
@@ -46,8 +29,25 @@ public record MultipartUploadSession(
         String uploadId,
         String bucket,
         String key,
-        UploadStatus status
+        MultipartUploadSession.UploadStatus status
 ) {
+
+    /**
+     * Lifecycle status of a multipart upload session.
+     *
+     * <ul>
+     *   <li>{@code ACTIVE}     — upload is in progress; parts may be uploaded.</li>
+     *   <li>{@code COMPLETING} — {@code CompleteMultipartUpload} is in flight;
+     *       no further parts should be accepted.</li>
+     *   <li>{@code ABORTING}   — {@code AbortMultipartUpload} has been acknowledged
+     *       to the client; cleanup of part shards is in progress.</li>
+     * </ul>
+     */
+    public enum UploadStatus {
+        ACTIVE,
+        COMPLETING,
+        ABORTING
+    }
 
     // ─── Serialization ────────────────────────────────────────────────────────
 
