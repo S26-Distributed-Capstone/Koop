@@ -95,6 +95,11 @@ public record MultipartUploadSession(
         return "mpu:parts:" + uploadId;
     }
 
+    /** Cache key for a specific part size entry. */
+    public static String partSizeKey(String uploadId, int partNumber) {
+        return "mpu:partsize:" + uploadId + ":" + partNumber;
+    }
+
     // ─── Storage Key Helper ───────────────────────────────────────────────────
 
     /**

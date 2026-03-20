@@ -59,7 +59,7 @@ public class MultipartUploadManager {
         }
 
         cache.setAdd(partsKey, partMember);
-        cache.put(partSizeKey(uploadId, partNumber), String.valueOf(length));
+        cache.put(MultipartUploadSession.partSizeKey(uploadId, partNumber), String.valueOf(length));
         return "";
     }
 
@@ -87,7 +87,7 @@ public class MultipartUploadManager {
         long totalLength = 0L;
         List<InputStream> partStreams = new ArrayList<>();
         for (int partNumber : sortedPartNumbers) {
-            String sizeValue = cache.get(partSizeKey(uploadId, partNumber));
+            String sizeValue = cache.get(MultipartUploadSession.partSizeKey(uploadId, partNumber));
             if (sizeValue == null) {
                 throw new IllegalStateException("Missing size for part " + partNumber);
             }
@@ -116,7 +116,7 @@ public class MultipartUploadManager {
         for (int partNumber : sortedPartNumbers) {
             String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
             storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
-            cache.delete(partSizeKey(uploadId, partNumber));
+            cache.delete(MultipartUploadSession.partSizeKey(uploadId, partNumber));
         }
 
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
@@ -141,7 +141,7 @@ public class MultipartUploadManager {
             int partNumber = Integer.parseInt(partMember);
             String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
             storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
-            cache.delete(partSizeKey(uploadId, partNumber));
+            cache.delete(MultipartUploadSession.partSizeKey(uploadId, partNumber));
         }
 
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
@@ -169,7 +169,4 @@ public class MultipartUploadManager {
         return ordered;
     }
 
-    private static String partSizeKey(String uploadId, int partNumber) {
-        return "mpu:partsize:" + uploadId + ":" + partNumber;
-    }
 }
