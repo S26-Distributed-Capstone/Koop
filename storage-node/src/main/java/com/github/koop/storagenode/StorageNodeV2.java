@@ -121,56 +121,52 @@ public class StorageNodeV2 {
         return db.listItemsInBucket(bucketPrefix);
     }
 
-    private void write(Path path, ReadableByteChannel data, long length) throws IOException {
-        try (FileChannel fc = FileChannel.open(path,
+private void write(Path path, ReadableByteChannel data, long length) throws IOException {
+    try (FileChannel fc = FileChannel.open(path,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE)) {
 
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE)) {
+        long written = 0;
+        // Pre-allocate a 64KB direct buffer outside the loop for fallback reads
+        java.nio.ByteBuffer fallbackBuffer = java.nio.ByteBuffer.allocateDirect(64 * 1024);
 
-            long written = 0;
-            // Pre-allocate a 64KB direct buffer outside the loop for fallback reads
-            java.nio.ByteBuffer fallbackBuffer = java.nio.ByteBuffer.allocateDirect(64 * 1024);
+        while (written < length) {
+            long n = fc.transferFrom(data, written, length - written);
+            if (n > 0) {
+                written += n;
+            } else if (!data.isOpen()) {
+                throw new IOException("Data channel closed before expected length was written");
+            } else {
+                fallbackBuffer.clear();
 
-            while (written < length) {
-                long n = fc.transferFrom(data, written, length - written);
-                if (n > 0) {
-                    written += n;
-                } else if (!data.isOpen()) {
-                    throw new IOException("Data channel closed before expected length was written");
-                } else {
-                    fallbackBuffer.clear();
+                // Cap the buffer limit to avoid reading past the expected length
+                int remaining = (int) Math.min((long) fallbackBuffer.capacity(), length - written);
+                fallbackBuffer.limit(remaining);
 
-                    // Cap the buffer limit to avoid reading past the expected length
-                    int remaining = (int) Math.min((long) fallbackBuffer.capacity(), length - written);
-                    fallbackBuffer.limit(remaining);
+                int readBytes = data.read(fallbackBuffer);
+                
+                if (readBytes == -1) {
+                    throw new EOFException("Unexpected EOF. Expected " + length + " bytes, got " + written);
+                }
+                
+                // Enforce the blocking mode assumption
+                assert readBytes != 0 : "Blocking channel guarantee violated: read() returned 0 bytes";
 
-                    int readBytes = data.read(fallbackBuffer);
-                    if (readBytes == -1) {
-                        throw new EOFException("Unexpected EOF. Expected " + length + " bytes, got " + written);
-                    } else if (readBytes > 0) {
-                        fallbackBuffer.flip();
-                        while (fallbackBuffer.hasRemaining()) {
-                            written += fc.write(fallbackBuffer, written);
-                        }
-                    } else {
-                        try {
-                            Thread.sleep(1);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            throw new IOException("Transfer interrupted", e);
-                        }
-                    }
+                fallbackBuffer.flip();
+                while (fallbackBuffer.hasRemaining()) {
+                    written += fc.write(fallbackBuffer, written);
                 }
             }
-            fc.force(true);
-        } catch (IOException e) {
-            try {
-                Files.deleteIfExists(path);
-            } catch (IOException ex) {
-                logger.error("Failed to delete file after write error: {}", path, ex);
-            }
-            throw e;
         }
+        fc.force(true);
+    } catch (IOException e) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ex) {
+            logger.error("Failed to delete file after write error: {}", path, ex);
+        }
+        throw e;
     }
+}
 }
