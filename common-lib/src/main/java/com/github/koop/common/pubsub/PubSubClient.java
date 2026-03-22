@@ -4,6 +4,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -22,7 +23,7 @@ public class PubSubClient {
     public void sub(String topic, PubSubListener listener) {
         this.listeners.compute(topic, (k, lst) -> {
             if (lst == null) {
-                lst = new LinkedList<>();
+                lst = new CopyOnWriteArrayList<>();
                 // Tell the underlying pubsub implementation to subscribe
                 // to this topic when the first listener is added.
                 this.pubSub.sub(topic);
