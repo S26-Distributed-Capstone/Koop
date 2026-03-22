@@ -190,7 +190,6 @@ public class StorageNodeV2 {
      * the object has been deleted). If no version is found for the key, it returns
      * Optional.empty().
      * 
-     * @param partition
      * @param key
      * @param seqNumber
      * @return
@@ -226,12 +225,11 @@ public class StorageNodeV2 {
      * 
      * @param partition
      * @param key
-     * @param requestID
      * @param seqNumber
      * @param chunks
      * @throws Exception
      */
-    protected void multipartCommit(int partition, String key, String requestID, long seqNumber, List<String> chunks)
+    protected void multipartCommit(int partition, String key, long seqNumber, List<String> chunks)
             throws Exception {
         db.putMultipartItem(key, partition, seqNumber, chunks);
     }

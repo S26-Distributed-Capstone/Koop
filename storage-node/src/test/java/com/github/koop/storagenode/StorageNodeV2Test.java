@@ -157,10 +157,9 @@ public class StorageNodeV2Test {
     @Test
     public void testMultipartCommit() throws Exception {
         String key = "bucket/multipart-obj";
-        String requestID = "req-multi";
         List<String> chunks = List.of("chunk1", "chunk2", "chunk3");
 
-        storageNode.multipartCommit(1, key, requestID, 50L, chunks);
+        storageNode.multipartCommit(1, key, 50L, chunks);
 
         Optional<GetObjectResponse> responseOpt = storageNode.retrieve(key);
         assertTrue(responseOpt.isPresent());
