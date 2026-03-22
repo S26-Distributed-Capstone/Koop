@@ -91,7 +91,17 @@ public class StorageNodeServer {
                         //.result(Channels.newInputStream(fc));
                 // should use zero-copy transfer to avoid unnecessary buffering in memory
                 var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
-                fc.transferTo(0, fc.size(), outputChannel);
+                long size = fc.size();
+                long position = 0L;
+                while (position < size) {
+                    long transferred = fc.transferTo(position, size - position, outputChannel);
+                    if (transferred <= 0) {
+                        logger.warn("Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
+                                partition, key, position, size);
+                        break;
+                    }
+                    position += transferred;
+                }
                 logger.debug("GET partition={} key={} streaming {} bytes", partition, key, fc.size());
             } else {
                 ctx.status(404).result("");
