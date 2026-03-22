@@ -5,5 +5,7 @@ public interface PubSub extends AutoCloseable {
 
     void sub(String topic);
 
+    void drop(String topic);
+
     void start(PubSubListener listener);
 }

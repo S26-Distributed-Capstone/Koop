@@ -123,4 +123,25 @@ class PubSubClientTest {
         client.pub(topic, "msg2".getBytes());
         assertEquals(1, lastOffset.get(), "Second message should have offset 1");
     }
+
+    @Test
+    void testDropTopicStopsMessages() {
+        AtomicInteger messageCount = new AtomicInteger(0);
+        String topic = "drop-topic";
+
+        client.sub(topic, (t, offset, msg) -> messageCount.incrementAndGet());
+        client.start();
+
+        client.pub(topic, "msg1".getBytes());
+        assertEquals(1, messageCount.get(), "Listener should receive the first message");
+
+        // Drop the topic
+        client.drop(topic);
+
+        // Publish another message
+        client.pub(topic, "msg2".getBytes());
+
+        // The count should remain 1 because the subscription was dropped
+        assertEquals(1, messageCount.get(), "Listener should not receive messages after the topic is dropped");
+    }
 }
