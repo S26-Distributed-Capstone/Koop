@@ -6,7 +6,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Table #4 — Multipart Uploads.
  * Maps an object key to an ordered list of chunk identifiers (e.g. blob paths).
  */
 public record MultipartUpload(

@@ -1,7 +1,7 @@
 package com.github.koop.storagenode.db;
 
 /**
- * A version entry embedded in {@link Metadata} (Table #2).
+ * A version entry embedded in {@link Metadata}
  *
  * <p>Three permitted subtypes:
  * <ul>

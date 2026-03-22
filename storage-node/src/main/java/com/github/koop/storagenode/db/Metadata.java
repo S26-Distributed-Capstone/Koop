@@ -6,7 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Table #2 — Metadata.
+ * Metadata.
  *
  * <p>Binary format per version entry:
  * <pre>
