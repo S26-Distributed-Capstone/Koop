@@ -104,7 +104,7 @@ public class StorageNodeV2Test {
         assertTrue(storageNode.retrieve(key).isPresent());
 
         // Delete object
-        storageNode.delete(1, key, requestID, 11L);
+        storageNode.delete(1, key, 11L);
 
         // Retrieve should get Tombstone
         var responseOpt = storageNode.retrieve(key);
@@ -125,7 +125,7 @@ public class StorageNodeV2Test {
         storageNode.commit(1, key, requestID, 10L);
 
         // Delete object
-        storageNode.delete(1, key, requestID, 11L);
+        storageNode.delete(1, key, 11L);
 
         // Recreate object
         storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);

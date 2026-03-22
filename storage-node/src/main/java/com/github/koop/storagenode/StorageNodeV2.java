@@ -156,11 +156,10 @@ public class StorageNodeV2 {
      * 
      * @param partition
      * @param key
-     * @param requestID
      * @param seqNumber
      * @throws Exception
      */
-    protected void delete(int partition, String key, String requestID, long seqNumber) throws Exception {
+    protected void delete(int partition, String key, long seqNumber) throws Exception {
         db.deleteItem(key, partition, seqNumber);
     }
 
