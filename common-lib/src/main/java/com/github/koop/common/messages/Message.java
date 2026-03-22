@@ -35,7 +35,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             byte[] bucketBytes = getBytes(bucket);
             byte[] keyBytes = getBytes(key);
             byte[] reqBytes = getBytes(requestID);
-            byte[] hostBytes = getBytes(sender.getHostName());
+            byte[] hostBytes = getBytes(sender.getHostString());
             
             int capacity = 4 + bucketBytes.length + 
                            4 + keyBytes.length + 
@@ -70,7 +70,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             byte[] bucketBytes = getBytes(bucket);
             byte[] keyBytes = getBytes(key);
             byte[] reqBytes = getBytes(requestID);
-            byte[] hostBytes = getBytes(sender.getHostName());
+            byte[] hostBytes = getBytes(sender.getHostString());
 
             int capacity = 4 + bucketBytes.length + 
                            4 + keyBytes.length + 
@@ -124,7 +124,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             byte[] bucketBytes = getBytes(bucket);
             byte[] keyBytes = getBytes(key);
             byte[] reqBytes = getBytes(requestID);
-            byte[] hostBytes = getBytes(sender.getHostName());
+            byte[] hostBytes = getBytes(sender.getHostString());
             
             int capacity = 4 + bucketBytes.length + 
                            4 + keyBytes.length + 
@@ -158,7 +158,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
         public byte[] serialize() {
             byte[] bucketBytes = getBytes(bucket);
             byte[] reqBytes = getBytes(requestID);
-            byte[] hostBytes = getBytes(sender.getHostName());
+            byte[] hostBytes = getBytes(sender.getHostString());
             
             int capacity = 4 + bucketBytes.length + 
                            4 + reqBytes.length + 
@@ -189,7 +189,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
         public byte[] serialize() {
             byte[] bucketBytes = getBytes(bucket);
             byte[] reqBytes = getBytes(requestID);
-            byte[] hostBytes = getBytes(sender.getHostName());
+            byte[] hostBytes = getBytes(sender.getHostString());
             
             int capacity = 4 + bucketBytes.length + 
                            4 + reqBytes.length + 
