@@ -65,8 +65,20 @@ public class StorageNodeV2 {
         // Use the first three characters of the ID to create a sharded subdirectory
         // structure.
         // Fallback to "000" if the ID is unexpectedly short.
-        String prefixDir = (id != null && id.length() >= 3) ? id.substring(0, 3) : "000";
-        return storageDir.resolve(String.format("blobs/%s/%s", prefixDir, id));
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("id must not be null or blank");
+        }
+        // Reject obvious path traversal and separator characters.
+        if (id.contains("..") || id.contains("/") || id.contains("\\") ) {
+            throw new IllegalArgumentException("id contains invalid path characters");
+        }
+        // Use the first three characters of the ID to create a sharded subdirectory
+        // structure.
+        // Fallback to "000" if the ID is unexpectedly short.
+        String prefixDir = (id.length() >= 3) ? id.substring(0, 3) : "000";
+        Path base = storageDir.normalize();
+        Path objectPath = base.resolve("blobs").resolve(prefixDir).resolve(id).normalize();
+        return objectPath;
     }
 
     /**
