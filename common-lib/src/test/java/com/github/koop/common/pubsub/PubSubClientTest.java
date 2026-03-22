@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,8 +32,8 @@ class PubSubClientTest {
         AtomicReference<String> receivedMessage = new AtomicReference<>();
         String topic = "test-topic";
 
-        // Subscribe to the topic
-        client.sub(topic, msg -> receivedMessage.set(new String(msg, StandardCharsets.UTF_8)));
+        // Subscribe to the topic with the updated signature
+        client.sub(topic, (t, offset, msg) -> receivedMessage.set(new String(msg, StandardCharsets.UTF_8)));
         
         // Start the client (binds the listener to MemoryPubSub)
         client.start();
@@ -50,8 +51,8 @@ class PubSubClientTest {
         AtomicInteger listener2Count = new AtomicInteger(0);
         String topic = "broadcast-topic";
 
-        client.sub(topic, msg -> listener1Count.incrementAndGet());
-        client.sub(topic, msg -> listener2Count.incrementAndGet());
+        client.sub(topic, (t, offset, msg) -> listener1Count.incrementAndGet());
+        client.sub(topic, (t, offset, msg) -> listener2Count.incrementAndGet());
         client.start();
 
         client.pub(topic, "msg1".getBytes());
@@ -66,8 +67,8 @@ class PubSubClientTest {
         AtomicInteger topicACount = new AtomicInteger(0);
         AtomicInteger topicBCount = new AtomicInteger(0);
         
-        client.sub("topic-A", msg -> topicACount.incrementAndGet());
-        client.sub("topic-B", msg -> topicBCount.incrementAndGet());
+        client.sub("topic-A", (t, offset, msg) -> topicACount.incrementAndGet());
+        client.sub("topic-B", (t, offset, msg) -> topicBCount.incrementAndGet());
         client.start();
 
         // Publish only to topic A
@@ -83,12 +84,12 @@ class PubSubClientTest {
         String topic = "fault-tolerant-topic";
 
         // First listener throws an exception
-        client.sub(topic, msg -> {
+        client.sub(topic, (t, offset, msg) -> {
             throw new RuntimeException("Simulated listener failure");
         });
 
         // Second listener should still get executed
-        client.sub(topic, msg -> successListenerCount.incrementAndGet());
+        client.sub(topic, (t, offset, msg) -> successListenerCount.incrementAndGet());
         
         client.start();
 
@@ -106,5 +107,20 @@ class PubSubClientTest {
         assertDoesNotThrow(() -> {
             client.pub("empty-topic", "data".getBytes());
         }, "Publishing to a topic with no subscribers should not throw an exception");
+    }
+
+    @Test
+    void testOffsetsIncrementCorrectly() {
+        AtomicLong lastOffset = new AtomicLong(-1);
+        String topic = "offset-topic";
+
+        client.sub(topic, (t, offset, msg) -> lastOffset.set(offset));
+        client.start();
+
+        client.pub(topic, "msg1".getBytes());
+        assertEquals(0, lastOffset.get(), "First message should have offset 0");
+
+        client.pub(topic, "msg2".getBytes());
+        assertEquals(1, lastOffset.get(), "Second message should have offset 1");
     }
 }
