@@ -19,7 +19,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import com.github.koop.storagenode.StorageNodeV2.GetObjectResponse;
 import com.github.koop.storagenode.StorageNodeV2.MultipartData;
-import com.github.koop.storagenode.StorageNodeV2.VersionedObject;
+import com.github.koop.storagenode.StorageNodeV2.Tombstone;
+import com.github.koop.storagenode.StorageNodeV2.FileObject;
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.InMemoryStorageStrategy;
 import com.github.koop.storagenode.db.Metadata;
@@ -63,9 +64,9 @@ public class StorageNodeV2Test {
         assertTrue(responseOpt.isPresent(), "Response should be present");
 
         GetObjectResponse response = responseOpt.get();
-        assertTrue(response instanceof VersionedObject, "Expected VersionedObject");
+        assertTrue(response instanceof FileObject, "Expected VersionedObject");
 
-        try (VersionedObject vo = (VersionedObject) response) {
+        try (FileObject vo = (FileObject) response) {
             assertEquals(seqNumber, vo.version().sequenceNumber());
             
             ByteBuffer buffer = ByteBuffer.allocate(requestData.length);
@@ -80,7 +81,7 @@ public class StorageNodeV2Test {
         // 4. Retrieve specific version
         Optional<GetObjectResponse> specificVersionOpt = storageNode.retrieve(key, seqNumber);
         assertTrue(specificVersionOpt.isPresent(), "Response for specific version should be present");
-        try (VersionedObject vo = (VersionedObject) specificVersionOpt.get()) {
+        try (FileObject vo = (FileObject) specificVersionOpt.get()) {
             assertEquals(seqNumber, vo.version().sequenceNumber());
         }
 
@@ -104,8 +105,13 @@ public class StorageNodeV2Test {
         // Delete object
         storageNode.delete(1, key, requestID, 11L);
 
-        // Retrieve should be empty because latest is tombstone
-        assertFalse(storageNode.retrieve(key).isPresent());
+        // Retrieve should get Tombstone
+        var responseOpt = storageNode.retrieve(key);
+        assertTrue(responseOpt.isPresent(), "Response should be present after deletion");
+        var response = responseOpt.get();
+        assertTrue(response instanceof Tombstone, "Expected a Tombstone after deletion");
+        Tombstone tombstone = (Tombstone) response;
+        assertEquals(11L, tombstone.version().sequenceNumber());
     }
 
     @Test

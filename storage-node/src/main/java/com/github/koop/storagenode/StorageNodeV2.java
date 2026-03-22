@@ -40,17 +40,21 @@ public class StorageNodeV2 {
         return storageDir.resolve(String.format("blobs/%s/%s", prefixDir, id));
     }
 
-    static sealed interface GetObjectResponse permits VersionedObject, MultipartData {
+    static sealed interface GetObjectResponse permits FileObject, MultipartData, Tombstone {
     }
 
     static record MultipartData(MultipartFileVersion version) implements GetObjectResponse {
     }
 
-    static record VersionedObject(FileChannel data, FileVersion version) implements AutoCloseable, GetObjectResponse {
+    static record FileObject(FileChannel data, FileVersion version) implements AutoCloseable, GetObjectResponse {
         @Override
         public void close() throws Exception {
             data.close();
         }
+
+    }
+
+    static record Tombstone(TombstoneFileVersion version) implements GetObjectResponse {
 
     }
 
@@ -84,13 +88,13 @@ public class StorageNodeV2 {
             return Optional.empty();
         }
         var latest = latestOpt.get();
-        if (latest instanceof TombstoneFileVersion) {
-            return Optional.empty();
+        if (latest instanceof TombstoneFileVersion t) {
+            return Optional.of(new Tombstone(t));
         } else if (latest instanceof RegularFileVersion r) {
             Path path = getObjectPath(r.location());
             if (!Files.exists(path))
                 return Optional.empty();
-            return Optional.of(new VersionedObject(FileChannel.open(path, StandardOpenOption.READ), latest));
+            return Optional.of(new FileObject(FileChannel.open(path, StandardOpenOption.READ), latest));
         } else if (latest instanceof MultipartFileVersion m) {
             if (m.chunks().isEmpty())
                 return Optional.empty();
