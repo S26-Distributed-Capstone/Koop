@@ -29,6 +29,36 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
+    static byte[] serializeMessage(Message message) {
+        byte type = switch (message) {
+            case FileCommitMessage m -> 1;
+            case MultipartCommitMessage m -> 2;
+            case DeleteMessage m -> 3;
+            case CreateBucketMessage m -> 4;
+            case DeleteBucketMessage m -> 5;
+        };
+        byte[] payload = message.serialize();
+        ByteBuffer buffer = ByteBuffer.allocate(1 + payload.length);
+        buffer.put(type);
+        buffer.put(payload);
+        return buffer.array();
+    }
+
+    static Message deserializeMessage(byte[] data) {
+        ByteBuffer buffer = ByteBuffer.wrap(data);
+        byte type = buffer.get();
+        byte[] payload = new byte[buffer.remaining()];
+        buffer.get(payload);
+        return switch (type) {
+            case 1 -> FileCommitMessage.deserialize(payload);
+            case 2 -> MultipartCommitMessage.deserialize(payload);
+            case 3 -> DeleteMessage.deserialize(payload);
+            case 4 -> CreateBucketMessage.deserialize(payload);
+            case 5 -> DeleteBucketMessage.deserialize(payload);
+            default -> throw new IllegalArgumentException("Unknown message type ID: " + type);
+        };
+    }
+
     public record FileCommitMessage(String bucket, String key, String requestID, InetSocketAddress sender) implements Message {
         @Override
         public byte[] serialize() {
