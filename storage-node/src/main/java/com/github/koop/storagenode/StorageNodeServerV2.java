@@ -105,34 +105,52 @@ public class StorageNodeServerV2 {
                 break;
         }
 
+        Set<Integer> targetPartitions = new HashSet<>();
+
         if (myErasureSetId == -1) {
-            logger.warn("Node {}:{} not found in any Erasure Set.", this.ip, this.port);
-            return;
-        }
-
-        // 2. Discover partitions mapped to this erasure set and subscribe
-        for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
-            if (spread.getErasureSet() == myErasureSetId) {
-                for (Integer partition : spread.getPartitions()) {
-                    if (subscribedPartitions.add(partition)) {
-                        String topic = "partition-" + partition;
-                        logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
-
-                        pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
-                            try {
-                                Message message = objectMapper.readValue(messageBytes, Message.class);
-                                processSequencerMessage(partition, message, offset);
-                            } catch (Exception e) {
-                                logger.error("Failed to deserialize or process message on topic {} at offset {}",
-                                        incomingTopic, offset, e);
-                            }
-                        });
-                    }
+            logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
+                    this.port);
+        } else {
+            // 2. Discover partitions mapped to this erasure set
+            for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
+                if (spread.getErasureSet() == myErasureSetId) {
+                    targetPartitions.addAll(spread.getPartitions());
                 }
             }
         }
-    }
 
+        // 3. Drop subscriptions for partitions we no longer handle
+        Set<Integer> toDrop = new HashSet<>(subscribedPartitions);
+        toDrop.removeAll(targetPartitions);
+
+        for (Integer partition : toDrop) {
+            String topic = "partition-" + partition;
+            logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
+            pubSubClient.drop(topic);
+            subscribedPartitions.remove(partition);
+        }
+
+        // 4. Add subscriptions for new partitions
+        Set<Integer> toAdd = new HashSet<>(targetPartitions);
+        toAdd.removeAll(subscribedPartitions);
+
+        for (Integer partition : toAdd) {
+            String topic = "partition-" + partition;
+            logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
+
+            pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
+                try {
+                    Message message = objectMapper.readValue(messageBytes, Message.class);
+                    processSequencerMessage(partition, message, offset);
+                } catch (Exception e) {
+                    logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic,
+                            offset, e);
+                }
+            });
+
+            subscribedPartitions.add(partition);
+        }
+    }
     // --- HTTP Handlers ---
 
     private void handlePut(Context ctx) {
