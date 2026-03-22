@@ -1,6 +1,5 @@
 package com.github.koop.common.pubsub;
 
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,6 +30,11 @@ public class PubSubClient {
             lst.add(listener);
             return lst;
         });
+    }
+
+    public void drop(String topic) {
+        this.listeners.remove(topic);
+        this.pubSub.drop(topic);
     }
 
     public void pub(String topic, byte[] message) {

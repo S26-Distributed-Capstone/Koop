@@ -24,6 +24,12 @@ public class MemoryPubSub implements PubSub {
     }
 
     @Override
+    public void drop(String topic) {
+        subscribedTopics.remove(topic);
+        offsets.remove(topic);
+    }
+
+    @Override
     public void start(PubSubListener listener) {
         this.listener = listener;
     }
