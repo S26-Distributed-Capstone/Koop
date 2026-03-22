@@ -1,11 +1,21 @@
 package com.github.koop.storagenode;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.channels.Channels;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -33,17 +43,25 @@ public class StorageNodeServerV2 {
     private final StorageNodeV2 storageNode;
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
-
+    
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
+    
+    // Tracks active partition subscriptions and their dedicated executors
     private final Set<Integer> subscribedPartitions = new HashSet<>();
+    private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
+    
     private final ObjectMapper objectMapper = new ObjectMapper();
+    
+    // HTTP Client for sending asynchronous acknowledgments
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
 
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
-    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient) {
+    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient, PubSubClient pubSubClient) {
         this.port = port;
         this.ip = ip;
         this.storageNode = new StorageNodeV2(db, dir);
@@ -70,9 +88,9 @@ public class StorageNodeServerV2 {
         }
 
         // Injected dependencies
-        Database db = null; // e.g., new RocksDbStorageStrategy(...)
-        MetadataClient metadataClient = null; // Setup with appropriate Fetcher
-        PubSubClient pubSubClient = null; // Setup with appropriate PubSub implementation
+        Database db = null; 
+        MetadataClient metadataClient = null; 
+        PubSubClient pubSubClient = null; 
 
         StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
 
@@ -93,7 +111,6 @@ public class StorageNodeServerV2 {
 
         int myErasureSetId = -1;
 
-        // 1. Determine which erasure set this node belongs to
         for (ErasureSetConfiguration.ErasureSet es : currentEsConfig.getErasureSets()) {
             for (ErasureSetConfiguration.Machine machine : es.getMachines()) {
                 if (machine.getIp().equals(this.ip) && machine.getPort() == this.port) {
@@ -101,17 +118,14 @@ public class StorageNodeServerV2 {
                     break;
                 }
             }
-            if (myErasureSetId != -1)
-                break;
+            if (myErasureSetId != -1) break;
         }
 
         Set<Integer> targetPartitions = new HashSet<>();
 
         if (myErasureSetId == -1) {
-            logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
-                    this.port);
+            logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip, this.port);
         } else {
-            // 2. Discover partitions mapped to this erasure set
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
                 if (spread.getErasureSet() == myErasureSetId) {
                     targetPartitions.addAll(spread.getPartitions());
@@ -119,7 +133,6 @@ public class StorageNodeServerV2 {
             }
         }
 
-        // 3. Drop subscriptions for partitions we no longer handle
         Set<Integer> toDrop = new HashSet<>(subscribedPartitions);
         toDrop.removeAll(targetPartitions);
 
@@ -128,29 +141,46 @@ public class StorageNodeServerV2 {
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
             subscribedPartitions.remove(partition);
+            
+            ExecutorService executor = partitionExecutors.remove(partition);
+            if (executor != null) {
+                executor.shutdown();
+                try {
+                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    executor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
 
-        // 4. Add subscriptions for new partitions
         Set<Integer> toAdd = new HashSet<>(targetPartitions);
         toAdd.removeAll(subscribedPartitions);
 
         for (Integer partition : toAdd) {
             String topic = "partition-" + partition;
             logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
-
+            
+            ExecutorService partitionExecutor = Executors.newSingleThreadExecutor();
+            partitionExecutors.put(partition, partitionExecutor);
+            
             pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
-                try {
-                    Message message = objectMapper.readValue(messageBytes, Message.class);
-                    processSequencerMessage(partition, message, offset);
-                } catch (Exception e) {
-                    logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic,
-                            offset, e);
-                }
+                partitionExecutor.submit(() -> {
+                    try {
+                        Message message = objectMapper.readValue(messageBytes, Message.class);
+                        processSequencerMessage(partition, message, offset);
+                    } catch (Exception e) {
+                        logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic, offset, e);
+                    }
+                });
             });
-
+            
             subscribedPartitions.add(partition);
         }
     }
+
     // --- HTTP Handlers ---
 
     private void handlePut(Context ctx) {
@@ -179,11 +209,10 @@ public class StorageNodeServerV2 {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
-
-            // Extract optional version
+            
             String versionParam = ctx.queryParam("version");
-            long targetVersion = -1; // -1 signifies latest in retrieve()
-
+            long targetVersion = -1;
+            
             if (versionParam != null && !versionParam.isBlank()) {
                 try {
                     targetVersion = Long.parseLong(versionParam);
@@ -192,21 +221,20 @@ public class StorageNodeServerV2 {
                     return;
                 }
             }
-
+            
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
-
+            
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
-
-                // Extract sequence number from the version regardless of the type
+                
                 long responseSequenceNumber = switch (response) {
                     case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
                     case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
                     case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
                 };
-
+                
                 ctx.header("X-Object-Version", String.valueOf(responseSequenceNumber));
-
+                
                 if (response instanceof StorageNodeV2.FileObject fo) {
                     var fc = fo.data();
                     ctx.status(200)
@@ -219,28 +247,24 @@ public class StorageNodeServerV2 {
                     while (position < size) {
                         long transferred = fc.transferTo(position, size - position, outputChannel);
                         if (transferred <= 0) {
-                            logger.warn(
-                                    "Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
+                            logger.warn("Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
                                     partition, key, position, size);
                             break;
                         }
                         position += transferred;
                     }
                     fo.close();
-                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key,
-                            responseSequenceNumber, size);
-
+                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key, responseSequenceNumber, size);
+                    
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.status(200)
                             .header("Content-Type", "application/json")
                             .json(md.version().chunks());
-                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key,
-                            responseSequenceNumber);
-
+                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key, responseSequenceNumber);
+                    
                 } else if (response instanceof StorageNodeV2.Tombstone) {
                     ctx.status(404).result("NOT_FOUND (Tombstone)");
-                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key,
-                            responseSequenceNumber);
+                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key, responseSequenceNumber);
                 }
             } else {
                 ctx.status(404).result("NOT_FOUND");
@@ -254,44 +278,86 @@ public class StorageNodeServerV2 {
 
     // --- Pub/Sub Mutator Flow ---
 
-    /**
-     * Processes mutations routed from the PubSubClient listener.
-     */
     public void processSequencerMessage(int partition, Message message, long seqNumber) {
         try {
+            String requestId = null;
+            String callbackHost = message.sender().getHostString();
+            int callbackPort = message.sender().getPort();
+            String callbackAddress = "http://" + callbackHost + ":" + callbackPort;
+
             switch (message) {
                 case Message.FileCommitMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
                     storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
+                    requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);
                 }
                 case Message.MultipartCommitMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
                     storageNode.multipartCommit(partition, fullKey, seqNumber, m.chunks());
+                    requestId = m.requestID();
                     logger.info("Committed multipart file: {}", fullKey);
                 }
                 case Message.DeleteMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
                     storageNode.delete(partition, fullKey, seqNumber);
+                    requestId = m.requestID();
                     logger.info("Deleted file (Tombstone): {}", fullKey);
                 }
                 case Message.CreateBucketMessage m -> {
                     storageNode.createBucket(partition, m.bucket(), seqNumber);
+                    requestId = m.requestID();
                     logger.info("Created bucket: {}", m.bucket());
                 }
                 case Message.DeleteBucketMessage m -> {
                     storageNode.deleteBucket(partition, m.bucket(), seqNumber);
+                    requestId = m.requestID();
                     logger.info("Deleted bucket: {}", m.bucket());
                 }
             }
+
+            // Fire and forget acknowledgment
+            sendAck(callbackAddress, requestId);
+
         } catch (Exception e) {
             logger.error("Failed to process sequencer message: " + message, e);
         }
     }
 
+    private void sendAck(String callbackAddress, String requestId) {
+        if (callbackAddress == null || callbackAddress.isBlank() || requestId == null || requestId.isBlank()) {
+            return;
+        }
+
+        try {
+            String url = callbackAddress.endsWith("/") ? callbackAddress + "ack" : callbackAddress + "/ack";
+            String jsonPayload = String.format("{\"requestId\":\"%s\"}", requestId);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .build();
+
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                    .thenAccept(res -> {
+                        if (res.statusCode() >= 200 && res.statusCode() < 300) {
+                            logger.debug("Successfully sent ACK for requestId: {} to {}", requestId, url);
+                        } else {
+                            logger.warn("Received non-2xx status {} when sending ACK for requestId: {} to {}", res.statusCode(), requestId, url);
+                        }
+                    })
+                    .exceptionally(ex -> {
+                        logger.error("Network error while sending ACK for requestId: {} to {}", requestId, url, ex);
+                        return null;
+                    });
+        } catch (IllegalArgumentException e) {
+            logger.error("Invalid callback URL format: {} for requestId: {}", callbackAddress, requestId, e);
+        }
+    }
+
     private String buildKey(String bucket, String key) {
-        if (bucket == null || bucket.isEmpty())
-            return key;
+        if (bucket == null || bucket.isEmpty()) return key;
         return bucket + "/" + key;
     }
 
@@ -320,7 +386,6 @@ public class StorageNodeServerV2 {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L;
-            config.routes.get("/health", ctx -> ctx.result("OK"));
             config.routes.put("/store/{partition}/{key}", this::handlePut);
             config.routes.get("/store/{partition}/{key}", this::handleGet);
         });
@@ -333,6 +398,10 @@ public class StorageNodeServerV2 {
         if (app != null) {
             app.stop();
         }
+        
+        partitionExecutors.values().forEach(ExecutorService::shutdownNow);
+        partitionExecutors.clear();
+        
         try {
             if (metadataClient != null) {
                 metadataClient.close();
