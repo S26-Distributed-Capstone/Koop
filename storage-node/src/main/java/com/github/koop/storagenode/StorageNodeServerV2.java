@@ -154,15 +154,37 @@ public class StorageNodeServerV2 {
         }
     }
 
-    private void handleGet(Context ctx) {
+private void handleGet(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
             
-            Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key);
+            // Extract optional version
+            String versionParam = ctx.queryParam("version");
+            long targetVersion = -1; // -1 signifies latest in retrieve()
+            
+            if (versionParam != null && !versionParam.isBlank()) {
+                try {
+                    targetVersion = Long.parseLong(versionParam);
+                } catch (NumberFormatException e) {
+                    ctx.status(400).result("Invalid version parameter");
+                    return;
+                }
+            }
+            
+            Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
             
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
+                
+                // Extract sequence number from the version regardless of the type
+                long responseSequenceNumber = switch (response) {
+                    case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
+                    case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
+                    case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
+                };
+                
+                ctx.header("X-Object-Version", String.valueOf(responseSequenceNumber));
                 
                 if (response instanceof StorageNodeV2.FileObject fo) {
                     var fc = fo.data();
@@ -183,21 +205,21 @@ public class StorageNodeServerV2 {
                         position += transferred;
                     }
                     fo.close();
-                    logger.debug("GET partition={} key={} streamed {} bytes", partition, key, size);
+                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key, responseSequenceNumber, size);
                     
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.status(200)
                             .header("Content-Type", "application/json")
                             .json(md.version().chunks());
-                    logger.debug("GET partition={} key={} returned multipart chunk list", partition, key);
+                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key, responseSequenceNumber);
                     
                 } else if (response instanceof StorageNodeV2.Tombstone) {
                     ctx.status(404).result("NOT_FOUND (Tombstone)");
-                    logger.debug("GET partition={} key={} hit tombstone", partition, key);
+                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key, responseSequenceNumber);
                 }
             } else {
                 ctx.status(404).result("NOT_FOUND");
-                logger.debug("GET partition={} key={} not found", partition, key);
+                logger.debug("GET partition={} key={} targetVersion={} not found", partition, key, targetVersion);
             }
         } catch (Exception e) {
             logger.error("Error handling GET", e);
