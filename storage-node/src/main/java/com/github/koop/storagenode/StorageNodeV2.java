@@ -98,14 +98,13 @@ public class StorageNodeV2 {
     }
 
     /**
-     * Stores the given data for the specified key and partition. The data is
+     * Stores the given data for the specified ID & partition. The data is
      * written to disk using a robust method that handles partial writes and ensures
      * data integrity. The file path is determined by the request ID, which allows
      * for sharding files into subdirectories based on their prefixes.
      * 
      * @param partition
      * @param requestID
-     * @param key
      * @param data
      * @param length
      * @throws IOException
@@ -113,7 +112,6 @@ public class StorageNodeV2 {
     protected void store(
             int partition,
             String requestID,
-            String key,
             ReadableByteChannel data,
             long length) throws IOException {
 

@@ -54,7 +54,8 @@ public class StorageNodeV2Test {
         long seqNumber = 100L;
 
         // 1. Store data
-        storageNode.store(partition, requestID, key, Channels.newChannel(new ByteArrayInputStream(requestData)), requestData.length);
+        storageNode.store(partition, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)),
+                requestData.length);
 
         // 2. Commit metadata
         storageNode.commit(partition, key, requestID, seqNumber);
@@ -68,7 +69,7 @@ public class StorageNodeV2Test {
 
         try (FileObject vo = (FileObject) response) {
             assertEquals(seqNumber, vo.version().sequenceNumber());
-            
+
             ByteBuffer buffer = ByteBuffer.allocate(requestData.length);
             int read = vo.data().read(buffer);
             assertEquals(requestData.length, read);
@@ -94,9 +95,9 @@ public class StorageNodeV2Test {
     public void testDelete() throws Exception {
         String key = "bucket/obj-to-delete";
         String requestID = "req-del";
-        
+
         // Setup existing object
-        storageNode.store(1, requestID, key, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
         storageNode.commit(1, key, requestID, 10L);
 
         // Ensure it's there
@@ -118,16 +119,16 @@ public class StorageNodeV2Test {
     public void testPutAfterDelete() throws Exception {
         String key = "bucket/obj-recreate";
         String requestID = "req-recreate";
-        
+
         // Setup existing object
-        storageNode.store(1, requestID, key, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
         storageNode.commit(1, key, requestID, 10L);
 
         // Delete object
         storageNode.delete(1, key, requestID, 11L);
 
         // Recreate object
-        storageNode.store(1, requestID, key, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
+        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
         storageNode.commit(1, key, requestID, 12L);
 
         // Retrieve should get new data
@@ -137,7 +138,7 @@ public class StorageNodeV2Test {
         assertTrue(response instanceof FileObject, "Expected a FileObject after recreation");
         try (FileObject vo = (FileObject) response) {
             assertEquals(12L, vo.version().sequenceNumber());
-            
+
             ByteBuffer buffer = ByteBuffer.allocate(7);
             int read = vo.data().read(buffer);
             assertEquals(7, read);
@@ -166,7 +167,7 @@ public class StorageNodeV2Test {
 
         GetObjectResponse response = responseOpt.get();
         assertTrue(response instanceof MultipartData);
-        
+
         MultipartData md = (MultipartData) response;
         MultipartFileVersion mfv = md.version();
         assertEquals(50L, mfv.sequenceNumber());
@@ -189,17 +190,17 @@ public class StorageNodeV2Test {
     @Test
     public void testListItemsInBucket() throws Exception {
         String prefix = "test-bucket/";
-        storageNode.store(1, "req-1", prefix + "file1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())), 1);
+        storageNode.store(1, "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())), 1);
         storageNode.commit(1, prefix + "file1", "req-1", 100L);
 
-        storageNode.store(1, "req-2", prefix + "file2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())), 1);
+        storageNode.store(1, "req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())), 1);
         storageNode.commit(1, prefix + "file2", "req-2", 101L);
 
-        storageNode.store(1, "req-3", "other-bucket/file3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())), 1);
+        storageNode.store(1, "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())), 1);
         storageNode.commit(1, "other-bucket/file3", "req-3", 102L);
 
         List<Metadata> items = storageNode.listItemsInBucket(prefix).toList();
-        
+
         assertEquals(2, items.size());
         assertTrue(items.stream().anyMatch(m -> m.key().equals(prefix + "file1")));
         assertTrue(items.stream().anyMatch(m -> m.key().equals(prefix + "file2")));
