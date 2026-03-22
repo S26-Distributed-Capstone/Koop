@@ -33,10 +33,10 @@ public class StorageNodeV2 {
     }
 
     private Path getObjectPath(String id) {
-        // Use the first two characters of the ID to create a sharded subdirectory
+        // Use the first three characters of the ID to create a sharded subdirectory
         // structure.
-        // Fallback to "00" if the ID is unexpectedly short.
-        String prefixDir = (id != null && id.length() >= 2) ? id.substring(0, 2) : "00";
+        // Fallback to "000" if the ID is unexpectedly short.
+        String prefixDir = (id != null && id.length() >= 3) ? id.substring(0, 3) : "000";
         return storageDir.resolve(String.format("blobs/%s/%s", prefixDir, id));
     }
 
