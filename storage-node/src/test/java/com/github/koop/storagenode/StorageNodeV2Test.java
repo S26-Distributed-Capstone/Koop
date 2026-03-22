@@ -115,6 +115,40 @@ public class StorageNodeV2Test {
     }
 
     @Test
+    public void testPutAfterDelete() throws Exception {
+        String key = "bucket/obj-recreate";
+        String requestID = "req-recreate";
+        
+        // Setup existing object
+        storageNode.store(1, requestID, key, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.commit(1, key, requestID, 10L);
+
+        // Delete object
+        storageNode.delete(1, key, requestID, 11L);
+
+        // Recreate object
+        storageNode.store(1, requestID, key, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
+        storageNode.commit(1, key, requestID, 12L);
+
+        // Retrieve should get new data
+        var responseOpt = storageNode.retrieve(key);
+        assertTrue(responseOpt.isPresent(), "Response should be present after recreation");
+        var response = responseOpt.get();
+        assertTrue(response instanceof FileObject, "Expected a FileObject after recreation");
+        try (FileObject vo = (FileObject) response) {
+            assertEquals(12L, vo.version().sequenceNumber());
+            
+            ByteBuffer buffer = ByteBuffer.allocate(7);
+            int read = vo.data().read(buffer);
+            assertEquals(7, read);
+            buffer.flip();
+            byte[] readBytes = new byte[buffer.remaining()];
+            buffer.get(readBytes);
+            assertArrayEquals("newdata".getBytes(), readBytes);
+        }
+    }
+
+    @Test
     public void testRetrieveEmpty() throws Exception {
         assertFalse(storageNode.retrieve("non-existent-key").isPresent());
     }
