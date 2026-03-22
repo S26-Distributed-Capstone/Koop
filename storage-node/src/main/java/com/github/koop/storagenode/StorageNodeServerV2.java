@@ -33,7 +33,7 @@ public class StorageNodeServerV2 {
     private final StorageNodeV2 storageNode;
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
-    
+
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
@@ -42,7 +42,8 @@ public class StorageNodeServerV2 {
 
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
-    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient, PubSubClient pubSubClient) {
+    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
+            PubSubClient pubSubClient) {
         this.port = port;
         this.ip = ip;
         this.storageNode = new StorageNodeV2(db, dir);
@@ -100,7 +101,8 @@ public class StorageNodeServerV2 {
                     break;
                 }
             }
-            if (myErasureSetId != -1) break;
+            if (myErasureSetId != -1)
+                break;
         }
 
         if (myErasureSetId == -1) {
@@ -115,13 +117,14 @@ public class StorageNodeServerV2 {
                     if (subscribedPartitions.add(partition)) {
                         String topic = "partition-" + partition;
                         logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
-                        
+
                         pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
                             try {
                                 Message message = objectMapper.readValue(messageBytes, Message.class);
                                 processSequencerMessage(partition, message, offset);
                             } catch (Exception e) {
-                                logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic, offset, e);
+                                logger.error("Failed to deserialize or process message on topic {} at offset {}",
+                                        incomingTopic, offset, e);
                             }
                         });
                     }
@@ -154,15 +157,15 @@ public class StorageNodeServerV2 {
         }
     }
 
-private void handleGet(Context ctx) {
+    private void handleGet(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
-            
+
             // Extract optional version
             String versionParam = ctx.queryParam("version");
             long targetVersion = -1; // -1 signifies latest in retrieve()
-            
+
             if (versionParam != null && !versionParam.isBlank()) {
                 try {
                     targetVersion = Long.parseLong(versionParam);
@@ -171,21 +174,21 @@ private void handleGet(Context ctx) {
                     return;
                 }
             }
-            
+
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
-            
+
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
-                
+
                 // Extract sequence number from the version regardless of the type
                 long responseSequenceNumber = switch (response) {
                     case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
                     case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
                     case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
                 };
-                
+
                 ctx.header("X-Object-Version", String.valueOf(responseSequenceNumber));
-                
+
                 if (response instanceof StorageNodeV2.FileObject fo) {
                     var fc = fo.data();
                     ctx.status(200)
@@ -198,24 +201,28 @@ private void handleGet(Context ctx) {
                     while (position < size) {
                         long transferred = fc.transferTo(position, size - position, outputChannel);
                         if (transferred <= 0) {
-                            logger.warn("Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
+                            logger.warn(
+                                    "Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
                                     partition, key, position, size);
                             break;
                         }
                         position += transferred;
                     }
                     fo.close();
-                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key, responseSequenceNumber, size);
-                    
+                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key,
+                            responseSequenceNumber, size);
+
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.status(200)
                             .header("Content-Type", "application/json")
                             .json(md.version().chunks());
-                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key, responseSequenceNumber);
-                    
+                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key,
+                            responseSequenceNumber);
+
                 } else if (response instanceof StorageNodeV2.Tombstone) {
                     ctx.status(404).result("NOT_FOUND (Tombstone)");
-                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key, responseSequenceNumber);
+                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key,
+                            responseSequenceNumber);
                 }
             } else {
                 ctx.status(404).result("NOT_FOUND");
@@ -265,7 +272,8 @@ private void handleGet(Context ctx) {
     }
 
     private String buildKey(String bucket, String key) {
-        if (bucket == null || bucket.isEmpty()) return key;
+        if (bucket == null || bucket.isEmpty())
+            return key;
         return bucket + "/" + key;
     }
 
@@ -298,7 +306,6 @@ private void handleGet(Context ctx) {
             config.routes.put("/store/{partition}/{key}", this::handlePut);
             config.routes.get("/store/{partition}/{key}", this::handleGet);
         });
-
 
         app.start(port);
         logger.info("StorageNodeServerV2 started on port {}", app.port());
