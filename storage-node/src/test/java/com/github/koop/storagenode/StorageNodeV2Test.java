@@ -71,8 +71,12 @@ public class StorageNodeV2Test {
             assertEquals(seqNumber, vo.version().sequenceNumber());
 
             ByteBuffer buffer = ByteBuffer.allocate(requestData.length);
-            int read = vo.data().read(buffer);
-            assertEquals(requestData.length, read);
+            int totalRead = 0;
+            int read;
+            while (buffer.hasRemaining() && (read = vo.data().read(buffer)) != -1) {
+                totalRead += read;
+            }
+            assertEquals(requestData.length, totalRead);
             buffer.flip();
             byte[] readBytes = new byte[buffer.remaining()];
             buffer.get(readBytes);
