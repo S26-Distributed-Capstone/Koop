@@ -3,19 +3,19 @@ package com.github.koop.common.metadata;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
-public class ReplicaSetConfiguration {
-    @JsonProperty("replica_sets")
-    private List<ReplicaSet> replicaSets;
+public class ErasureSetConfiguration {
+    @JsonProperty("erasure_sets")
+    private List<ErasureSet> erasureSets;
 
-    public List<ReplicaSet> getReplicaSets() {
-        return replicaSets;
+    public List<ErasureSet> getErasureSets() {
+        return erasureSets;
     }
 
-    public void setReplicaSets(List<ReplicaSet> replicaSets) {
-        this.replicaSets = replicaSets;
+    public void setErasureSets(List<ErasureSet> erasureSets) {
+        this.erasureSets = erasureSets;
     }
 
-    public static class ReplicaSet {
+    public static class ErasureSet {
         private int number;
         private List<Machine> machines;
 
