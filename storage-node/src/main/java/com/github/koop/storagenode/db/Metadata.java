@@ -2,47 +2,104 @@ package com.github.koop.storagenode.db;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
-public record Metadata(
-    String fileName,
-    String location,
-    String partition,
-    long sequenceNumber) {
+/**
+ * Metadata.
+ *
+ * <p>Binary format per version entry:
+ * <pre>
+ *   [type (byte): 0x00=Regular, 0x01=Multipart, 0x02=Tombstone]
+ *   [seqNum (long)]
+ *   if Regular:   [locationLen (int)][location]
+ *   if Multipart: [chunkCount (int)] ([chunkLen (int)][chunk]) * chunkCount
+ *   if Tombstone: (nothing extra)
+ * </pre>
+ */
+public record Metadata(String key, int partition, List<FileVersion> versions) {
 
     public byte[] serialize() {
-        byte[] fileNameBytes = fileName.getBytes(StandardCharsets.UTF_8);
-        byte[] locationBytes = location.getBytes(StandardCharsets.UTF_8);
-        byte[] partitionBytes = partition.getBytes(StandardCharsets.UTF_8);
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
 
-        int totalLength = 4 + fileNameBytes.length +
-                         4 + locationBytes.length +
-                         4 + partitionBytes.length +
-                         8;
+        List<byte[]> encodedVersions = new ArrayList<>(versions.size());
+        for (FileVersion v : versions) encodedVersions.add(encodeVersion(v));
 
+        int versionsPayload = 4; // count (int)
+        for (byte[] ev : encodedVersions) versionsPayload += ev.length;
+
+        int totalLength = 4 + keyBytes.length + 4 + versionsPayload;
         ByteBuffer buffer = ByteBuffer.allocate(totalLength);
-
-        writeString(buffer, fileNameBytes);
-        writeString(buffer, locationBytes);
-        writeString(buffer, partitionBytes);
-        buffer.putLong(sequenceNumber);
-
+        buffer.putInt(keyBytes.length);
+        buffer.put(keyBytes);
+        buffer.putInt(partition);
+        buffer.putInt(versions.size());
+        for (byte[] ev : encodedVersions) buffer.put(ev);
         return buffer.array();
     }
 
     public static Metadata from(byte[] rawData) {
         ByteBuffer buffer = ByteBuffer.wrap(rawData);
-
-        String fileName = readString(buffer);
-        String location = readString(buffer);
-        String partition = readString(buffer);
-        long sequenceNumber = buffer.getLong();
-
-        return new Metadata(fileName, location, partition, sequenceNumber);
+        String key = readString(buffer);
+        int partition = buffer.getInt();
+        int count = buffer.getInt();
+        List<FileVersion> versions = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) versions.add(decodeVersion(buffer));
+        return new Metadata(key, partition, versions);
     }
 
-    private static void writeString(ByteBuffer buffer, byte[] bytes) {
-        buffer.putInt(bytes.length);
-        buffer.put(bytes);
+    // -------------------------------------------------------------------------
+    private static final byte TAG_REGULAR   = 0x00;
+    private static final byte TAG_MULTIPART = 0x01;
+    private static final byte TAG_TOMBSTONE = 0x02;
+
+    private static byte[] encodeVersion(FileVersion v) {
+        if (v instanceof RegularFileVersion r) {
+            byte[] locBytes = r.location().getBytes(StandardCharsets.UTF_8);
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + 4 + locBytes.length);
+            buf.put(TAG_REGULAR);
+            buf.putLong(r.sequenceNumber());
+            buf.putInt(locBytes.length);
+            buf.put(locBytes);
+            return buf.array();
+        } else if (v instanceof MultipartFileVersion m) {
+            List<byte[]> chunkBytes = new ArrayList<>(m.chunks().size());
+            int chunksPayload = 4;
+            for (String c : m.chunks()) {
+                byte[] cb = c.getBytes(StandardCharsets.UTF_8);
+                chunkBytes.add(cb);
+                chunksPayload += 4 + cb.length;
+            }
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + chunksPayload);
+            buf.put(TAG_MULTIPART);
+            buf.putLong(m.sequenceNumber());
+            buf.putInt(m.chunks().size());
+            for (byte[] cb : chunkBytes) { buf.putInt(cb.length); buf.put(cb); }
+            return buf.array();
+        } else if (v instanceof TombstoneFileVersion t) {
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES);
+            buf.put(TAG_TOMBSTONE);
+            buf.putLong(t.sequenceNumber());
+            return buf.array();
+        } else {
+            throw new IllegalArgumentException("Unknown FileVersion type: " + v.getClass());
+        }
+    }
+
+    private static FileVersion decodeVersion(ByteBuffer buffer) {
+        byte tag = buffer.get();
+        long seqNum = buffer.getLong();
+        return switch (tag) {
+            case TAG_REGULAR   -> new RegularFileVersion(seqNum, readString(buffer));
+            case TAG_MULTIPART -> {
+                int count = buffer.getInt();
+                List<String> chunks = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) chunks.add(readString(buffer));
+                yield new MultipartFileVersion(seqNum, chunks);
+            }
+            case TAG_TOMBSTONE -> new TombstoneFileVersion(seqNum);
+            default            -> throw new IllegalArgumentException("Unknown FileVersion tag: " + tag);
+        };
     }
 
     private static String readString(ByteBuffer buffer) {
