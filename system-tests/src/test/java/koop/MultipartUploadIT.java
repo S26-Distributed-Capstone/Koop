@@ -28,10 +28,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,7 +51,6 @@ public class MultipartUploadIT {
     private static final int TOTAL_NODES = 9;
 
     private final List<StorageNodeServer> servers = new ArrayList<>();
-    private final List<Thread> serverThreads = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
     private final List<Integer> nodePorts = new ArrayList<>();
 
@@ -76,13 +71,8 @@ public class MultipartUploadIT {
 
             StorageNodeServer server = new StorageNodeServer(port, dir);
             servers.add(server);
-
-            Thread t = Thread.ofVirtual().start(server::start);
-            serverThreads.add(t);
-
-            InetSocketAddress addr = new InetSocketAddress("127.0.0.1", port);
-            waitForReady(addr, 5_000);
-            addrs.add(addr);
+            server.start();
+            addrs.add(new InetSocketAddress("127.0.0.1", port));
         }
 
         MemoryFetcher fetcher = new MemoryFetcher();
@@ -113,9 +103,6 @@ public class MultipartUploadIT {
 
         for (StorageNodeServer server : servers) {
             server.stop();
-        }
-        for (Thread t : serverThreads) {
-            t.join(1_000);
         }
         for (Path dir : dataDirs) {
             deleteRecursive(dir);
@@ -222,15 +209,7 @@ public class MultipartUploadIT {
                 Path dir = dataDirs.get(i);
                 StorageNodeServer replacement = new StorageNodeServer(port, dir);
                 servers.set(i, replacement);
-                Thread t = Thread.ofVirtual().start(replacement::start);
-                serverThreads.add(t);
-                try {
-                    waitForReady(new InetSocketAddress("127.0.0.1", port), 10_000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(
-                            "Interrupted while waiting for restarted storage node to become ready on port " + port, e);
-                }
+                replacement.start();
             }
         }
     }
@@ -282,27 +261,6 @@ public class MultipartUploadIT {
             return m;
         }).toList());
         return es;
-    }
-
-    private static void waitForReady(InetSocketAddress addr, long timeoutMs)
-            throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        HttpClient client = HttpClient.newHttpClient();
-        URI healthUri = URI.create(
-                "http://" + addr.getHostString() + ":" + addr.getPort() + "/health");
-
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder().uri(healthUri).GET().build();
-                HttpResponse<String> resp =
-                        client.send(req, HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) return;
-            } catch (IOException ignored) {
-                // not ready yet
-            }
-            Thread.sleep(50);
-        }
-        throw new IllegalStateException("Storage node did not become ready: " + addr);
     }
 
     private static void deleteRecursive(Path root) throws IOException {

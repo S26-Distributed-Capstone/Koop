@@ -110,7 +110,7 @@ public final class StorageWorker {
         if (data == null)      throw new IllegalArgumentException("data is null");
         if (length < 0)        throw new IllegalArgumentException("length < 0");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -182,7 +182,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -214,7 +214,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -296,7 +296,7 @@ public final class StorageWorker {
             return false;
         }
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         if (partition.isEmpty()) {
@@ -364,6 +364,10 @@ public final class StorageWorker {
             throw new IllegalStateException(
                     "ErasureRouting is not ready — waiting for PartitionSpreadConfiguration and ErasureSetConfiguration");
         return r;
+    }
+
+    private static String toStorageKey(String bucket, String key) {
+        return bucket + "-" + key;
     }
 
     private void streamReconstruct(int partition, String storageKey,

@@ -30,8 +30,7 @@ public class StorageWorkerService implements StorageService {
      * before being passed to this constructor.
      */
     public StorageWorkerService(StorageWorker storageWorker) {
-        this.storageWorker = storageWorker;
-        this.multipartManager = new MultipartUploadManager(storageWorker, new MemoryCacheClient());
+        this(storageWorker, new MemoryCacheClient()); // Use in-memory cache by default
     }
 
     /**

@@ -31,6 +31,13 @@ public interface CacheClient {
     void put(String key, String value);
 
     /**
+     * Stores {@code value} only if {@code key} already exists.
+     *
+     * @return {@code true} if the value was updated, {@code false} if absent.
+     */
+    boolean putIfPresent(String key, String value);
+
+    /**
      * Returns the value stored under {@code key}, or {@code null} if absent.
      */
     String get(String key);
@@ -52,6 +59,23 @@ public interface CacheClient {
      * Creates the set if it does not yet exist.
      */
     void setAdd(String key, String member);
+
+    /**
+     * Adds {@code member} only if the set identified by {@code key} already exists.
+     *
+     * @return {@code true} if added to an existing set, {@code false} if absent.
+     */
+    boolean setAddIfPresent(String key, String member);
+
+    /**
+     * Ensures a set exists for {@code key}. No-op if already present.
+     */
+    void setCreate(String key);
+
+    /**
+     * Returns {@code true} if a set exists at {@code key}.
+     */
+    boolean setExists(String key);
 
     /**
      * Returns all members of the set identified by {@code key}.

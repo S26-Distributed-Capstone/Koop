@@ -120,6 +120,23 @@ class MultipartUploadManagerTest {
         assertEquals(MultipartUploadResult.Status.NOT_FOUND, result.status());
     }
 
+        @Test
+        void uploadPart_whenPartsSetDeleted_returnsConflictAndDoesNotRecreateSet() throws Exception {
+                when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
+                                .thenReturn(true);
+
+                String uploadId = manager.initiateMultipartUpload("bucket", "file");
+                cache.setDelete(MultipartUploadSession.partsKey(uploadId));
+
+                byte[] payload = "x".getBytes(StandardCharsets.UTF_8);
+                MultipartUploadResult result = manager.uploadPart("bucket", "file", uploadId, 1,
+                                new ByteArrayInputStream(payload), payload.length);
+
+                assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
+                assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).isEmpty());
+                assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
+        }
+
     @Test
     void uploadPart_inactiveSession_throwsConflict() {
         String uploadId = "inactive-upload";
@@ -192,6 +209,21 @@ class MultipartUploadManagerTest {
         MultipartUploadResult result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
         assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
+
+        @Test
+        void complete_whenPartsSetDeleted_returnsConflict() throws Exception {
+                String uploadId = manager.initiateMultipartUpload("bucket", "final-key");
+                cache.setDelete(MultipartUploadSession.partsKey(uploadId));
+
+                MultipartUploadResult result = manager.completeMultipartUpload(
+                                "bucket",
+                                "final-key",
+                                uploadId,
+                                List.of(new StorageService.CompletedPart(1)));
+
+                assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
+                verify(storageWorker, never()).sendMessage(anyString(), anyString(), any(Message.class));
+        }
 
         @Test
         void complete_bucketOrKeyMismatch_throwsConflict() {

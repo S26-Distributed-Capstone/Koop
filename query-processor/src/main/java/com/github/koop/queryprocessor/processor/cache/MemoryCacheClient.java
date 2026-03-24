@@ -39,6 +39,11 @@ public class MemoryCacheClient implements CacheClient {
     }
 
     @Override
+    public boolean putIfPresent(String key, String value) {
+        return kvStore.computeIfPresent(key, (k, v) -> value) != null;
+    }
+
+    @Override
     public String get(String key) {
         return kvStore.get(key);
     }
@@ -59,6 +64,26 @@ public class MemoryCacheClient implements CacheClient {
     public void setAdd(String key, String member) {
         // computeIfAbsent is atomic: only one Set is ever created per key
         setStore.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet()).add(member);
+    }
+
+    @Override
+    public boolean setAddIfPresent(String key, String member) {
+        Set<String> existing = setStore.get(key);
+        if (existing == null) {
+            return false;
+        }
+        existing.add(member);
+        return true;
+    }
+
+    @Override
+    public void setCreate(String key) {
+        setStore.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet());
+    }
+
+    @Override
+    public boolean setExists(String key) {
+        return setStore.containsKey(key);
     }
 
     @Override

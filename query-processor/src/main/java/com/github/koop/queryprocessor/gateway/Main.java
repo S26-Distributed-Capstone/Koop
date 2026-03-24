@@ -194,7 +194,7 @@ public class Main {
             if (data != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
-                ctx.header("ETag", "\"dummy-etag-12345\"");
+                //ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result(data);
             } else {
                 ctx.status(404);
@@ -455,7 +455,7 @@ public class Main {
                "  <Location>http://localhost:8080/" + bucket + "/" + key + "</Location>\n" +
                "  <Bucket>" + bucket + "</Bucket>\n" +
                "  <Key>" + key + "</Key>\n" +
-               "  <ETag>\"\"</ETag>\n" +
+               //"  <ETag>\"\"</ETag>\n" +
                "</CompleteMultipartUploadResult>";
     }
 

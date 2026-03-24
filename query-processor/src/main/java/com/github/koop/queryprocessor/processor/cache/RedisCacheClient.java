@@ -22,6 +22,11 @@ public class RedisCacheClient implements CacheClient {
     }
 
     @Override
+    public boolean putIfPresent(String key, String value) {
+        throw new UnsupportedOperationException("RedisCacheClient.putIfPresent not implemented");
+    }
+
+    @Override
     public String get(String key) {
         throw new UnsupportedOperationException("RedisCacheClient.get not implemented");
     }
@@ -39,6 +44,21 @@ public class RedisCacheClient implements CacheClient {
     @Override
     public void setAdd(String key, String member) {
         throw new UnsupportedOperationException("RedisCacheClient.setAdd not implemented");
+    }
+
+    @Override
+    public boolean setAddIfPresent(String key, String member) {
+        throw new UnsupportedOperationException("RedisCacheClient.setAddIfPresent not implemented");
+    }
+
+    @Override
+    public void setCreate(String key) {
+        throw new UnsupportedOperationException("RedisCacheClient.setCreate not implemented");
+    }
+
+    @Override
+    public boolean setExists(String key) {
+        throw new UnsupportedOperationException("RedisCacheClient.setExists not implemented");
     }
 
     @Override
