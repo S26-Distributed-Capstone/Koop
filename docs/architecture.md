@@ -32,13 +32,13 @@ The architecture consists of three primary services:
 3.  **QP** chunks the stream and applies **Erasure Coding** (e.g., 6 data shards + 3 parity shards).
 4.  **QP** determines the correct storage nodes for the object's partition (based on Etcd config).
 5.  **QP** writes shards in parallel to the 9 target **Storage Nodes**.
-6.  **Storage Nodes** write the shard metadata and data to **RocksDB**.
+6.  **Storage Nodes** write the shard metadata and data to **RocksDB** in two-phased commit - write data and then commit the message using kafka as an atomic broadcast.
 7.  **QP** waits for a write quorum (e.g., 6/9) before acknowledging success to the client.
 
 #### 2. GET Object
 1.  **Client** sends a `GET /bucket/key` request.
 2.  **QP** determines the correct storage nodes.
-3.  **QP** requests shards from the relevant nodes.
+3.  **QP** requests shards from the relevant nodes and reconciles version descrepancies.
 4.  **QP** reconstructs the original object from any `k` shards (e.g., 6) using Reed-Solomon decoding.
 5.  **QP** streams the data back to the client.
 
