@@ -11,9 +11,10 @@ package com.github.koop.queryprocessor.processor.cache;
  * Uploaded parts    →  mpu:parts:{uploadId}        (set of part-number strings)
  * </pre>
  *
- * <p>Part shards are stored on storage nodes under the derived key:
+ * <p>Part shards are stored on storage nodes under keys derived via
+ * {@link #partStorageKey(String, String, String, int)}:
  * <pre>
- * {bucket}-{key}-mpu-{uploadId}-part-{partNumber}
+ * __mpu__:{bucket}:{key}:{uploadId}:{partNumber}
  * </pre>
  *
  * <p>Serialization format (stored as a single cache string):
@@ -52,7 +53,6 @@ public record MultipartUploadSession(
     // ─── Serialization ────────────────────────────────────────────────────────
 
     private static final String DELIMITER = "|";
-    private static final String DELIMITER_REGEX = "\\|";
 
     /**
      * Serializes this session to a single string suitable for storage in the
@@ -71,7 +71,7 @@ public record MultipartUploadSession(
         if (value == null) {
             throw new IllegalArgumentException("Cannot deserialize null session value");
         }
-        String[] parts = value.split(DELIMITER_REGEX, 4);
+        String[] parts = splitSerializedComponents(value);
         if (parts.length != 4) {
             throw new IllegalArgumentException("Malformed session value: " + value);
         }
@@ -83,11 +83,57 @@ public record MultipartUploadSession(
         );
     }
 
+    private static String[] splitSerializedComponents(String value) {
+        String[] parts = new String[4];
+        int partIndex = 0;
+        StringBuilder current = new StringBuilder();
+
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\') {
+                // Keep escape markers intact so component unescaping stays centralized.
+                if (i + 1 >= value.length()) {
+                    throw new IllegalArgumentException("Malformed session value (dangling escape): " + value);
+                }
+                current.append(c);
+                current.append(value.charAt(++i));
+                continue;
+            }
+            if (c == DELIMITER.charAt(0)) {
+                if (partIndex >= 3) {
+                    throw new IllegalArgumentException("Malformed session value: " + value);
+                }
+                parts[partIndex++] = current.toString();
+                current.setLength(0);
+                continue;
+            }
+            current.append(c);
+        }
+
+        if (partIndex != 3) {
+            throw new IllegalArgumentException("Malformed session value: " + value);
+        }
+        parts[partIndex] = current.toString();
+        return parts;
+    }
+
     /**
      * Unescapes special characters in a component.
      */
     private static String unescapeComponent(String component) {
-        return component.replace("\\:", ":").replace("\\\\", "\\");
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < component.length(); i++) {
+            char c = component.charAt(i);
+            if (c == '\\') {
+                if (i + 1 >= component.length()) {
+                    throw new IllegalArgumentException("Malformed escaped component: " + component);
+                }
+                result.append(component.charAt(++i));
+            } else {
+                result.append(c);
+            }
+        }
+        return result.toString();
     }
 
     // ─── Cache Key Helpers ────────────────────────────────────────────────────
@@ -124,7 +170,10 @@ public record MultipartUploadSession(
      * Escapes special characters in a component to prevent key collisions.
      */
     private static String escapeComponent(String component) {
-        return component.replace("\\", "\\\\").replace(":", "\\:");
+        return component
+                .replace("\\", "\\\\")
+                .replace(":", "\\:")
+                .replace(DELIMITER, "\\" + DELIMITER);
     }
 
     // ─── Convenience Factory ──────────────────────────────────────────────────
