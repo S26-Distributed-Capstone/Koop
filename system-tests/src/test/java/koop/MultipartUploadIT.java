@@ -1,4 +1,4 @@
-package com.github.koop.queryprocessor.processor;
+package koop;
 
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
@@ -10,6 +10,9 @@ import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpr
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.processor.MultipartUploadManager;
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
+import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
 import com.github.koop.storagenode.StorageNodeServer;
@@ -45,14 +48,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for multipart upload using real {@link StorageNodeServer} instances.
- *
- * <p>Spins up 9 real storage nodes (same pattern as {@code RealStorageNodesIT}) so that
- * the full erasure-coding path is exercised. Logic-only tests (duplicate part rejection,
- * missing part on complete, etc.) live in {@link MultipartUploadManagerTest} which uses
- * a mock {@code StorageWorker} and is faster to run.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class MultipartUploadIntegrationTest {
+public class MultipartUploadIT {
 
     private static final int TOTAL_NODES = 9;
 
@@ -79,8 +77,7 @@ class MultipartUploadIntegrationTest {
             StorageNodeServer server = new StorageNodeServer(port, dir);
             servers.add(server);
 
-            int nodeIdx = i;
-            Thread t = Thread.ofVirtual().start(() -> server.start());
+            Thread t = Thread.ofVirtual().start(server::start);
             serverThreads.add(t);
 
             InetSocketAddress addr = new InetSocketAddress("127.0.0.1", port);
@@ -126,11 +123,6 @@ class MultipartUploadIntegrationTest {
         worker.shutdown();
     }
 
-    // ── Tests ────────────────────────────────────────────────────────────────
-
-    /**
-     * Full happy-path: initiate → upload 2 parts → complete succeeds and part keys remain readable.
-     */
     @Test
     void fullLifecycle_initUploadComplete_thenGet() throws Exception {
         byte[] p1 = "hello ".getBytes(StandardCharsets.UTF_8);
@@ -161,9 +153,6 @@ class MultipartUploadIntegrationTest {
         }
     }
 
-    /**
-     * Abort: initiate → upload 1 part → abort → part key is no longer reconstructable.
-     */
     @Test
     void fullLifecycle_initUploadAbort_partsGone() throws Exception {
         byte[] payload = "temporary-part".getBytes(StandardCharsets.UTF_8);
@@ -177,8 +166,6 @@ class MultipartUploadIntegrationTest {
         MultipartUploadResult abort = manager.abortMultipartUpload("bucket", "mpu-obj-2", uploadId);
         assertEquals(MultipartUploadResult.Status.SUCCESS, abort.status());
 
-        // After abort the part shards are deleted; reading the part key should not
-        // return the original payload (erasure reconstruction will fail or return empty).
         byte[] got;
         try (InputStream in = worker.get(UUID.randomUUID(), "bucket", partStorageKey)) {
             got = in.readAllBytes();
@@ -190,9 +177,6 @@ class MultipartUploadIntegrationTest {
                 "aborted part should no longer be reconstructable");
     }
 
-    /**
-     * Erasure tolerance: complete succeeds and part shards remain reconstructable with 3 nodes down.
-     */
     @Test
     void complete_partialNodeFailure_stillSucceeds() throws Exception {
         byte[] p1 = new byte[2 * 1024 * 1024];
@@ -208,7 +192,6 @@ class MultipartUploadIntegrationTest {
         assertEquals(MultipartUploadResult.Status.SUCCESS, upload1.status());
         assertEquals(MultipartUploadResult.Status.SUCCESS, upload2.status());
 
-        // Stop 3 nodes — erasure coding (6 data + 3 parity) should still reconstruct.
         servers.get(0).stop();
         servers.get(1).stop();
         servers.get(2).stop();
@@ -234,7 +217,6 @@ class MultipartUploadIntegrationTest {
                 assertTrue(p2Read[0] == 'B', "part 2 first byte should be 'B'");
             }
         } finally {
-            // Restart the stopped nodes so teardown can proceed cleanly.
             for (int i = 0; i < 3; i++) {
                 int port = nodePorts.get(i);
                 Path dir = dataDirs.get(i);
@@ -252,8 +234,6 @@ class MultipartUploadIntegrationTest {
             }
         }
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static int freePort() throws IOException {
         try (ServerSocket ss = new ServerSocket(0)) {
