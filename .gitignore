@@ -3,3 +3,7 @@ target/
 .vscode/
 .idea/
 **/.settings/
+.roo/mcp.json
+plans/
+.roomodes
+docs/messy-everything-doc.md

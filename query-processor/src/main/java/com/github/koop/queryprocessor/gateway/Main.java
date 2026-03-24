@@ -13,6 +13,7 @@ import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.CompletedPart;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
 public class Main {
@@ -75,14 +76,16 @@ public class Main {
         return app;
     }
 
-    private static void verifyContentLength(Context ctx) {
+    private static boolean verifyContentLength(Context ctx) {
         long contentLength = ctx.contentLength();
         if(contentLength <= 0) {
             ctx.status(400);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InvalidRequest",
                     "Content-Length header is required and must be greater than 0.", ctx.path()));
+            return false;
         }
+        return true;
     }
 
     // ─── Health ───────────────────────────────────────────────────────────────
@@ -223,7 +226,13 @@ public class Main {
         try {
             if (uploadId != null) {
                 // ── AbortMultipartUpload ──
-                storage.abortMultipartUpload(bucket, key, uploadId);
+                MultipartUploadResult result = storage.abortMultipartUpload(bucket, key, uploadId);
+                if (!result.isSuccess()) {
+                    ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
+                    ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
+                    return;
+                }
                 ctx.status(204);
             } else {
                 // ── DeleteObject ──
@@ -257,14 +266,22 @@ public class Main {
         String partNumberStr = ctx.queryParam("partNumber");
         String resourcePath = "/" + bucket + "/" + key;
         long contentLength = ctx.contentLength();
-        verifyContentLength(ctx);
+        if (!verifyContentLength(ctx)) {
+            return;
+        }
         try {
             if (uploadId != null && partNumberStr != null) {
                 // ── UploadPart ──
                 int partNumber = Integer.parseInt(partNumberStr);
                 InputStream data = ctx.bodyInputStream();
 
-                storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
+                MultipartUploadResult result = storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
+                if (!result.isSuccess()) {
+                    ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
+                    ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
+                    return;
+                }
 
                 ctx.status(200);
                 //ctx.header("ETag", "\"" + etag + "\"");
@@ -319,10 +336,16 @@ public class Main {
                 // ── CompleteMultipartUpload ──
                 // Parse the XML body: <CompleteMultipartUpload><Part><PartNumber>N</PartNumber><ETag>...</ETag></Part>...</CompleteMultipartUpload>
                 List<CompletedPart> parts = parseCompletedPartsXml(ctx.body());
-                String etag = storage.completeMultipartUpload(bucket, key, uploadId, parts);
+                MultipartUploadResult result = storage.completeMultipartUpload(bucket, key, uploadId, parts);
+                if (!result.isSuccess()) {
+                    ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
+                    ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
+                    return;
+                }
                 ctx.status(200);
                 ctx.header("Content-Type", "application/xml");
-                ctx.result(buildCompleteMultipartUploadXml(bucket, key, etag));
+                ctx.result(buildCompleteMultipartUploadXml(bucket, key));
 
             } else {
                 ctx.status(400);
@@ -342,6 +365,38 @@ public class Main {
             ctx.result(buildS3ErrorXml("InternalError",
                     "We encountered an internal error. Please try again.", resourcePath));
         }
+    }
+
+    // ─── Multipart Error Helpers ──────────────────────────────────────────────
+
+    /**
+     * Maps a multipart operation status to the appropriate HTTP status code.
+     * <pre>
+     *   NOT_FOUND       → 404
+     *   CONFLICT        → 409
+     *   STORAGE_FAILURE → 500
+     * </pre>
+     */
+    private static int multipartHttpStatus(MultipartUploadResult.Status status) {
+        return switch (status) {
+            case SUCCESS -> 200;
+            case NOT_FOUND -> 404;
+            case CONFLICT -> 409;
+            case STORAGE_FAILURE -> 500;
+        };
+    }
+
+    /**
+     * Maps a multipart operation status to the S3 error code string used in
+     * the XML error response body.
+     */
+    private static String multipartS3ErrorCode(MultipartUploadResult.Status status) {
+        return switch (status) {
+            case SUCCESS -> "";
+            case NOT_FOUND -> "NoSuchUpload";
+            case CONFLICT -> "InvalidPart";
+            case STORAGE_FAILURE -> "InternalError";
+        };
     }
 
     // ─── Entry Point ─────────────────────────────────────────────────────────
@@ -394,13 +449,13 @@ public class Main {
                "</InitiateMultipartUploadResult>";
     }
 
-    private static String buildCompleteMultipartUploadXml(String bucket, String key, String etag) {
+    private static String buildCompleteMultipartUploadXml(String bucket, String key) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
                "  <Location>http://localhost:8080/" + bucket + "/" + key + "</Location>\n" +
                "  <Bucket>" + bucket + "</Bucket>\n" +
                "  <Key>" + key + "</Key>\n" +
-               "  <ETag>\"" + etag + "\"</ETag>\n" +
+               "  <ETag>\"\"</ETag>\n" +
                "</CompleteMultipartUploadResult>";
     }
 

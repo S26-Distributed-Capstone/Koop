@@ -4,7 +4,11 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.UUID;
 
+import com.github.koop.queryprocessor.processor.MultipartUploadManager;
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
+import com.github.koop.queryprocessor.processor.cache.CacheClient;
+import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 
 /**
  * StorageWorkerService acts as a bridge between the API Gateway and the StorageWorker.
@@ -17,6 +21,7 @@ import com.github.koop.queryprocessor.processor.StorageWorker;
 public class StorageWorkerService implements StorageService {
     
     private final StorageWorker storageWorker;
+    private final MultipartUploadManager multipartManager;
     
     /**
      * Initializes the StorageWorkerService with the configured StorageWorker.
@@ -26,6 +31,15 @@ public class StorageWorkerService implements StorageService {
      */
     public StorageWorkerService(StorageWorker storageWorker) {
         this.storageWorker = storageWorker;
+        this.multipartManager = new MultipartUploadManager(storageWorker, new MemoryCacheClient());
+    }
+
+    /**
+     * Constructor with injectable cache implementation for tests.
+     */
+    public StorageWorkerService(StorageWorker storageWorker, CacheClient cache) {
+        this.storageWorker = storageWorker;
+        this.multipartManager = new MultipartUploadManager(storageWorker, cache);
     }
     
     /**
@@ -38,6 +52,7 @@ public class StorageWorkerService implements StorageService {
         // Temporary: Create StorageWorker with null sets
         // This will need to be properly initialized with node addresses
         this.storageWorker = new StorageWorker(null, null, null);
+        this.multipartManager = new MultipartUploadManager(this.storageWorker, new MemoryCacheClient());
     }
 
     @Override
@@ -101,27 +116,23 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public String initiateMultipartUpload(String bucket, String key) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'initiateMultipartUpload'");
+        return multipartManager.initiateMultipartUpload(bucket, key);
     }
 
     @Override
-    public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
+    public MultipartUploadResult uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
             throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'uploadPart'");
+        return multipartManager.uploadPart(bucket, key, uploadId, partNumber, data, length);
     }
 
     @Override
-    public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
+    public MultipartUploadResult completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
             throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'completeMultipartUpload'");
+        return multipartManager.completeMultipartUpload(bucket, key, uploadId, parts);
     }
 
     @Override
-    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'abortMultipartUpload'");
+    public MultipartUploadResult abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+        return multipartManager.abortMultipartUpload(bucket, key, uploadId);
     }
 }

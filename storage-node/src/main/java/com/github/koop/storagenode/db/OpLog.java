@@ -6,11 +6,11 @@ import java.nio.charset.StandardCharsets;
 public record OpLog(
         long seqNum,
         String key,
-        String operation) {
+        Operation operation) {
 
     public byte[] serialize() {
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        byte[] opBytes = operation.getBytes(StandardCharsets.UTF_8);
+        byte[] opBytes = operation.name().getBytes(StandardCharsets.UTF_8);
 
         int totalLen = Long.BYTES + 4 + keyBytes.length + 4 + opBytes.length;
         ByteBuffer buf = ByteBuffer.allocate(totalLen);
@@ -26,7 +26,7 @@ public record OpLog(
         String key = readString(buf);
         String operation = readString(buf);
 
-        return new OpLog(seqNum, key, operation);
+        return new OpLog(seqNum, key, Operation.fromString(operation));
     }
 
     private static void writeString(ByteBuffer buffer, byte[] bytes) {
