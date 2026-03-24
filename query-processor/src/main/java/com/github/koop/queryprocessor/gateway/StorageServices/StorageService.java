@@ -1,5 +1,7 @@
 package com.github.koop.queryprocessor.gateway.StorageServices;
 
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
+
 import java.io.InputStream;
 import java.util.List;
 
@@ -40,27 +42,21 @@ public interface StorageService {
 
     /**
      * Uploads a single part of an in-progress multipart upload.
-     *
-     * @return the ETag for this part (will be sent back to the client and must
-     *         be echoed in the CompleteMultipartUpload call).
      */
-    String uploadPart(String bucket, String key, String uploadId,
-                      int partNumber, InputStream data, long length) throws Exception;
+    MultipartUploadResult uploadPart(String bucket, String key, String uploadId,
+                                     int partNumber, InputStream data, long length) throws Exception;
 
     /**
      * Finalizes a multipart upload.
-     * The caller supplies the ordered list of (partNumber, ETag) pairs exactly
-     * as returned by {@link #uploadPart}.
-     *
-     * @return the final ETag of the assembled object.
+     * The caller supplies the ordered list of part numbers.
      */
-    String completeMultipartUpload(String bucket, String key, String uploadId,
-                                   List<CompletedPart> parts) throws Exception;
+    MultipartUploadResult completeMultipartUpload(String bucket, String key, String uploadId,
+                                                  List<CompletedPart> parts) throws Exception;
 
     /**
      * Aborts a multipart upload and discards any already-uploaded parts.
      */
-    void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception;
+    MultipartUploadResult abortMultipartUpload(String bucket, String key, String uploadId) throws Exception;
 
     // ─── Value types ─────────────────────────────────────────────────────────
 
