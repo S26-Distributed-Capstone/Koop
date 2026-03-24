@@ -35,13 +35,17 @@ class RocksDbStorageStrategyTest {
 
     @Test
     void testAddLogAndGetLogsRange() throws Exception {
+        int partition = 1;
         for (long i = 1; i <= 5; i++) {
-            strategy.addLog(new OpLog(i, "file_" + i, Operation.PUT));
+            strategy.addLog(new OpLog(partition, i, "file_" + i, Operation.PUT));
         }
-        try (Stream<OpLog> stream = strategy.getLogs(2L, 4L)) {
+        
+        // Iterating backwards from 4L down to 2L
+        try (Stream<OpLog> stream = strategy.getLogs(partition, 4L, 2L)) {
             List<OpLog> logs = stream.collect(Collectors.toList());
             assertEquals(3, logs.size());
             assertEquals(4L, logs.get(0).seqNum());
+            assertEquals(3L, logs.get(1).seqNum());
             assertEquals(2L, logs.get(2).seqNum());
         }
     }
@@ -107,15 +111,17 @@ class RocksDbStorageStrategyTest {
     @Test
     void testAtomicallyUpdateLogAndMetadata() throws Exception {
         long seq = 42L;
+        int partition = 2;
         String key = "atomic.txt";
+        
         strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(seq, key, Operation.DELETE),
-                new Metadata(key, 2, List.of(new TombstoneFileVersion(seq))));
+                new OpLog(partition, seq, key, Operation.DELETE),
+                new Metadata(key, partition, List.of(new TombstoneFileVersion(seq))));
 
         assertInstanceOf(TombstoneFileVersion.class,
                 strategy.getMetadata(key).orElseThrow().versions().get(0));
 
-        try (Stream<OpLog> s = strategy.getLogs(seq, seq)) {
+        try (Stream<OpLog> s = strategy.getLogs(partition, seq, seq)) {
             assertEquals(Operation.DELETE, s.findFirst().orElseThrow().operation());
         }
     }
@@ -145,7 +151,7 @@ class RocksDbStorageStrategyTest {
     @Test
     void testCreateAndCheckBucketExists() throws Exception {
         strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(5L, "animals", Operation.CREATE_BUCKET),
+                new OpLog(1, 5L, "animals", Operation.CREATE_BUCKET),
                 new Bucket("animals", 1, 5L, false));
 
         var bucket = strategy.getBucket("animals").orElseThrow();
@@ -156,10 +162,10 @@ class RocksDbStorageStrategyTest {
     @Test
     void testDeleteBucketTombstone() throws Exception {
         strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(5L, "animals", Operation.CREATE_BUCKET),
+                new OpLog(1, 5L, "animals", Operation.CREATE_BUCKET),
                 new Bucket("animals", 1, 5L, false));
         strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(10L, "animals", Operation.DELETE_BUCKET),
+                new OpLog(1, 10L, "animals", Operation.DELETE_BUCKET),
                 new Bucket("animals", 1, 10L, true));
 
         assertTrue(strategy.getBucket("animals").orElseThrow().deleted());
