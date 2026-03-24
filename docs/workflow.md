@@ -1,6 +1,6 @@
 # Workflow Diagrams
 
-This document displays workflow diagrams for each supported use case in the Koop distributed object store. Koop exposes an S3-compatible API; all operations flow through the **Query Processor (QP)** gateway before being fanned out to **Storage Nodes (SN)** via erasure-coded shards.
+This document displays the **planned target-state** workflow diagrams for each supported use case in the Koop distributed object store. Koop exposes an S3-compatible API; all operations flow through the **Query Processor (QP)** gateway before being fanned out to **Storage Nodes (SN)** via erasure-coded shards.
 
 > **Related documents:**
 > - [Scope](scope.md) — supported use cases and error cases
@@ -29,7 +29,7 @@ This document displays workflow diagrams for each supported use case in the Koop
 
 ## System Component Overview
 
-The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Kafka (pub/sub) is used for multipart commit sequencing and is the planned sequencer for write/delete ordering. Redis (or an in-memory [`MemoryCacheClient`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java) in dev/test) is used by the Query Processor for multipart upload session tracking. Each storage node persists shard data to disk via [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java) backed by [`StorageNode`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java). The [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java) + [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) (RocksDB) layer is implemented and tested but not yet wired into the live server.
+The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Kafka (pub/sub) provides per-partition sequencing for write/delete and multipart commit ordering. Redis (or an in-memory [`MemoryCacheClient`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java) in dev/test) is used by the Query Processor for multipart upload session tracking. Storage nodes persist shard data to disk and maintain operation metadata in RocksDB through [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java), [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java), and [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java).
 
 ![System Container Overview](diagrams/Containers.svg)
 
@@ -39,27 +39,31 @@ The following diagram shows the high-level components involved in every workflow
 
 **Route:** `PUT /{bucket}/{key}`
 
-The QP erasure-encodes the object into 9 shards and streams them concurrently to all storage nodes via HTTP. Each storage node writes the shard to disk under `partition_{partition}/{key}/{requestId}` and atomically updates the `current` version pointer. A write quorum of ≥ 6 out of 9 nodes must acknowledge before the client receives a response.
-
-> **Implementation note:** Kafka-based sequencing for PUT is designed and planned (see `messy-everything-doc.md`). In the current codebase, [`StorageWorker.put()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java:106) streams shards directly to storage nodes and returns after quorum ACKs. The [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java) uses [`StorageNode.store()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java:122) (disk-only, no RocksDB).
+The QP erasure-encodes the object into 9 shards and streams them concurrently to all storage nodes via HTTP. After shard upload quorum is reached, the QP publishes an ordered PUT commit through Kafka. Storage nodes apply the sequenced commit by atomically writing OpLog + Metadata updates in RocksDB. The client is acknowledged only after write-quorum commit ACKs are received.
 
 ```mermaid
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
+    participant Kafka as Kafka / PubSub (Sequencer)
     participant SN as Storage Nodes (×9)
-    participant Disk as Disk (each SN)
+    participant RDB as RocksDB (each SN)
 
     C->>QP: PUT /{bucket}/{key} [data]
     QP->>QP: Erasure-encode → 9 shards
     par Stream shards concurrently
         QP->>SN: PUT /store/{partition}/{storageKey}?requestId=X [shard i]
-        SN->>Disk: Write shard to partition_{p}/{key}/{requestId}
-        SN->>Disk: Atomic move → update "current" version pointer
-        Disk-->>SN: OK
+        SN-->>QP: 200 shard received
+    end
+    Note over QP: Wait for shard upload quorum (≥6)
+    QP->>Kafka: Publish ordered PUT commit message
+    Kafka->>SN: Deliver sequenced PUT for this partition
+    par Apply commit on nodes
+        SN->>RDB: Atomic write OpLog + Metadata
+        RDB-->>SN: OK
         SN-->>QP: 200 ACK
     end
-    Note over QP: Wait for ≥6 ACKs (write quorum = K)
+    Note over QP: Wait for write-quorum commit ACKs (≥6)
     QP-->>C: 200 OK
 ```
 
@@ -128,28 +132,28 @@ flowchart TD
 
 **Route:** `DELETE /{bucket}/{key}`
 
-The QP sends DELETE requests concurrently to all 9 storage nodes via HTTP. Each storage node performs a logical delete by atomically removing the `current` version pointer file; physical shard data is cleaned up asynchronously by a background virtual thread.
-
-> **Implementation note:** Kafka-based sequencing for DELETE is designed and planned. In the current codebase, [`StorageWorker.delete()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java:212) sends HTTP DELETE directly to all nodes and requires **all** nodes to ACK (not just a quorum). [`StorageNode.delete()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java:187) performs a logical delete (removes the version tracking file); physical file removal is async.
+DELETE is sequenced through Kafka to guarantee per-partition ordering with PUT. Storage nodes apply a tombstone commit in RocksDB (OpLog + Metadata) and acknowledge once durable. Physical shard cleanup remains asynchronous garbage collection.
 
 ```mermaid
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
+    participant Kafka as Kafka / PubSub (Sequencer)
     participant SN as Storage Nodes (×9)
-    participant Disk as Disk (each SN)
+    participant RDB as RocksDB (each SN)
 
     C->>QP: DELETE /{bucket}/{key}
-    par Send DELETE concurrently to all nodes
-        QP->>SN: DELETE /store/{partition}/{storageKey}
-        SN->>Disk: Remove "current" version pointer (logical delete)
-        Disk-->>SN: OK
+    QP->>Kafka: Publish ordered DELETE commit message
+    Kafka->>SN: Deliver sequenced DELETE for this partition
+    par Apply tombstone commit on nodes
+        SN->>RDB: Atomic write tombstone in Metadata + OpLog
+        RDB-->>SN: OK
         SN-->>QP: 200 ACK
     end
-    Note over QP: Requires all nodes to ACK
+    Note over QP: Wait for write quorum ACKs (≥6)
     QP-->>C: 204 No Content
 
-    Note over SN: Physical shard file deletion is async (background virtual thread)
+    Note over SN: Physical shard file deletion is async (gossip/background GC)
 ```
 
 ---
@@ -158,9 +162,7 @@ sequenceDiagram
 
 **Route:** `PUT /{bucket}`
 
-> **Not yet implemented.** [`StorageWorkerService.createBucket()`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/StorageServices/StorageWorkerService.java:94) currently throws `UnsupportedOperationException`, returning `501 Not Implemented` to the client.
-
-The planned flow: bucket creation is sequenced through Kafka/pub/sub. Storage nodes store the bucket record in their RocksDB bucket table (via [`Database.createBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java:81) and [`StorageNodeV2.createBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java:248)). A write quorum must acknowledge before the client is notified.
+Bucket creation is sequenced through Kafka/pub/sub. Storage nodes store the bucket record in their RocksDB bucket table (via [`Database.createBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java:81) and [`StorageNodeV2.createBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java:248)). A write quorum must acknowledge before the client is notified.
 
 ```mermaid
 sequenceDiagram
@@ -190,9 +192,7 @@ sequenceDiagram
 
 **Route:** `DELETE /{bucket}`
 
-> **Not yet implemented.** [`StorageWorkerService.deleteBucket()`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/StorageServices/StorageWorkerService.java:100) currently throws `UnsupportedOperationException`, returning `501 Not Implemented` to the client.
-
-The planned flow: bucket deletion publishes a `DeleteBucketMessage` via pub/sub. Storage nodes write a tombstone to the RocksDB bucket table (via [`Database.deleteBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java:91)). The bucket record is logically deleted; any remaining objects in the bucket are not immediately purged.
+Bucket deletion publishes a `DeleteBucketMessage` via pub/sub. Storage nodes write a tombstone to the RocksDB bucket table (via [`Database.deleteBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java:91)). The bucket record is logically deleted; any remaining objects in the bucket are not immediately purged.
 
 ```mermaid
 sequenceDiagram
@@ -216,9 +216,7 @@ sequenceDiagram
 
 **Route:** `HEAD /{bucket}`
 
-> **Not yet implemented.** [`StorageWorkerService.bucketExists()`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/StorageServices/StorageWorkerService.java:112) currently throws `UnsupportedOperationException`, returning `501 Not Implemented` to the client.
-
-The planned flow: a lightweight existence check. The QP queries the bucket table on storage nodes and returns 200 if the bucket exists, 404 if not.
+A lightweight existence check. The QP queries the bucket table on storage nodes and returns 200 if the bucket exists, 404 if not.
 
 ```mermaid
 sequenceDiagram
@@ -245,9 +243,7 @@ sequenceDiagram
 
 **Route:** `GET /{bucket}?prefix=...&max-keys=...`
 
-> **Not yet implemented.** [`StorageWorkerService.listObjects()`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/StorageServices/StorageWorkerService.java:106) currently throws `UnsupportedOperationException`, returning `501 Not Implemented` to the client.
-
-The planned flow: the QP streams metadata from all storage nodes using a prefix range scan on the RocksDB metadata table. Because objects in the same bucket may be spread across different erasure sets (based on key hashing), all nodes must be queried. Conflicting versions are resolved using the same read-quorum semantics as GET Object.
+The QP streams metadata from all storage nodes using a prefix range scan on the RocksDB metadata table. Because objects in the same bucket may be spread across different erasure sets (based on key hashing), all nodes must be queried. Conflicting versions are resolved using the same read-quorum semantics as GET Object.
 
 See [`Database.listItemsInBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java:111) and [`StorageNodeV2.listItemsInBucket()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java:295).
 
@@ -377,9 +373,7 @@ sequenceDiagram
 
 **Route:** `DELETE /{bucket}/{key}?uploadId=X`
 
-The session is marked as `ABORTING`. Part shards are then deleted from storage nodes synchronously (best-effort per part), and the cache session is cleaned up. The client receives `204 No Content` after all cleanup completes.
-
-> **Pending team decision:** Whether part deletion should remain synchronous (current behavior — client waits for all shard deletes) or be deferred/async (ACK immediately, clean up in background). See [`MultipartUploadManager.abortMultipartUpload()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/MultipartUploadManager.java:197) and the TODO comment therein.
+The session is marked as `ABORTING`. The client is ACKed immediately (`204 No Content`), and part-shard deletion continues asynchronously in the background (best-effort per part). Cache state is cleaned up once abort processing finishes.
 
 ```mermaid
 sequenceDiagram
@@ -395,22 +389,21 @@ sequenceDiagram
         QP-->>C: 204 No Content (graceful no-op)
     end
     QP->>Cache: Mark mpu:session:{uploadId} status=ABORTING
+    QP-->>C: 204 No Content
     QP->>Cache: Read mpu:parts:{uploadId}
-    loop For each uploaded part (synchronous, best-effort)
+    loop For each uploaded part (asynchronous, best-effort)
         QP->>SW: delete(requestId, bucket, partStorageKey)
         SW->>SN: DELETE /store/{partition}/{storageKey}
         SN-->>SW: ACK (errors ignored, cleanup continues)
         QP->>Cache: Delete part size entry for this part
     end
     QP->>Cache: Remove mpu:session:{uploadId} + mpu:parts:{uploadId}
-    QP-->>C: 204 No Content
+    Note over QP: Background cleanup job completes independently
 ```
 
 ---
 
 ## 12. Storage Node Repair Flow
-
-> **Not yet implemented.** This flow relies on the RocksDB-based `StorageNodeV2` which is not yet wired into the live server. The current `StorageNode` implementation does not support repair.
 
 When a storage node comes back online after missing operations, it detects the gap by comparing the sequence number it last processed against the sequence number of the next incoming operation. It enters repair mode, broadcasts to peer nodes for the missed operations, and replays them — skipping any keys that have already been updated since the node came back online.
 
@@ -435,8 +428,6 @@ flowchart TD
 ---
 
 ## 13. Gossip-Based Garbage Collection
-
-> **Not yet implemented.** This flow relies on the RocksDB-based `StorageNodeV2` which is not yet wired into the live server. The current `StorageNode` implementation uses a simple background thread to delete replaced versions immediately (best-effort).
 
 Storage nodes periodically gossip their current sequence number (and the lowest sequence number of any active GET in flight). Any shard data associated with a sequence number below the global minimum is safe to physically delete from disk.
 
@@ -466,7 +457,7 @@ sequenceDiagram
 
 ## RocksDB Table Reference
 
-The [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) facade and [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java) define three RocksDB tables written atomically on every PUT/DELETE/bucket operation. This layer is fully implemented and tested but is not yet wired into the live [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java) (which currently uses [`StorageNode`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java), disk-only).
+The [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) facade and [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java) define three RocksDB tables written atomically on every PUT/DELETE/bucket operation in the planned flow.
 
 | Table | Key | Value | Purpose |
 |---|---|---|---|
