@@ -25,6 +25,7 @@ KoopDB leverages a modern Java stack focused on high-performance concurrency and
 ### Distributed Coordination
 - **Etcd (via Jetcd):** Distributed key-value store for shared configuration and service discovery.
 - **Redis (via Lettuce/Jedis):** In-memory data structures for caching multipart upload state and sequencing.
+- **Kafka:** for durable message delivery AND consensus on "last write" 
 
 ### Testing & Verification
 - **JUnit 5:** Unit and integration testing.
