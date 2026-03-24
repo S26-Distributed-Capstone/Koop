@@ -1,13 +1,13 @@
 # API Reference
 
-KoopDB exposes a subset of the Amazon S3 API. All requests are authenticated anonymously for now (no signature verification).
+KoopDB exposes a subset of the Amazon S3 API. All requests are authenticated anonymously for now (no signature verification). Use the normal S3 API to interact
 
 ## Base URL
 The API is available via the Query Processor services, typically exposed on ports `9001-9003` in a default Docker Compose setup.
 
 `http://<host>:9001`
 
-## Supported Operations
+## Supported Operations (Exactly the same as S3 API)
 
 ### General System
 | Method | Path | Description |
