@@ -6,6 +6,7 @@ import com.github.koop.queryprocessor.processor.cache.CacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
 
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -160,7 +161,11 @@ public class MultipartUploadManager {
         }
         
         Message manifestMessage = new Message.MultipartCommitMessage(
-                sessionBucket, sessionKey, uploadId, null, partNumberStrings);
+            sessionBucket,
+            sessionKey,
+            uploadId,
+            new InetSocketAddress("127.0.0.1", 0),
+            partNumberStrings);
         
         boolean published;
         try {

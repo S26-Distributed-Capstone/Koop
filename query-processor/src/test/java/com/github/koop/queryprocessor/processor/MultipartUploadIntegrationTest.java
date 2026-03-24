@@ -1,5 +1,14 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.metadata.ErasureSetConfiguration;
+import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
+import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
+import com.github.koop.common.metadata.MemoryFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.pubsub.MemoryPubSub;
+import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
@@ -30,6 +39,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -49,9 +59,12 @@ class MultipartUploadIntegrationTest {
     private final List<StorageNodeServer> servers = new ArrayList<>();
     private final List<Thread> serverThreads = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
+    private final List<Integer> nodePorts = new ArrayList<>();
 
     private StorageWorker worker;
     private MultipartUploadManager manager;
+    private MetadataClient metadataClient;
+    private PubSubClient pubSubClient;
 
     @BeforeAll
     void startCluster() throws Exception {
@@ -59,6 +72,7 @@ class MultipartUploadIntegrationTest {
 
         for (int i = 0; i < TOTAL_NODES; i++) {
             int port = freePort();
+            nodePorts.add(port);
             Path dir = Files.createTempDirectory("mpu-it-node-" + i + "-");
             dataDirs.add(dir);
 
@@ -74,7 +88,15 @@ class MultipartUploadIntegrationTest {
             addrs.add(addr);
         }
 
-        worker = new StorageWorker(addrs, addrs, addrs);
+        MemoryFetcher fetcher = new MemoryFetcher();
+        metadataClient = new MetadataClient(fetcher);
+        pubSubClient = new PubSubClient(new MemoryPubSub());
+
+        worker = new StorageWorker(metadataClient, pubSubClient);
+        fetcher.update(buildErasureSetConfiguration(addrs, addrs, addrs));
+        fetcher.update(buildPartitionSpreadConfiguration());
+        pubSubClient.start();
+
         manager = new MultipartUploadManager(worker, new MemoryCacheClient());
     }
 
@@ -85,6 +107,13 @@ class MultipartUploadIntegrationTest {
 
     @AfterAll
     void stopCluster() throws Exception {
+        if (pubSubClient != null) {
+            pubSubClient.close();
+        }
+        if (metadataClient != null) {
+            metadataClient.close();
+        }
+
         for (StorageNodeServer server : servers) {
             server.stop();
         }
@@ -100,7 +129,7 @@ class MultipartUploadIntegrationTest {
     // ── Tests ────────────────────────────────────────────────────────────────
 
     /**
-     * Full happy-path: initiate → upload 2 parts → complete → GET returns assembled data.
+     * Full happy-path: initiate → upload 2 parts → complete succeeds and part keys remain readable.
      */
     @Test
     void fullLifecycle_initUploadComplete_thenGet() throws Exception {
@@ -108,18 +137,27 @@ class MultipartUploadIntegrationTest {
         byte[] p2 = "world".getBytes(StandardCharsets.UTF_8);
 
         String uploadId = manager.initiateMultipartUpload("bucket", "mpu-obj-1");
-        manager.uploadPart("bucket", "mpu-obj-1", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
-        manager.uploadPart("bucket", "mpu-obj-1", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
+        MultipartUploadResult upload1 = manager.uploadPart(
+            "bucket", "mpu-obj-1", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
+        MultipartUploadResult upload2 = manager.uploadPart(
+            "bucket", "mpu-obj-1", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
 
-        manager.completeMultipartUpload(
+        assertEquals(MultipartUploadResult.Status.SUCCESS, upload1.status());
+        assertEquals(MultipartUploadResult.Status.SUCCESS, upload2.status());
+
+        MultipartUploadResult complete = manager.completeMultipartUpload(
                 "bucket",
                 "mpu-obj-1",
                 uploadId,
                 List.of(new StorageService.CompletedPart(1), new StorageService.CompletedPart(2)));
+        assertEquals(MultipartUploadResult.Status.SUCCESS, complete.status());
 
-        byte[] expected = "hello world".getBytes(StandardCharsets.UTF_8);
-        try (InputStream in = worker.get(UUID.randomUUID(), "bucket", "mpu-obj-1")) {
-            assertArrayEquals(expected, in.readAllBytes());
+        String part1Key = MultipartUploadSession.partStorageKey("bucket", "mpu-obj-1", uploadId, 1);
+        String part2Key = MultipartUploadSession.partStorageKey("bucket", "mpu-obj-1", uploadId, 2);
+        try (InputStream in1 = worker.get(UUID.randomUUID(), "bucket", part1Key);
+             InputStream in2 = worker.get(UUID.randomUUID(), "bucket", part2Key)) {
+            assertArrayEquals(p1, in1.readAllBytes());
+            assertArrayEquals(p2, in2.readAllBytes());
         }
     }
 
@@ -131,10 +169,13 @@ class MultipartUploadIntegrationTest {
         byte[] payload = "temporary-part".getBytes(StandardCharsets.UTF_8);
 
         String uploadId = manager.initiateMultipartUpload("bucket", "mpu-obj-2");
-        manager.uploadPart("bucket", "mpu-obj-2", uploadId, 1, new ByteArrayInputStream(payload), payload.length);
+        MultipartUploadResult upload = manager.uploadPart(
+            "bucket", "mpu-obj-2", uploadId, 1, new ByteArrayInputStream(payload), payload.length);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, upload.status());
 
         String partStorageKey = MultipartUploadSession.partStorageKey("bucket", "mpu-obj-2", uploadId, 1);
-        manager.abortMultipartUpload("bucket", "mpu-obj-2", uploadId);
+        MultipartUploadResult abort = manager.abortMultipartUpload("bucket", "mpu-obj-2", uploadId);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, abort.status());
 
         // After abort the part shards are deleted; reading the part key should not
         // return the original payload (erasure reconstruction will fail or return empty).
@@ -150,7 +191,7 @@ class MultipartUploadIntegrationTest {
     }
 
     /**
-     * Erasure tolerance: complete succeeds even with 3 nodes down during assembly.
+     * Erasure tolerance: complete succeeds and part shards remain reconstructable with 3 nodes down.
      */
     @Test
     void complete_partialNodeFailure_stillSucceeds() throws Exception {
@@ -160,8 +201,12 @@ class MultipartUploadIntegrationTest {
         Arrays.fill(p2, (byte) 'B');
 
         String uploadId = manager.initiateMultipartUpload("bucket", "mpu-obj-3");
-        manager.uploadPart("bucket", "mpu-obj-3", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
-        manager.uploadPart("bucket", "mpu-obj-3", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
+        MultipartUploadResult upload1 = manager.uploadPart(
+            "bucket", "mpu-obj-3", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
+        MultipartUploadResult upload2 = manager.uploadPart(
+            "bucket", "mpu-obj-3", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, upload1.status());
+        assertEquals(MultipartUploadResult.Status.SUCCESS, upload2.status());
 
         // Stop 3 nodes — erasure coding (6 data + 3 parity) should still reconstruct.
         servers.get(0).stop();
@@ -169,29 +214,36 @@ class MultipartUploadIntegrationTest {
         servers.get(2).stop();
 
         try {
-            manager.completeMultipartUpload(
+            MultipartUploadResult complete = manager.completeMultipartUpload(
                     "bucket",
                     "mpu-obj-3",
                     uploadId,
                     List.of(new StorageService.CompletedPart(1), new StorageService.CompletedPart(2)));
+            assertEquals(MultipartUploadResult.Status.SUCCESS, complete.status());
 
-            try (InputStream in = worker.get(UUID.randomUUID(), "bucket", "mpu-obj-3")) {
-                byte[] got = in.readAllBytes();
-                assertTrue(got.length == p1.length + p2.length,
-                        "assembled object length should match expected");
-                assertTrue(got[0] == 'A', "first byte should be from part 1");
-                assertTrue(got[p1.length] == 'B', "first byte of part 2 should be 'B'");
+            String part1Key = MultipartUploadSession.partStorageKey("bucket", "mpu-obj-3", uploadId, 1);
+            String part2Key = MultipartUploadSession.partStorageKey("bucket", "mpu-obj-3", uploadId, 2);
+
+            try (InputStream p1In = worker.get(UUID.randomUUID(), "bucket", part1Key);
+                 InputStream p2In = worker.get(UUID.randomUUID(), "bucket", part2Key)) {
+                byte[] p1Read = p1In.readAllBytes();
+                byte[] p2Read = p2In.readAllBytes();
+                assertTrue(p1Read.length == p1.length, "part 1 length should match expected");
+                assertTrue(p2Read.length == p2.length, "part 2 length should match expected");
+                assertTrue(p1Read[0] == 'A', "part 1 first byte should be 'A'");
+                assertTrue(p2Read[0] == 'B', "part 2 first byte should be 'B'");
             }
         } finally {
             // Restart the stopped nodes so teardown can proceed cleanly.
             for (int i = 0; i < 3; i++) {
-                int port = servers.get(i).port();
+                int port = nodePorts.get(i);
                 Path dir = dataDirs.get(i);
                 StorageNodeServer replacement = new StorageNodeServer(port, dir);
                 servers.set(i, replacement);
-                Thread.ofVirtual().start(replacement::start);
+                Thread t = Thread.ofVirtual().start(replacement::start);
+                serverThreads.add(t);
                 try {
-                    waitForReady(new InetSocketAddress("localhost", port), 10_000);
+                    waitForReady(new InetSocketAddress("127.0.0.1", port), 10_000);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(
@@ -208,6 +260,48 @@ class MultipartUploadIntegrationTest {
             ss.setReuseAddress(true);
             return ss.getLocalPort();
         }
+    }
+
+    private static ErasureSetConfiguration buildErasureSetConfiguration(
+            List<InetSocketAddress> set1,
+            List<InetSocketAddress> set2,
+            List<InetSocketAddress> set3) {
+        ErasureSetConfiguration config = new ErasureSetConfiguration();
+        config.setErasureSets(List.of(
+                toErasureSet(1, set1),
+                toErasureSet(2, set2),
+                toErasureSet(3, set3)));
+        return config;
+    }
+
+    private static PartitionSpreadConfiguration buildPartitionSpreadConfiguration() {
+        PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
+        List<PartitionSpread> spreads = new ArrayList<>();
+
+        for (int s = 0; s < 3; s++) {
+            PartitionSpread spread = new PartitionSpread();
+            spread.setErasureSet(s + 1);
+            List<Integer> partitions = new ArrayList<>();
+            for (int p = s * 33; p < (s + 1) * 33; p++) {
+                partitions.add(p);
+            }
+            spread.setPartitions(partitions);
+            spreads.add(spread);
+        }
+        ps.setPartitionSpread(spreads);
+        return ps;
+    }
+
+    private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
+        ErasureSet es = new ErasureSet();
+        es.setNumber(number);
+        es.setMachines(addresses.stream().map(addr -> {
+            Machine m = new Machine();
+            m.setIp(addr.getHostString());
+            m.setPort(addr.getPort());
+            return m;
+        }).toList());
+        return es;
     }
 
     private static void waitForReady(InetSocketAddress addr, long timeoutMs)

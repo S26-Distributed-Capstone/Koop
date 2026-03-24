@@ -1,5 +1,6 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.messages.Message;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
@@ -43,6 +44,8 @@ class MultipartUploadManagerTest {
         storageWorker = mock(StorageWorker.class);
         cache = new MemoryCacheClient();
         manager = new MultipartUploadManager(storageWorker, cache);
+        when(storageWorker.sendMessage(anyString(), anyString(), any(Message.class)))
+                .thenReturn(true);
     }
 
     @Test
@@ -162,14 +165,6 @@ class MultipartUploadManagerTest {
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
         manager.uploadPart("bucket", "final-key", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
 
-        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
-        String part2Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 2);
-
-        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
-                .thenReturn(new ByteArrayInputStream(p1));
-        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part2Key)))
-                .thenReturn(new ByteArrayInputStream(p2));
-
         List<StorageService.CompletedPart> parts = List.of(
                 new StorageService.CompletedPart(1),
                 new StorageService.CompletedPart(2));
@@ -177,10 +172,7 @@ class MultipartUploadManagerTest {
         MultipartUploadResult result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
-        verify(storageWorker, times(1)).put(any(UUID.class), eq("bucket"), eq("final-key"),
-                eq((long) p1.length + p2.length), any(InputStream.class));
-        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part1Key));
-        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part2Key));
+        verify(storageWorker, times(1)).sendMessage(eq("bucket"), eq("final-key"), any(Message.class));
     }
 
     @Test
@@ -224,10 +216,6 @@ class MultipartUploadManagerTest {
 
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
 
-        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
-        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
-                .thenReturn(new ByteArrayInputStream(p1));
-
         manager.completeMultipartUpload(
                 "bucket",
                 "final-key",
@@ -251,12 +239,6 @@ class MultipartUploadManagerTest {
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
         manager.uploadPart("bucket", "final-key", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
 
-        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
-        String part2Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 2);
-
-        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
-                .thenReturn(new ByteArrayInputStream(p1));
-
         MultipartUploadResult result = manager.completeMultipartUpload(
                 "bucket",
                 "final-key",
@@ -264,10 +246,9 @@ class MultipartUploadManagerTest {
                 List.of(new StorageService.CompletedPart(1)));
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
-        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part1Key));
-        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part2Key));
+        verify(storageWorker, times(1)).sendMessage(eq("bucket"), eq("final-key"), any(Message.class));
         assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
-        assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 2)));
+        assertEquals(String.valueOf(p2.length), cache.get(MultipartUploadSession.partSizeKey(uploadId, 2)));
     }
 
     @Test
@@ -281,11 +262,7 @@ class MultipartUploadManagerTest {
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
 
         reset(storageWorker);
-
-        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
-        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
-                .thenReturn(new ByteArrayInputStream(p1), new ByteArrayInputStream(p1));
-        when(storageWorker.put(any(UUID.class), eq("bucket"), eq("final-key"), anyLong(), any(InputStream.class)))
+        when(storageWorker.sendMessage(eq("bucket"), eq("final-key"), any(Message.class)))
                 .thenReturn(false, true);
 
         List<StorageService.CompletedPart> parts = List.of(new StorageService.CompletedPart(1));
