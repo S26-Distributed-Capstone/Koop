@@ -190,6 +190,13 @@ class MultipartUploadIntegrationTest {
                 StorageNodeServer replacement = new StorageNodeServer(port, dir);
                 servers.set(i, replacement);
                 Thread.ofVirtual().start(replacement::start);
+                try {
+                    waitForReady(new InetSocketAddress("localhost", port), 10_000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted while waiting for restarted storage node to become ready on port " + port, e);
+                }
             }
         }
     }
