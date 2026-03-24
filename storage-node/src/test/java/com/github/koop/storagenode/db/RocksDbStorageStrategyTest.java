@@ -50,6 +50,28 @@ class RocksDbStorageStrategyTest {
         }
     }
 
+    @Test
+    void testGetLogsAcrossMultiplePartitions() throws Exception {
+        strategy.addLog(new OpLog(1, 1L, "file_a", Operation.PUT));
+        strategy.addLog(new OpLog(2, 1L, "file_b", Operation.PUT));
+        strategy.addLog(new OpLog(1, 2L, "file_c", Operation.PUT));
+        strategy.addLog(new OpLog(2, 2L, "file_d", Operation.PUT));
+
+        try (Stream<OpLog> stream = strategy.getLogs(1, 2L, 1L)) {
+            List<OpLog> logs = stream.collect(Collectors.toList());
+            assertEquals(2, logs.size());
+            assertEquals("file_c", logs.get(0).key());
+            assertEquals("file_a", logs.get(1).key());
+        }
+
+        try (Stream<OpLog> stream = strategy.getLogs(2, 2L, 1L)) {
+            List<OpLog> logs = stream.collect(Collectors.toList());
+            assertEquals(2, logs.size());
+            assertEquals("file_d", logs.get(0).key());
+            assertEquals("file_b", logs.get(1).key());
+        }
+    }
+
     // =========================================================================
     // Table #2 — Metadata with all three FileVersion types
     // =========================================================================
