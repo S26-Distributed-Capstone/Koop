@@ -2,6 +2,7 @@ package com.github.koop.queryprocessor.gateway;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import io.javalin.Javalin;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -582,7 +583,7 @@ class S3Test {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return ""; // No ETag returned by StorageService
+                        return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
                 eq(1), any(), anyLong());
 
@@ -607,7 +608,7 @@ class S3Test {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return ""; 
+                        return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(anyString(), anyString(), anyString(), anyInt(), any(), anyLong());
 
         s3.uploadPart(
@@ -628,7 +629,7 @@ class S3Test {
     @Order(30)
     void sdkCompleteMultipartUpload_completesWithoutException() throws Exception {
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq("upload-id-xyz"), anyList()))
-                .thenReturn("");
+                                .thenReturn(MultipartUploadResult.success());
 
         CompletedPart sdkPart = CompletedPart.builder().partNumber(1).build();
 
@@ -650,7 +651,7 @@ class S3Test {
     @Order(31)
     void sdkCompleteMultipartUpload_delegatesCorrectUploadIdAndParts_toStorageService() throws Exception {
         when(mockStorage.completeMultipartUpload(anyString(), anyString(), anyString(), anyList()))
-                .thenReturn("");
+                                .thenReturn(MultipartUploadResult.success());
 
         CompletedPart part1 = CompletedPart.builder().partNumber(1).build();
         CompletedPart part2 = CompletedPart.builder().partNumber(2).build();
@@ -674,7 +675,8 @@ class S3Test {
     @Test
     @Order(32)
     void sdkAbortMultipartUpload_returns204_noException() throws Exception {
-        doNothing().when(mockStorage).abortMultipartUpload(anyString(), anyString(), anyString());
+        when(mockStorage.abortMultipartUpload(anyString(), anyString(), anyString()))
+                .thenReturn(MultipartUploadResult.success());
 
         assertDoesNotThrow(() ->
                 s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
@@ -688,7 +690,8 @@ class S3Test {
     @Test
     @Order(33)
     void sdkAbortMultipartUpload_delegatesCorrectArgs_toStorageService() throws Exception {
-        doNothing().when(mockStorage).abortMultipartUpload(anyString(), anyString(), anyString());
+        when(mockStorage.abortMultipartUpload(anyString(), anyString(), anyString()))
+                .thenReturn(MultipartUploadResult.success());
 
         s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
                 .bucket(BUCKET).key(KEY)
@@ -711,15 +714,15 @@ class S3Test {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return ""; 
+                        return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(1), any(), anyLong());
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-            return "";
+                        return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(2), any(), anyLong());
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq(uploadId), anyList()))
-                .thenReturn("");
+                                .thenReturn(MultipartUploadResult.success());
         when(mockStorage.getObject(BUCKET, KEY))
                 .thenReturn(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8)));
 

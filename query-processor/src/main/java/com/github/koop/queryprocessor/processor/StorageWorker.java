@@ -264,6 +264,84 @@ public final class StorageWorker {
         return success;
     }
 
+        /**
+     * Sends metadata to all storage nodes via HTTP POST.
+     * 
+     * Used by MultipartUploadManager to publish multipart upload metadata
+     * (e.g., manifest or session info) to storage nodes so they can track
+     * multipart state and assist in reconstruction on read.
+     * 
+     * @param topic the message topic/type (e.g., "multipart-manifest")
+     * @param data the serialized metadata payload
+     * @return true if the message was successfully delivered to at least K nodes
+     * @throws IOException if a communication error occurs
+     */
+    public boolean sendMessage(String topic, byte[] data) throws IOException {
+        if (topic == null)
+            throw new IllegalArgumentException("topic is null");
+        if (data == null)
+            throw new IllegalArgumentException("data is null");
+
+        List<Callable<Boolean>> tasks = new LinkedList<>();
+
+        // Send to all nodes in all three sets to ensure visibility
+        ErasureSetConfiguration config = erasureSetConfig.get();
+        if (config != null && config.getErasureSets() != null) {
+            for (ErasureSet erasureSet : config.getErasureSets()) {
+                if (erasureSet.getMachines() != null) {
+                    for (Machine machine : erasureSet.getMachines()) {
+                        InetSocketAddress node = new InetSocketAddress(machine.getIp(), machine.getPort());
+                        tasks.add(() -> {
+                            try {
+                                URI uri = URI.create(String.format("http://%s:%d/message/%s",
+                                        node.getHostString(), node.getPort(), topic));
+
+                                HttpRequest request = HttpRequest.newBuilder()
+                                        .uri(uri)
+                                        .POST(HttpRequest.BodyPublishers.ofByteArray(data))
+                                        .header("Content-Type", "application/octet-stream")
+                                        .build();
+
+                                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                                if (response.statusCode() != 200) {
+                                    logger.trace("Message POST failed for topic {} to node {}: HTTP {}", 
+                                            topic, node, response.statusCode());
+                                    return false;
+                                }
+                                logger.trace("Message POST succeeded for topic {} to node {}", topic, node);
+                                return true;
+                            } catch (Exception e) {
+                                logger.trace("Exception sending message for topic {} to node {}: {}", 
+                                        topic, node, e.getMessage());
+                                return false;
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        long numSucceeded;
+        try {
+            numSucceeded = executor.invokeAll(tasks).stream().map(t -> {
+                try {
+                    return t.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    logger.warn("Exception in message send task: {}", e.getMessage());
+                    return false;
+                }
+            }).filter(it -> it).count();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        
+        // Require success on a majority of nodes (K or more out of TOTAL * 3)
+        int totalNodes = TOTAL * 3;
+        return numSucceeded >= ErasureCoder.K;
+    }
+
     public void shutdown() {
         executor.shutdownNow();
     }

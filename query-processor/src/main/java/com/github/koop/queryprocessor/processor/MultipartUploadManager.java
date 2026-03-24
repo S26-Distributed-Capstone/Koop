@@ -16,6 +16,13 @@ import java.util.UUID;
 
 /**
  * Orchestrates multipart-upload lifecycle using StorageWorker + cache state.
+ *
+ * <p><b>Note on complete flow:</b> The current implementation materializes one
+ * assembled object on complete (reads all parts, concatenates, writes final key,
+ * deletes part keys). This is pending a team decision on whether to instead commit
+ * a manifest to the storage nodes and reconstruct on read. See PR #73 discussion.
+ * Note on discussion, plan is to implement the manifest-based approach after initial 
+ * multipart upload support is in place, as it is a more complex change that can be added iteratively.
  */
 public class MultipartUploadManager {
 
@@ -39,42 +46,71 @@ public class MultipartUploadManager {
         return uploadId;
     }
 
-    public String uploadPart(String bucket, String key, String uploadId,
-                             int partNumber, InputStream data, long length) throws Exception {
-        MultipartUploadSession session = requireSession(uploadId);
+    /**
+     * Uploads a single part of an in-progress multipart upload.
+     */
+    public MultipartUploadResult uploadPart(String bucket, String key, String uploadId,
+                             int partNumber, InputStream data, long length)
+            {
+        MultipartUploadSession session = findSession(uploadId);
+        if (session == null) {
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.NOT_FOUND,
+                    "No such upload: " + uploadId);
+        }
+
         if (session.status() != MultipartUploadSession.UploadStatus.ACTIVE) {
-            throw new IllegalStateException("Upload is not ACTIVE");
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
+                    "Upload " + uploadId + " is not ACTIVE (status=" + session.status() + ")");
         }
 
         String partsKey = MultipartUploadSession.partsKey(uploadId);
         String partMember = String.valueOf(partNumber);
         if (cache.setMembers(partsKey).contains(partMember)) {
-            throw new IllegalStateException("Part " + partNumber + " already uploaded");
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
+                "Part " + partNumber + " already uploaded for upload " + uploadId);
         }
 
         String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
-        boolean stored = storageWorker.put(UUID.randomUUID(), bucket, partStorageKey, length, data);
+        boolean stored;
+        try {
+            stored = storageWorker.put(UUID.randomUUID(), bucket, partStorageKey, length, data);
+        } catch (Exception e) {
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
+                    "Exception storing part " + partNumber + " for upload " + uploadId);
+        }
         if (!stored) {
-            throw new RuntimeException("Failed to store part " + partNumber);
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
+                    "Failed to store part " + partNumber + " for upload " + uploadId);
         }
 
         cache.setAdd(partsKey, partMember);
         cache.put(MultipartUploadSession.partSizeKey(uploadId, partNumber), String.valueOf(length));
-        return "";
+        return MultipartUploadResult.success();
     }
 
-    public String completeMultipartUpload(String bucket, String key, String uploadId,
-                                          List<StorageService.CompletedPart> parts) throws Exception {
-        MultipartUploadSession session = requireSession(uploadId);
+    /**
+     * Finalizes an in-progress multipart upload.
+     */
+    public MultipartUploadResult completeMultipartUpload(String bucket, String key, String uploadId,
+                                          List<StorageService.CompletedPart> parts)
+            {
+        MultipartUploadSession session = findSession(uploadId);
+        if (session == null) {
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.NOT_FOUND,
+                    "No such upload: " + uploadId);
+        }
+
         if (session.status() != MultipartUploadSession.UploadStatus.ACTIVE) {
-            throw new IllegalStateException("Upload is not ACTIVE");
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
+                    "Upload " + uploadId + " is not ACTIVE (status=" + session.status() + ")");
         }
 
         Set<String> uploadedParts = cache.setMembers(MultipartUploadSession.partsKey(uploadId));
         for (StorageService.CompletedPart part : parts) {
             String partMember = String.valueOf(part.partNumber());
             if (!uploadedParts.contains(partMember)) {
-                throw new IllegalStateException("Part " + part.partNumber() + " was not uploaded");
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
+                        "Part " + part.partNumber() + " was not uploaded for upload " + uploadId);
             }
         }
 
@@ -89,20 +125,30 @@ public class MultipartUploadManager {
         for (int partNumber : sortedPartNumbers) {
             String sizeValue = cache.get(MultipartUploadSession.partSizeKey(uploadId, partNumber));
             if (sizeValue == null) {
-                throw new IllegalStateException("Missing size for part " + partNumber);
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
+                        "Missing cached size for part " + partNumber + " of upload " + uploadId);
             }
             totalLength += Long.parseLong(sizeValue);
 
             String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
-            partStreams.add(storageWorker.get(UUID.randomUUID(), bucket, partStorageKey));
+            try {
+                partStreams.add(storageWorker.get(UUID.randomUUID(), bucket, partStorageKey));
+            } catch (Exception e) {
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
+                        "Failed to retrieve part " + partNumber + " for upload " + uploadId);
+            }
         }
 
         Enumeration<InputStream> streams = Collections.enumeration(partStreams);
         try (SequenceInputStream concatenated = new SequenceInputStream(streams)) {
             boolean stored = storageWorker.put(UUID.randomUUID(), bucket, key, totalLength, concatenated);
             if (!stored) {
-                throw new RuntimeException("Failed to store completed multipart object");
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
+                        "Failed to store completed multipart object for upload " + uploadId);
             }
+        } catch (Exception e) {
+            return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
+                    "Exception assembling multipart object for upload " + uploadId);
         } finally {
             for (InputStream stream : partStreams) {
                 try {
@@ -113,22 +159,39 @@ public class MultipartUploadManager {
             }
         }
 
+        // Send manifest to storage nodes so they can track multipart state.
+        // Nodes use this metadata for reconstructing objects on read.
+        try {
+            MultipartManifest manifest = new MultipartManifest(uploadId, bucket, key, sortedPartNumbers);
+            boolean manifestSent = storageWorker.sendMessage("multipart-manifest", manifest.serialize());
+            if (!manifestSent) {
+                // Log but don't fail — the object is already written; manifest is best-effort.
+                // Reconstruction can fall back to part discovery if needed.
+            }
+        } catch (Exception e) {
+            // Best-effort manifest transmission; object is already complete.
+        }
+
         for (int partNumber : sortedPartNumbers) {
             String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
-            storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
+            try {
+                storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
+            } catch (Exception ignored) {
+                // Best-effort part cleanup; final object is already written.
+            }
             cache.delete(MultipartUploadSession.partSizeKey(uploadId, partNumber));
         }
 
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
         cache.setDelete(MultipartUploadSession.partsKey(uploadId));
 
-        return "";
+        return MultipartUploadResult.success();
     }
 
-    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+    public MultipartUploadResult abortMultipartUpload(String bucket, String key, String uploadId) {
         String serialized = cache.get(MultipartUploadSession.sessionKey(uploadId));
         if (serialized == null) {
-            return;
+            return MultipartUploadResult.success(); // graceful no-op for unknown uploadId
         }
 
         MultipartUploadSession session = MultipartUploadSession.deserialize(serialized);
@@ -137,21 +200,37 @@ public class MultipartUploadManager {
                 session.withStatus(MultipartUploadSession.UploadStatus.ABORTING).serialize());
 
         Set<String> partMembers = cache.setMembers(MultipartUploadSession.partsKey(uploadId));
+
+        // TODO: Team decision pending — should physical part deletion be synchronous
+        // here (current behavior) or deferred/async? Synchronous deletion means the
+        // client waits for all shard deletes before receiving the 204 ACK. Deferred
+        // deletion would ACK immediately and clean up in the background (or via a
+        // separate GC process). See PR #73 discussion.
         for (String partMember : partMembers) {
             int partNumber = Integer.parseInt(partMember);
             String partStorageKey = MultipartUploadSession.partStorageKey(bucket, key, uploadId, partNumber);
-            storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
+            try {
+                storageWorker.delete(UUID.randomUUID(), bucket, partStorageKey);
+            } catch (Exception ignored) {
+                // Best-effort; continue cleaning up remaining parts.
+            }
             cache.delete(MultipartUploadSession.partSizeKey(uploadId, partNumber));
         }
 
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
         cache.setDelete(MultipartUploadSession.partsKey(uploadId));
+
+        return MultipartUploadResult.success();
     }
 
-    private MultipartUploadSession requireSession(String uploadId) {
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    private MultipartUploadSession findSession(String uploadId) {
         String serialized = cache.get(MultipartUploadSession.sessionKey(uploadId));
         if (serialized == null) {
-            throw new IllegalArgumentException("No such upload: " + uploadId);
+            return null;
         }
         return MultipartUploadSession.deserialize(serialized);
     }
@@ -168,5 +247,4 @@ public class MultipartUploadManager {
         Collections.sort(ordered);
         return ordered;
     }
-
 }

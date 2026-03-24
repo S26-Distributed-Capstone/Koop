@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.UUID;
 
 import com.github.koop.queryprocessor.processor.MultipartUploadManager;
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.CacheClient;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
@@ -119,19 +120,19 @@ public class StorageWorkerService implements StorageService {
     }
 
     @Override
-    public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
+    public MultipartUploadResult uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
             throws Exception {
         return multipartManager.uploadPart(bucket, key, uploadId, partNumber, data, length);
     }
 
     @Override
-    public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
+    public MultipartUploadResult completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
             throws Exception {
         return multipartManager.completeMultipartUpload(bucket, key, uploadId, parts);
     }
 
     @Override
-    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
-        multipartManager.abortMultipartUpload(bucket, key, uploadId);
+    public MultipartUploadResult abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+        return multipartManager.abortMultipartUpload(bucket, key, uploadId);
     }
 }

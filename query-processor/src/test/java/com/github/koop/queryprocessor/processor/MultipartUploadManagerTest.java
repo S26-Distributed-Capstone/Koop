@@ -20,7 +20,6 @@ import java.util.concurrent.Executors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -76,7 +75,7 @@ class MultipartUploadManagerTest {
         String uploadId = manager.initiateMultipartUpload("bucket", "file");
         byte[] payload = "part-1".getBytes(StandardCharsets.UTF_8);
 
-        String result = manager.uploadPart(
+        MultipartUploadResult result = manager.uploadPart(
                 "bucket",
                 "file",
                 uploadId,
@@ -84,7 +83,7 @@ class MultipartUploadManagerTest {
                 new ByteArrayInputStream(payload),
                 payload.length);
 
-        assertEquals("", result);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
         assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).contains("1"));
         assertEquals(String.valueOf(payload.length), cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
 
@@ -94,7 +93,7 @@ class MultipartUploadManagerTest {
     }
 
     @Test
-    void uploadPart_duplicatePart_throwsException() throws Exception {
+    void uploadPart_duplicatePart_throwsConflict() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
                 .thenReturn(true);
 
@@ -103,22 +102,22 @@ class MultipartUploadManagerTest {
 
         manager.uploadPart("bucket", "file", uploadId, 1, new ByteArrayInputStream(payload), payload.length);
 
-        assertThrows(IllegalStateException.class,
-                () -> manager.uploadPart("bucket", "file", uploadId, 1,
-                        new ByteArrayInputStream(payload), payload.length));
+        MultipartUploadResult result = manager.uploadPart("bucket", "file", uploadId, 1,
+                new ByteArrayInputStream(payload), payload.length);
+        assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
 
     @Test
-    void uploadPart_unknownUploadId_throwsException() {
+    void uploadPart_unknownUploadId_throwsNotFound() {
         byte[] payload = "x".getBytes(StandardCharsets.UTF_8);
 
-        assertThrows(IllegalArgumentException.class,
-                () -> manager.uploadPart("bucket", "file", "missing-upload", 1,
-                        new ByteArrayInputStream(payload), payload.length));
+        MultipartUploadResult result = manager.uploadPart("bucket", "file", "missing-upload", 1,
+                new ByteArrayInputStream(payload), payload.length);
+        assertEquals(MultipartUploadResult.Status.NOT_FOUND, result.status());
     }
 
     @Test
-    void uploadPart_inactiveSession_throwsException() {
+    void uploadPart_inactiveSession_throwsConflict() {
         String uploadId = "inactive-upload";
         MultipartUploadSession session = new MultipartUploadSession(
                 uploadId,
@@ -129,9 +128,9 @@ class MultipartUploadManagerTest {
 
         byte[] payload = "x".getBytes(StandardCharsets.UTF_8);
 
-        assertThrows(IllegalStateException.class,
-                () -> manager.uploadPart("bucket", "file", uploadId, 1,
-                        new ByteArrayInputStream(payload), payload.length));
+        MultipartUploadResult result = manager.uploadPart("bucket", "file", uploadId, 1,
+                new ByteArrayInputStream(payload), payload.length);
+        assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
 
     @Test
@@ -158,9 +157,9 @@ class MultipartUploadManagerTest {
                 new StorageService.CompletedPart(1),
                 new StorageService.CompletedPart(2));
 
-        String result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+        MultipartUploadResult result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
 
-        assertEquals("", result);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
         verify(storageWorker, times(1)).put(any(UUID.class), eq("bucket"), eq("final-key"),
                 eq((long) p1.length + p2.length), any(InputStream.class));
         verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part1Key));
@@ -168,7 +167,7 @@ class MultipartUploadManagerTest {
     }
 
     @Test
-    void complete_missingPart_throwsException() throws Exception {
+    void complete_missingPart_throwsConflict() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
                 .thenReturn(true);
 
@@ -181,8 +180,8 @@ class MultipartUploadManagerTest {
                 new StorageService.CompletedPart(1),
                 new StorageService.CompletedPart(2));
 
-        assertThrows(IllegalStateException.class,
-                () -> manager.completeMultipartUpload("bucket", "final-key", uploadId, parts));
+        MultipartUploadResult result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+        assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
 
     @Test
@@ -243,14 +242,14 @@ class MultipartUploadManagerTest {
         String uploadId = manager.initiateMultipartUpload("bucket", "file");
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Callable<String> task1 = () -> manager.uploadPart(
+            Callable<MultipartUploadResult> task1 = () -> manager.uploadPart(
                     "bucket",
                     "file",
                     uploadId,
                     1,
                     new ByteArrayInputStream("part1".getBytes(StandardCharsets.UTF_8)),
                     5);
-            Callable<String> task2 = () -> manager.uploadPart(
+            Callable<MultipartUploadResult> task2 = () -> manager.uploadPart(
                     "bucket",
                     "file",
                     uploadId,
