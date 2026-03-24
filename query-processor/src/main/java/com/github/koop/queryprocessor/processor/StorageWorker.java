@@ -1,6 +1,7 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
+import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
 import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
@@ -8,6 +9,7 @@ import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.pubsub.PubSubClient;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -46,6 +48,7 @@ public final class StorageWorker {
     private final ExecutorService executor;
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
+    private final PubSubClient pubSubClient;
     private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
     private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
@@ -67,6 +70,7 @@ public final class StorageWorker {
                 .build();
         MemoryFetcher fetcher = new MemoryFetcher();
         this.metadataClient = new MetadataClient(fetcher);
+        this.pubSubClient = null; // Set to null for test-only constructors
         registerListeners();
         this.metadataClient.start();
         // update() must come after start() so the listeners registered above are
@@ -81,11 +85,16 @@ public final class StorageWorker {
     }
 
     public StorageWorker(MetadataClient metadataClient) {
+        this(metadataClient, null);
+    }
+
+    public StorageWorker(MetadataClient metadataClient, PubSubClient pubSubClient) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         this.metadataClient = metadataClient;
+        this.pubSubClient = pubSubClient;
         registerListeners();
         this.metadataClient.start();
     }
@@ -265,84 +274,48 @@ public final class StorageWorker {
     }
 
         /**
-     * Sends metadata to all storage nodes via HTTP POST.
+     * Publishes a message to the partition-specific topic via the pub/sub client.
      * 
-     * Used by MultipartUploadManager to publish multipart upload metadata
-     * (e.g., manifest or session info) to storage nodes so they can track
-     * multipart state and assist in reconstruction on read.
+     * The message is routed to the topic corresponding to the partition that owns
+     * the given bucket/key combination.
      * 
-     * @param topic the message topic/type (e.g., "multipart-manifest")
-     * @param data the serialized metadata payload
-     * @return true if the message was successfully delivered to at least K nodes
-     * @throws IOException if a communication error occurs
+     * @param bucket the bucket name
+     * @param key the object key
+     * @param message the {@link Message} to publish
+     * @return true if the message was successfully published, false otherwise
      */
-    public boolean sendMessage(String topic, byte[] data) throws IOException {
-        if (topic == null)
-            throw new IllegalArgumentException("topic is null");
-        if (data == null)
-            throw new IllegalArgumentException("data is null");
-
-        List<Callable<Boolean>> tasks = new LinkedList<>();
-
-        // Send to all nodes in all three sets to ensure visibility
-        ErasureSetConfiguration config = erasureSetConfig.get();
-        if (config != null && config.getErasureSets() != null) {
-            for (ErasureSet erasureSet : config.getErasureSets()) {
-                if (erasureSet.getMachines() != null) {
-                    for (Machine machine : erasureSet.getMachines()) {
-                        InetSocketAddress node = new InetSocketAddress(machine.getIp(), machine.getPort());
-                        tasks.add(() -> {
-                            try {
-                                URI uri = URI.create(String.format("http://%s:%d/message/%s",
-                                        node.getHostString(), node.getPort(), topic));
-
-                                HttpRequest request = HttpRequest.newBuilder()
-                                        .uri(uri)
-                                        .POST(HttpRequest.BodyPublishers.ofByteArray(data))
-                                        .header("Content-Type", "application/octet-stream")
-                                        .build();
-
-                                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                                if (response.statusCode() != 200) {
-                                    logger.trace("Message POST failed for topic {} to node {}: HTTP {}", 
-                                            topic, node, response.statusCode());
-                                    return false;
-                                }
-                                logger.trace("Message POST succeeded for topic {} to node {}", topic, node);
-                                return true;
-                            } catch (Exception e) {
-                                logger.trace("Exception sending message for topic {} to node {}: {}", 
-                                        topic, node, e.getMessage());
-                                return false;
-                            }
-                        });
-                    }
-                }
-            }
-        }
-
-        if (tasks.isEmpty()) {
-            logger.warn("No nodes available to send message for topic {}", topic);
+    public boolean sendMessage(String bucket, String key, Message message) {
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (message == null)
+            throw new IllegalArgumentException("message is null");
+        if (pubSubClient == null) {
+            logger.warn("PubSubClient not configured, cannot send message");
             return false;
         }
 
-        long numSucceeded;
-        try {
-            numSucceeded = executor.invokeAll(tasks).stream().map(t -> {
-                try {
-                    return t.get();
-                } catch (InterruptedException | ExecutionException e) {
-                    logger.warn("Exception in message send task: {}", e.getMessage());
-                    return false;
-                }
-            }).filter(it -> it).count();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        String storageKey = bucket + "-" + key;
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(storageKey);
+        if (partition.isEmpty()) {
+            logger.error("Routing failed for key {}, cannot send message", storageKey);
             return false;
         }
+
+        int partitionNumber = partition.getAsInt();
+        String topic = "partition-" + partitionNumber;
         
-        return numSucceeded >= ErasureCoder.K;
+        try {
+            byte[] serialized = Message.serializeMessage(message);
+            pubSubClient.pub(topic, serialized);
+            logger.trace("Published message to topic {} for partition {}", topic, partitionNumber);
+            return true;
+        } catch (Exception e) {
+            logger.error("Exception publishing message to topic {}: {}", topic, e.getMessage());
+            return false;
+        }
     }
 
     public void shutdown() {

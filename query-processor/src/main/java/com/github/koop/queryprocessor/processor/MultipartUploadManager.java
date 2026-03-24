@@ -26,9 +26,6 @@ import java.util.UUID;
  */
 public class MultipartUploadManager {
 
-    // TODO: Re-enable when storage-node exposes /message/{topic} endpoint.
-    private static final boolean ENABLE_MANIFEST_PUBLICATION = false;
-
     private final StorageWorker storageWorker;
     private final CacheClient cache;
 
@@ -182,21 +179,6 @@ public class MultipartUploadManager {
                 } catch (Exception ignored) {
                     // Best-effort cleanup; stream may already be closed by SequenceInputStream.
                 }
-            }
-        }
-
-        // Send manifest to storage nodes so they can track multipart state.
-        // Nodes use this metadata for reconstructing objects on read.
-        if (ENABLE_MANIFEST_PUBLICATION) {
-            try {
-                MultipartManifest manifest = new MultipartManifest(uploadId, sessionBucket, sessionKey, sortedPartNumbers);
-                boolean manifestSent = storageWorker.sendMessage("multipart-manifest", manifest.serialize());
-                if (!manifestSent) {
-                    // Log but don't fail — the object is already written; manifest is best-effort.
-                    // Reconstruction can fall back to part discovery if needed.
-                }
-            } catch (Exception e) {
-                // Best-effort manifest transmission; object is already complete.
             }
         }
 
