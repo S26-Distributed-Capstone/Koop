@@ -4,7 +4,7 @@ This document displays workflow diagrams for each supported use case in the Koop
 
 > **Related documents:**
 > - [Scope](scope.md) — supported use cases and error cases
-> - [Architecture](architecture.md) — system component overview and redundancy model
+> - [Architecture Overview](messy-everything-doc.md) — system component overview and redundancy model
 
 ---
 
@@ -31,32 +31,7 @@ This document displays workflow diagrams for each supported use case in the Koop
 
 The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Kafka (pub/sub) is used for multipart commit sequencing and is the planned sequencer for write/delete ordering. Redis (or an in-memory [`MemoryCacheClient`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java) in dev/test) is used by the Query Processor for multipart upload session tracking. Each storage node persists shard data to disk via [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java) backed by [`StorageNode`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java). The [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java) + [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) (RocksDB) layer is implemented and tested but not yet wired into the live server.
 
-```mermaid
-graph TD
-    Client["S3 Client"]
-    QP["Query Processor\n(Javalin Gateway + StorageWorker)"]
-    Kafka["Kafka / PubSub\n(Multipart Commit Sequencer)"]
-    Redis["Redis / MemoryCache\n(Multipart Upload Cache)"]
-    Etcd["etcd\n(Partition & Erasure Set Config)"]
-    SN1["Storage Node 1"]
-    SN2["Storage Node 2"]
-    SN3["Storage Node 3 … 9"]
-    Disk["Disk\n(partition_{p}/{key}/{requestId})"]
-
-    Client -->|"S3 HTTP"| QP
-    QP -->|"reads config"| Etcd
-    QP -->|"multipart manifest"| Kafka
-    QP -->|"multipart session state"| Redis
-    QP -->|"erasure-coded shards (HTTP PUT/DELETE)"| SN1
-    QP -->|"erasure-coded shards (HTTP PUT/DELETE)"| SN2
-    QP -->|"erasure-coded shards (HTTP PUT/DELETE)"| SN3
-    SN1 --> Disk
-    SN2 --> Disk
-    SN3 --> Disk
-    Kafka -->|"MultipartCommitMessage"| SN1
-    Kafka -->|"MultipartCommitMessage"| SN2
-    Kafka -->|"MultipartCommitMessage"| SN3
-```
+![System Container Overview](diagrams/Containers.svg)
 
 ---
 
