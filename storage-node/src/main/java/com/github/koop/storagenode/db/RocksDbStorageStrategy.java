@@ -47,28 +47,32 @@ public class RocksDbStorageStrategy implements StorageStrategy {
 
     // --- Table #1: Operation Log ---
 
-    @Override
-    public void addLog(OpLog log) throws Exception {
-        byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array();
-        db.put(logHandle, key, log.serialize());
+    private byte[] opLogKey(int partition, long seqNum) {
+        return ByteBuffer.allocate(12).putInt(partition).putLong(seqNum).array();
     }
 
     @Override
-    public Optional<OpLog> getLog(long seqNum) throws Exception {
-        byte[] key = ByteBuffer.allocate(Long.BYTES).putLong(seqNum).array();
-        byte[] value = db.get(logHandle, key);
+    public void addLog(OpLog log) throws Exception {
+        db.put(logHandle, opLogKey(log.partition(), log.seqNum()), log.serialize());
+    }
+
+    @Override
+    public Optional<OpLog> getLog(int partition, long seqNum) throws Exception {
+        byte[] value = db.get(logHandle, opLogKey(partition, seqNum));
         return value == null ? Optional.empty() : Optional.of(OpLog.from(value));
     }
 
     @Override
-    public Stream<OpLog> getLogs(long from, long downTo) throws Exception {
-        byte[] endKey = ByteBuffer.allocate(Long.BYTES).putLong(downTo).array();
+    public Stream<OpLog> getLogs(int partition, long from, long downTo) throws Exception {
+        byte[] startKey = opLogKey(partition, from);
         RocksIterator iterator = db.newIterator(logHandle);
-        iterator.seekForPrev(endKey);
+        iterator.seekForPrev(startKey);
         return Stream.generate(() -> {
             if (!iterator.isValid()) return null;
-            long seq = ByteBuffer.wrap(iterator.key()).getLong();
-            if (seq < from) return null;
+            ByteBuffer keyBuf = ByteBuffer.wrap(iterator.key());
+            int p = keyBuf.getInt();
+            long seq = keyBuf.getLong();
+            if (p != partition || seq < downTo) return null;
             OpLog log = OpLog.from(iterator.value());
             iterator.prev();
             return log;
@@ -87,7 +91,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     public void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception {
         try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
             batch.put(logHandle,
-                    ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array(),
+                    opLogKey(log.partition(), log.seqNum()),
                     log.serialize());
             batch.put(metaHandle,
                     metadata.key().getBytes(StandardCharsets.UTF_8),
@@ -128,7 +132,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     public void atomicallyUpdateLogAndBucket(OpLog log, Bucket bucket) throws Exception {
         try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
             batch.put(logHandle,
-                    ByteBuffer.allocate(Long.BYTES).putLong(log.seqNum()).array(),
+                    opLogKey(log.partition(), log.seqNum()),
                     log.serialize());
             batch.put(bucketsHandle,
                     bucket.key().getBytes(StandardCharsets.UTF_8),

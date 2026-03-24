@@ -6,8 +6,8 @@ import java.util.stream.Stream;
 public interface StorageStrategy extends AutoCloseable {
     // --- Table #1: Operation Log ---
     void addLog(OpLog log) throws Exception;
-    Optional<OpLog> getLog(long seqNum) throws Exception;
-    Stream<OpLog> getLogs(long from, long downTo) throws Exception;
+    Optional<OpLog> getLog(int partition, long seqNum) throws Exception;
+    Stream<OpLog> getLogs(int partition, long from, long downTo) throws Exception;
 
     // --- Table #2: Metadata (includes version history) ---
     void updateMetadata(Metadata metadata) throws Exception;

@@ -25,7 +25,7 @@ public class Database implements AutoCloseable {
         List<FileVersion> versions = currentVersions(key);
         versions.add(new RegularFileVersion(seqNumber, location));
         strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(seqNumber, key, Operation.PUT),
+                new OpLog(partition, seqNumber, key, Operation.PUT),
                 new Metadata(key, partition, versions));
     }
 
@@ -34,7 +34,7 @@ public class Database implements AutoCloseable {
         List<FileVersion> versions = currentVersions(key);
         versions.add(new MultipartFileVersion(seqNumber, chunks));
         strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(seqNumber, key, Operation.PUT),
+                new OpLog(partition, seqNumber, key, Operation.PUT),
                 new Metadata(key, partition, versions));
     }
 
@@ -46,7 +46,7 @@ public class Database implements AutoCloseable {
         List<FileVersion> versions = currentVersions(key);
         versions.add(new TombstoneFileVersion(seqNumber));
         strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(seqNumber, key, Operation.DELETE),
+                new OpLog(partition, seqNumber, key, Operation.DELETE),
                 new Metadata(key, partition, versions));
     }
 
@@ -80,7 +80,7 @@ public class Database implements AutoCloseable {
 
     public void createBucket(String bucketKey, int partition, long seqNumber) throws Exception {
         strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(seqNumber, bucketKey, Operation.CREATE_BUCKET),
+                new OpLog(partition, seqNumber, bucketKey, Operation.CREATE_BUCKET),
                 new Bucket(bucketKey, partition, seqNumber, false));
     }
 
@@ -90,7 +90,7 @@ public class Database implements AutoCloseable {
 
     public void deleteBucket(String bucketKey, int partition, long seqNumber) throws Exception {
         strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(seqNumber, bucketKey, Operation.DELETE_BUCKET),
+                new OpLog(partition, seqNumber, bucketKey, Operation.DELETE_BUCKET),
                 new Bucket(bucketKey, partition, seqNumber, true));
     }
 

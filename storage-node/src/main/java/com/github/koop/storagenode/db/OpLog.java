@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 public record OpLog(
+        int partition,
         long seqNum,
         String key,
         Operation operation) {
@@ -12,8 +13,9 @@ public record OpLog(
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] opBytes = operation.name().getBytes(StandardCharsets.UTF_8);
 
-        int totalLen = Long.BYTES + 4 + keyBytes.length + 4 + opBytes.length;
+        int totalLen = Integer.BYTES + Long.BYTES + 4 + keyBytes.length + 4 + opBytes.length;
         ByteBuffer buf = ByteBuffer.allocate(totalLen);
+        buf.putInt(partition);
         buf.putLong(seqNum);
         writeString(buf, keyBytes);
         writeString(buf, opBytes);
@@ -22,11 +24,12 @@ public record OpLog(
 
     public static OpLog from(byte[] data) {
         ByteBuffer buf = ByteBuffer.wrap(data);
+        int partition = buf.getInt();
         long seqNum = buf.getLong();
         String key = readString(buf);
         String operation = readString(buf);
 
-        return new OpLog(seqNum, key, Operation.fromString(operation));
+        return new OpLog(partition, seqNum, key, Operation.fromString(operation));
     }
 
     private static void writeString(ByteBuffer buffer, byte[] bytes) {

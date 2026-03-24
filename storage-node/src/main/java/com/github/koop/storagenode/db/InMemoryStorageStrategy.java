@@ -1,12 +1,13 @@
 package com.github.koop.storagenode.db;
 
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Stream;
 
 public class InMemoryStorageStrategy implements StorageStrategy {
-    // Table #1 — operation log (sorted by seqNum for range scans)
-    private final ConcurrentSkipListMap<Long, OpLog> opLogTable = new ConcurrentSkipListMap<>();
+    // Table #1 — operation log (grouped by partition, sorted by seqNum)
+    private final ConcurrentHashMap<Integer, ConcurrentSkipListMap<Long, OpLog>> opLogsByPartition = new ConcurrentHashMap<>();
     // Table #2 — metadata (sorted by key for prefix scans)
     private final ConcurrentSkipListMap<String, Metadata> metadataTable = new ConcurrentSkipListMap<>();
     // Table #3 — buckets (sorted by key for streaming)
@@ -16,17 +17,22 @@ public class InMemoryStorageStrategy implements StorageStrategy {
 
     @Override
     public void addLog(OpLog log) {
-        opLogTable.put(log.seqNum(), log);
+        opLogsByPartition
+                .computeIfAbsent(log.partition(), p -> new ConcurrentSkipListMap<>())
+                .put(log.seqNum(), log);
     }
 
     @Override
-    public Optional<OpLog> getLog(long seqNum) {
-        return Optional.ofNullable(opLogTable.get(seqNum));
+    public Optional<OpLog> getLog(int partition, long seqNum) {
+        ConcurrentSkipListMap<Long, OpLog> partitionLogs = opLogsByPartition.get(partition);
+        return partitionLogs == null ? Optional.empty() : Optional.ofNullable(partitionLogs.get(seqNum));
     }
 
     @Override
-    public Stream<OpLog> getLogs(long from, long downTo) {
-        return opLogTable.subMap(downTo, true, from, true).reversed().values().stream();
+    public Stream<OpLog> getLogs(int partition, long from, long downTo) {
+        ConcurrentSkipListMap<Long, OpLog> partitionLogs = opLogsByPartition.get(partition);
+        if (partitionLogs == null) return Stream.empty();
+        return partitionLogs.subMap(downTo, true, from, true).reversed().values().stream();
     }
 
     // --- Table #2: Metadata ---
@@ -80,7 +86,7 @@ public class InMemoryStorageStrategy implements StorageStrategy {
 
     @Override
     public void close() {
-        opLogTable.clear();
+        opLogsByPartition.clear();
         metadataTable.clear();
         bucketsTable.clear();
     }
