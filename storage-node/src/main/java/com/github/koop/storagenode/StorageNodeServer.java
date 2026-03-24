@@ -87,9 +87,21 @@ public class StorageNodeServer {
                 var fc = dataOpt.get();
                 ctx.status(200)
                         .header("Content-Type", "application/octet-stream")
-                        .header("Content-Length", String.valueOf(fc.size()))
-                        .result(Channels.newInputStream(fc));
-
+                        .header("Content-Length", String.valueOf(fc.size()));
+                        //.result(Channels.newInputStream(fc));
+                // should use zero-copy transfer to avoid unnecessary buffering in memory
+                var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
+                long size = fc.size();
+                long position = 0L;
+                while (position < size) {
+                    long transferred = fc.transferTo(position, size - position, outputChannel);
+                    if (transferred <= 0) {
+                        logger.warn("Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
+                                partition, key, position, size);
+                        break;
+                    }
+                    position += transferred;
+                }
                 logger.debug("GET partition={} key={} streaming {} bytes", partition, key, fc.size());
             } else {
                 ctx.status(404).result("");

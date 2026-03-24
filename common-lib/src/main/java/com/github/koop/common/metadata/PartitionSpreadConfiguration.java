@@ -19,7 +19,7 @@ public class PartitionSpreadConfiguration {
         private List<Integer> partitions;
         
         @JsonProperty("erasure_set")
-        private String erasureSet;
+        private int erasureSet;
 
         public List<Integer> getPartitions() {
             return partitions;
@@ -29,11 +29,11 @@ public class PartitionSpreadConfiguration {
             this.partitions = partitions;
         }
 
-        public String getErasureSet() {
+        public int getErasureSet() {
             return erasureSet;
         }
 
-        public void setErasureSet(String erasureSet) {
+        public void setErasureSet(int erasureSet) {
             this.erasureSet = erasureSet;
         }
     }

@@ -16,191 +16,279 @@ class DatabaseTest {
 
     @BeforeEach
     void setUp() {
-        // Initialize the Database with the InMemoryStorageStrategy before each test
         database = new Database(new InMemoryStorageStrategy());
     }
 
     @AfterEach
     void tearDown() throws Exception {
-        if (database != null) {
-            database.close();
+        if (database != null) database.close();
+    }
+
+    // =========================================================================
+    // PUT ITEM (regular)
+    // =========================================================================
+
+    @Test
+    void testPutItemCreatesMetadataAndLog() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+
+        var meta = database.getItem("animals/cat.jpg").orElseThrow();
+        assertEquals(1, meta.versions().size());
+        assertInstanceOf(RegularFileVersion.class, meta.versions().get(0));
+        assertEquals(100L, meta.versions().get(0).sequenceNumber());
+        assertEquals("/uuid-100.blob", ((RegularFileVersion) meta.versions().get(0)).location());
+    }
+
+    @Test
+    void testPutItemAppendsVersions() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+        database.putItem("animals/cat.jpg", 1, 101L, "/uuid-101.blob");
+
+        var versions = database.getItem("animals/cat.jpg").orElseThrow().versions();
+        assertEquals(2, versions.size());
+        assertEquals(100L, versions.get(0).sequenceNumber());
+        assertEquals(101L, versions.get(1).sequenceNumber());
+    }
+
+    // =========================================================================
+    // PUT MULTIPART ITEM
+    // =========================================================================
+
+    @Test
+    void testPutMultipartItemCreatesMultipartFileVersion() throws Exception {
+        database.putMultipartItem("animals/dog.jpg", 1, 98L,
+                List.of("chunk-0.blob", "chunk-1.blob", "chunk-2.blob"));
+
+        var meta = database.getItem("animals/dog.jpg").orElseThrow();
+        assertEquals(1, meta.versions().size());
+        assertInstanceOf(MultipartFileVersion.class, meta.versions().get(0));
+        var mpv = (MultipartFileVersion) meta.versions().get(0);
+        assertEquals(98L, mpv.sequenceNumber());
+        assertEquals(List.of("chunk-0.blob", "chunk-1.blob", "chunk-2.blob"), mpv.chunks());
+    }
+
+    @Test
+    void testPutMultipartItemPreservesExistingVersions() throws Exception {
+        database.putItem("animals/dog.jpg", 1, 10L, "/uuid-10.blob");
+        database.putMultipartItem("animals/dog.jpg", 1, 20L, List.of("chunk-0.blob"));
+
+        var versions = database.getItem("animals/dog.jpg").orElseThrow().versions();
+        assertEquals(2, versions.size());
+        assertInstanceOf(RegularFileVersion.class, versions.get(0));
+        assertInstanceOf(MultipartFileVersion.class, versions.get(1));
+    }
+
+    // =========================================================================
+    // DELETE ITEM
+    // =========================================================================
+
+    @Test
+    void testDeleteItemAppendsTombstone() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+        database.deleteItem("animals/cat.jpg", 1, 101L);
+
+        var versions = database.getItem("animals/cat.jpg").orElseThrow().versions();
+        assertEquals(2, versions.size());
+        assertInstanceOf(RegularFileVersion.class, versions.get(0));
+        assertInstanceOf(TombstoneFileVersion.class, versions.get(1));
+        assertEquals(101L, versions.get(1).sequenceNumber());
+    }
+
+    @Test
+    void testDeleteItemOnNonExistentKeyCreatesTombstoneRow() throws Exception {
+        database.deleteItem("ghost/file.txt", 1, 50L);
+
+        var versions = database.getItem("ghost/file.txt").orElseThrow().versions();
+        assertEquals(1, versions.size());
+        assertInstanceOf(TombstoneFileVersion.class, versions.get(0));
+        assertEquals(50L, versions.get(0).sequenceNumber());
+    }
+
+    // =========================================================================
+    // GET ITEM
+    // =========================================================================
+
+    @Test
+    void testGetItemReturnsEmptyForMissingKey() throws Exception {
+        assertTrue(database.getItem("no-such-key").isEmpty());
+    }
+
+    // =========================================================================
+    // GET LATEST FILE VERSION
+    // =========================================================================
+
+    @Test
+    void testGetLatestFileVersionReturnsEmptyForMissingKey() throws Exception {
+        assertTrue(database.getLatestFileVersion("no-such-key").isEmpty());
+    }
+
+    @Test
+    void testGetLatestFileVersionReturnsSingleVersion() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+
+        var latest = database.getLatestFileVersion("animals/cat.jpg").orElseThrow();
+        assertInstanceOf(RegularFileVersion.class, latest);
+        assertEquals(100L, latest.sequenceNumber());
+        assertEquals("/uuid-100.blob", ((RegularFileVersion) latest).location());
+    }
+
+    @Test
+    void testGetLatestFileVersionReturnsLastVersionWhenMultipleExist() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+        database.putItem("animals/cat.jpg", 1, 101L, "/uuid-101.blob");
+        database.putItem("animals/cat.jpg", 1, 102L, "/uuid-102.blob");
+
+        var latest = database.getLatestFileVersion("animals/cat.jpg").orElseThrow();
+        assertEquals(102L, latest.sequenceNumber());
+        assertEquals("/uuid-102.blob", ((RegularFileVersion) latest).location());
+    }
+
+    @Test
+    void testGetLatestFileVersionReturnsMultipartVersionWhenLatest() throws Exception {
+        database.putItem("animals/dog.jpg", 1, 10L, "/uuid-10.blob");
+        database.putMultipartItem("animals/dog.jpg", 1, 20L, List.of("chunk-0.blob", "chunk-1.blob"));
+
+        var latest = database.getLatestFileVersion("animals/dog.jpg").orElseThrow();
+        assertInstanceOf(MultipartFileVersion.class, latest);
+        assertEquals(20L, latest.sequenceNumber());
+        assertEquals(List.of("chunk-0.blob", "chunk-1.blob"), ((MultipartFileVersion) latest).chunks());
+    }
+
+    @Test
+    void testGetLatestFileVersionReturnsTombstoneWhenDeleted() throws Exception {
+        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+        database.deleteItem("animals/cat.jpg", 1, 101L);
+
+        var latest = database.getLatestFileVersion("animals/cat.jpg").orElseThrow();
+        assertInstanceOf(TombstoneFileVersion.class, latest);
+        assertEquals(101L, latest.sequenceNumber());
+    }
+
+    // =========================================================================
+    // CREATE BUCKET
+    // =========================================================================
+
+    @Test
+    void testCreateBucketAndBucketExists() throws Exception {
+        assertFalse(database.bucketExists("animals"));
+        database.createBucket("animals", 1, 5L);
+        assertTrue(database.bucketExists("animals"));
+    }
+
+    // =========================================================================
+    // DELETE BUCKET
+    // =========================================================================
+
+    @Test
+    void testDeleteBucketTombstones() throws Exception {
+        database.createBucket("animals", 1, 5L);
+        assertTrue(database.bucketExists("animals"));
+        database.deleteBucket("animals", 1, 10L);
+        assertFalse(database.bucketExists("animals"));
+    }
+
+    @Test
+    void testDeleteBucketOnNonExistentKeyIsHandled() throws Exception {
+        assertDoesNotThrow(() -> database.deleteBucket("ghost-bucket", 1, 1L));
+        assertFalse(database.bucketExists("ghost-bucket"));
+    }
+
+    // =========================================================================
+    // BUCKET EXISTS
+    // =========================================================================
+
+    @Test
+    void testBucketExistsReturnsFalseForMissingKey() throws Exception {
+        assertFalse(database.bucketExists("nonexistent"));
+    }
+
+    // =========================================================================
+    // LIST ITEMS IN BUCKET
+    // =========================================================================
+
+    @Test
+    void testListItemsInBucket() throws Exception {
+        database.putItem("photos/cat.jpg", 1, 1L, "/blob-1");
+        database.putItem("photos/dog.jpg", 1, 2L, "/blob-2");
+        database.putItem("videos/clip.mp4", 1, 3L, "/blob-3");
+        database.putItem("photos_backup/cat.jpg", 1, 4L, "/blob-4");
+
+        try (Stream<Metadata> stream = database.listItemsInBucket("photos/")) {
+            List<String> keys = stream.map(Metadata::key).collect(Collectors.toList());
+            assertEquals(2, keys.size());
+            assertTrue(keys.containsAll(List.of("photos/cat.jpg", "photos/dog.jpg")));
         }
     }
 
     @Test
-    void testLogOperationAndGetLogs() throws Exception {
-        // Log a few operations
-        database.logOperation(1L, "file1.txt", "PUT");
-        database.logOperation(2L, "file2.txt", "DELETE");
-
-        // Retrieve the logs
-        try (Stream<OpLog> logStream = database.getLogs(2L, 1L)) {
-            List<OpLog> logs = logStream.collect(Collectors.toList());
-
-            assertEquals(2, logs.size(), "Should retrieve exactly 2 logs");
-            
-            // InMemoryStorageStrategy's subMap().reversed() returns descending order
-            assertEquals(2L, logs.get(0).seqNum());
-            assertEquals("file2.txt", logs.get(0).key());
-            assertEquals("DELETE", logs.get(0).operation());
-
-            assertEquals(1L, logs.get(1).seqNum());
-            assertEquals("file1.txt", logs.get(1).key());
-            assertEquals("PUT", logs.get(1).operation());
+    void testListItemsInBucketReturnsEmptyForUnknownPrefix() throws Exception {
+        database.putItem("photos/cat.jpg", 1, 1L, "/blob-1");
+        try (Stream<Metadata> stream = database.listItemsInBucket("videos/")) {
+            assertTrue(stream.collect(Collectors.toList()).isEmpty());
         }
     }
 
+    // =========================================================================
+    // Metadata serialization round-trips
+    // =========================================================================
+
     @Test
-    void testLogOpAndGetALog() throws Exception{
-        database.logOperation(10, "singleFile.txt", "PUT");
-        var logOpt = database.getOpLog(10L);
-        assertTrue(logOpt.isPresent(), "Log should not be null");
-        var log = logOpt.get();
-        assertEquals(10L, log.seqNum());
-        assertEquals("singleFile.txt", log.key());
-        assertEquals("PUT", log.operation());
+    void testMetadataSerializationRoundTripRegular() {
+        Metadata original = new Metadata("animals/cat.jpg", 1,
+                List.of(new RegularFileVersion(100L, "/uuid1.blob"),
+                        new RegularFileVersion(101L, "/uuid2.blob")));
+        Metadata rt = Metadata.from(original.serialize());
+        assertEquals(2, rt.versions().size());
+        assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
+        assertEquals(100L, rt.versions().get(0).sequenceNumber());
     }
 
     @Test
-    void testGetOpLogReturnsEmptyForMissingKey() throws Exception {
-        var logOpt = database.getOpLog(999L);
-        assertTrue(logOpt.isEmpty(), "Should return empty Optional for missing log");
+    void testMetadataSerializationRoundTripMultipart() {
+        Metadata original = new Metadata("animals/dog.jpg", 1,
+                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"))));
+        Metadata rt = Metadata.from(original.serialize());
+        assertInstanceOf(MultipartFileVersion.class, rt.versions().get(0));
+        assertEquals(List.of("chunk-0.blob", "chunk-1.blob"),
+                ((MultipartFileVersion) rt.versions().get(0)).chunks());
     }
 
     @Test
-    void testStreamMetadataWithPrefixReturnsEmptyForMissingPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", "1", 1L);
-        database.setMetadata("folderB/file2.txt", "loc2", "2", 2L);
-
-        try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("nonexistent/")) {
-            List<Metadata> results = metaStream
-                .filter(m -> m.fileName().startsWith("nonexistent/"))
-                .collect(Collectors.toList());
-            assertTrue(results.isEmpty(), "Should return empty list for missing prefix");
-        }
+    void testMetadataSerializationRoundTripTombstone() {
+        Metadata original = new Metadata("animals/cat.jpg", 1,
+                List.of(new RegularFileVersion(100L, "/uuid1.blob"),
+                        new TombstoneFileVersion(101L)));
+        Metadata rt = Metadata.from(original.serialize());
+        assertEquals(2, rt.versions().size());
+        assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
+        assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(1));
+        assertEquals(101L, rt.versions().get(1).sequenceNumber());
     }
 
     @Test
-    void testLogOperationWithSameSequenceNumberOverrides() throws Exception {
-        database.logOperation(5L, "file.txt", "PUT");
-        database.logOperation(5L, "file.txt", "DELETE");
-        var logOp = database.getOpLog(5L);
-        assertEquals("DELETE",logOp.get().operation());
+    void testMetadataSerializationRoundTripAllThreeTypes() {
+        Metadata original = new Metadata("mixed/key", 2, List.of(
+                new RegularFileVersion(10L, "/blob-10"),
+                new MultipartFileVersion(20L, List.of("chunk-a", "chunk-b")),
+                new TombstoneFileVersion(30L)));
+        Metadata rt = Metadata.from(original.serialize());
+        assertEquals(3, rt.versions().size());
+        assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
+        assertInstanceOf(MultipartFileVersion.class, rt.versions().get(1));
+        assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(2));
+        assertEquals(30L, rt.versions().get(2).sequenceNumber());
     }
 
-    @Test
-    void testSetAndGetMetadata() throws Exception {
-        String fileKey = "partition_1/fileA.dat";
-        String location = "/data/p1/fileA.dat";
-        String partition = "1";
-        long seq = 100L;
-
-        // Set the metadata
-        database.setMetadata(fileKey, location, partition, seq);
-
-        // Retrieve the metadata
-        var metadataOpt = database.getMetadata(fileKey);
-
-        assertTrue(metadataOpt.isPresent(), "Metadata should not be null");
-        var metadata = metadataOpt.get();
-        assertEquals(fileKey, metadata.fileName());
-        assertEquals(location, metadata.location());
-        assertEquals(partition, metadata.partition());
-        assertEquals(seq, metadata.sequenceNumber());
-    }
+    // =========================================================================
+    // Lifecycle
+    // =========================================================================
 
     @Test
-    void testGetMetadataReturnsEmptyForMissingKey() throws Exception {
-        var metadata = database.getMetadata("non_existent_file.txt");
-        assertTrue(metadata.isEmpty(), "Retrieving missing metadata should return null");
-    }
-
-    @Test
-    void testAtomicallyUpdate() throws Exception {
-        long seq = 42L;
-        String fileKey = "test-atomic.txt";
-        String operation = "PUT";
-        String location = "/disk1/test-atomic.txt";
-        String partition = "2";
-
-        // Perform atomic update
-        database.atomicallyUpdate(seq, fileKey, operation, location, partition);
-
-        // Verify metadata was updated
-        var metadataOpt = database.getMetadata(fileKey);
-        assertTrue(metadataOpt.isPresent());
-        var metadata = metadataOpt.get();
-        assertEquals(location, metadata.location());
-        assertEquals(partition, metadata.partition());
-        assertEquals(seq, metadata.sequenceNumber());
-
-        // Verify log was added
-        try (Stream<OpLog> logStream = database.getLogs(seq, seq)) {
-            List<OpLog> logs = logStream.collect(Collectors.toList());
-            assertEquals(1, logs.size());
-            assertEquals(operation, logs.get(0).operation());
-            assertEquals(fileKey, logs.get(0).key());
-        }
-    }
-
-    @Test
-    void testGetLogsRange() throws Exception {
-        // Insert logs with sequences 1 through 5
-        for (long i = 1; i <= 5; i++) {
-            database.logOperation(i, "file_" + i, "OP_" + i);
-        }
-
-        // Query logs from seq 2 to seq 4
-        try (Stream<OpLog> logStream = database.getLogs(4L, 2L)) {
-            List<OpLog> logs = logStream.collect(Collectors.toList());
-
-            // Should retrieve 3 logs: seq 4, 3, 2 (reversed order due to descending map)
-            assertEquals(3, logs.size());
-            assertEquals(4L, logs.get(0).seqNum());
-            assertEquals(3L, logs.get(1).seqNum());
-            assertEquals(2L, logs.get(2).seqNum());
-        }
-    }
-
-    @Test
-    void testStreamMetadataWithPrefix() throws Exception {
-        database.setMetadata("folderA/file1.txt", "loc1", "1", 1L);
-        database.setMetadata("folderA/file2.txt", "loc2", "1", 2L);
-        database.setMetadata("folderB/file3.txt", "loc3", "2", 3L);
-        database.setMetadata("folderA_suffix/file4.txt", "loc4", "1", 4L);
-
-        // Stream metadata starting with "folderA/"
-        try (Stream<Metadata> metaStream = database.streamMetadataWithPrefix("folderA/")) {
-            List<Metadata> results = metaStream
-                    // Note: InMemoryStorageStrategy tailMap returns everything after the prefix.
-                    // To strictly match prefix semantics, we filter it here (as a real caller would 
-                    // or as RocksDbStorageStrategy handles internally).
-                    .filter(m -> m.fileName().startsWith("folderA/"))
-                    .collect(Collectors.toList());
-
-            assertEquals(2, results.size(), "Should only find exact prefix matches");
-            
-            List<String> fileNames = results.stream().map(Metadata::fileName).collect(Collectors.toList());
-            assertTrue(fileNames.contains("folderA/file1.txt"));
-            assertTrue(fileNames.contains("folderA/file2.txt"));
-        }
-    }
-
-    @Test
-    void testCloseClearsInMemoryStorage() throws Exception {
-        database.setMetadata("file.txt", "loc", "1", 1L);
-        database.logOperation(1L, "file.txt", "PUT");
-        
-        // Ensure data is there
-        assertTrue(database.getMetadata("file.txt").isPresent());
-        
-        // Close the database (which calls close() on InMemoryStorageStrategy, clearing maps)
+    void testCloseClearsAllTables() throws Exception {
+        database.putItem("file.txt", 1, 1L, "/blob-1");
+        database.createBucket("my-bucket", 1, 2L);
         database.close();
-        
-        // Data should be gone
-        assertTrue(database.getMetadata("file.txt").isEmpty());
-        try (Stream<OpLog> logs = database.getLogs(1L, 1L)) {
-            assertEquals(0, logs.count());
-        }
+        assertTrue(database.getItem("file.txt").isEmpty());
+        assertFalse(database.bucketExists("my-bucket"));
     }
 }
