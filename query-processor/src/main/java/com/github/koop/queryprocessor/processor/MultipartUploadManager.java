@@ -69,7 +69,11 @@ public class MultipartUploadManager {
 
         String partsKey = MultipartUploadSession.partsKey(uploadId);
         String partMember = String.valueOf(partNumber);
-        if (cache.setMembers(partsKey).contains(partMember)) {
+
+        // Atomically reserve this part number in an existing parts set.
+        // Returns false if the upload was aborted (set deleted) or if this
+        // part number was already uploaded.
+        if (!cache.setAddIfAbsent(partsKey, partMember)) {
             return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
                 "Part " + partNumber + " already uploaded for upload " + uploadId);
         }
@@ -81,22 +85,20 @@ public class MultipartUploadManager {
         try {
             stored = storageWorker.put(UUID.randomUUID(), sessionBucket, partStorageKey, length, data);
         } catch (Exception e) {
+            cache.setRemove(partsKey, partMember);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
                     "Exception storing part " + partNumber + " for upload " + uploadId);
         }
         if (!stored) {
+            cache.setRemove(partsKey, partMember);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
                     "Failed to store part " + partNumber + " for upload " + uploadId);
         }
 
         if (!cache.exists(MultipartUploadSession.sessionKey(uploadId))) {
+            cache.setRemove(partsKey, partMember);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
                     "Upload " + uploadId + " is no longer ACTIVE");
-        }
-
-        if (!cache.setAddIfPresent(partsKey, partMember)) {
-            return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
-                    "Upload " + uploadId + " was aborted");
         }
 
         cache.put(MultipartUploadSession.partSizeKey(uploadId, partNumber), String.valueOf(length));
@@ -182,6 +184,11 @@ public class MultipartUploadManager {
             partNumberStrings.add(String.valueOf(partNum));
         }
         
+            // TODO: Populate sender with the actual query-processor's bound address
+            // for proper routing, debugging, and acknowledgement on storage nodes.
+            // Currently uses 127.0.0.1:0 as a placeholder. This should be replaced
+            // with the real InetSocketAddress of this query-processor instance,
+            // obtained from configuration or runtime binding info. See PR #73 discussion.
         Message manifestMessage = new Message.MultipartCommitMessage(
             sessionBucket,
             sessionKey,
@@ -204,9 +211,39 @@ public class MultipartUploadManager {
                     "Failed to publish multipart manifest for upload " + uploadId);
         }
 
-        // Mark upload as COMPLETED in cache and clean up session state
-        cache.delete(MultipartUploadSession.sessionKey(uploadId));
-        cache.setDelete(MultipartUploadSession.partsKey(uploadId));
+            // Persist a minimal manifest keyed by the final object identifier so that  
+            // read paths can later discover how to reconstruct the object from parts,  
+            // without relying solely on the asynchronous MultipartCommitMessage.  
+            //  
+            // The manifest format is intentionally simple:  
+            //   uploadId|partNum1,partNum2,...,partNumN  
+            // and is stored under a cache key derived from {bucket,key}.  
+            // TODO(multipart-temp): Transitional fallback for PR #73.
+            // This cache-persisted manifest is temporary until storage-node side multipart
+            // commit is fully implemented (sequencer consumer + durable RocksDB metadata
+            // under final object key). Once storage nodes can durably commit/retrieve multipart
+            // metadata, remove this cache manifest as a source of truth.
+            String manifestCacheKey = "multipart:manifest:" + sessionBucket + ":" + sessionKey;  
+            String manifestPayload =  
+                   uploadId + "|" + String.join(",", partNumberStrings);  
+            cache.put(manifestCacheKey, manifestPayload);  
+
+            // Mark upload as COMPLETED in cache but retain session and parts metadata  
+            // so that background GC can later discover and clean up physical part shards.  
+            // The session is retained with a TTL (48 hours) to give GC time to run;  
+            // after TTL expiration, the cache automatically removes the session entry.  
+            // TODO(multipart-temp): Transitional retention for orphan-part GC while storage-node
+            // durable multipart lifecycle is incomplete. Final design should move authoritative
+            // completion state + GC discoverability to storage-node metadata/logging, then
+            // remove/relax this query-processor cache retention policy.
+            final long SESSION_RETENTION_TTL_SECONDS = 48 * 60 * 60;  // 172800 seconds  
+            cache.putWithTTL(  
+                MultipartUploadSession.sessionKey(uploadId),  
+                session.withStatus(MultipartUploadSession.UploadStatus.COMPLETED).serialize(),  
+                SESSION_RETENTION_TTL_SECONDS  
+            );  
+            // Note: parts set (mpu:parts:{uploadId}) is retained as well, allowing  
+            // GC to discover which shards were uploaded vs. omitted by the client.
         
         // Clean up part size metadata, but keep parts in storage for reconstruction on read
         for (int partNumber : sortedPartNumbers) {

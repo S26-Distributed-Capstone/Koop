@@ -15,6 +15,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *       {@link ConcurrentHashMap#newKeySet()}.</li>
  * </ul>
  *
+ * <p>A third {@code ConcurrentHashMap<String, Long>} tracks expiration times
+ * for keys with TTL. Expired keys are not automatically deleted; callers should
+ * check expiration before use (or implement a background cleanup task).</p>
+ *
  * <p>All operations are thread-safe and suitable for use with Javalin's
  * virtual-thread executor. No external dependencies are required.
  *
@@ -25,10 +29,12 @@ public class MemoryCacheClient implements CacheClient {
 
     private final ConcurrentHashMap<String, String> kvStore;
     private final ConcurrentHashMap<String, Set<String>> setStore;
+    private final ConcurrentHashMap<String, Long> expirationTimes;
 
     public MemoryCacheClient() {
         this.kvStore = new ConcurrentHashMap<>();
         this.setStore = new ConcurrentHashMap<>();
+        this.expirationTimes = new ConcurrentHashMap<>();
     }
 
     // ─── Key-Value Operations ─────────────────────────────────────────────────
@@ -36,21 +42,41 @@ public class MemoryCacheClient implements CacheClient {
     @Override
     public void put(String key, String value) {
         kvStore.put(key, value);
+        expirationTimes.remove(key);
+    }
+
+    @Override
+    public void putWithTTL(String key, String value, long ttlSeconds) {
+        kvStore.put(key, value);
+        long expirationTime = System.currentTimeMillis() + (ttlSeconds * 1000L);
+        expirationTimes.put(key, expirationTime);
     }
 
     @Override
     public boolean putIfPresent(String key, String value) {
-        return kvStore.computeIfPresent(key, (k, v) -> value) != null;
+        boolean updated = kvStore.computeIfPresent(key, (k, v) -> value) != null;
+        if (!updated) {
+            expirationTimes.remove(key);
+        }
+        return updated;
     }
 
     @Override
     public String get(String key) {
+        // Check if key has expired
+        Long expirationTime = expirationTimes.get(key);
+        if (expirationTime != null && System.currentTimeMillis() > expirationTime) {
+            kvStore.remove(key);
+            expirationTimes.remove(key);
+            return null;
+        }
         return kvStore.get(key);
     }
 
     @Override
     public void delete(String key) {
         kvStore.remove(key);
+        expirationTimes.remove(key);
     }
 
     @Override
@@ -67,6 +93,16 @@ public class MemoryCacheClient implements CacheClient {
     }
 
     @Override
+    public boolean setAddIfAbsent(String key, String member) {
+        Set<String> set = setStore.get(key);
+        if (set == null) {
+            return false;
+        }
+        // add() returns true if member was not already present, false if already there
+        return set.add(member);
+    }
+
+    @Override
     public boolean setAddIfPresent(String key, String member) {
         Set<String> existing = setStore.get(key);
         if (existing == null) {
@@ -74,6 +110,15 @@ public class MemoryCacheClient implements CacheClient {
         }
         existing.add(member);
         return true;
+    }
+
+    @Override
+    public boolean setRemove(String key, String member) {
+        Set<String> existing = setStore.get(key);
+        if (existing == null) {
+            return false;
+        }
+        return existing.remove(member);
     }
 
     @Override

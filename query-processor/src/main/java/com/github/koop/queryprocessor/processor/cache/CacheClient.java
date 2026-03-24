@@ -31,6 +31,12 @@ public interface CacheClient {
     void put(String key, String value);
 
     /**
+     * Stores {@code value} under {@code key} with an expiration time in seconds.
+     * After the TTL expires, the key is automatically deleted.
+     */
+    void putWithTTL(String key, String value, long ttlSeconds);
+
+    /**
      * Stores {@code value} only if {@code key} already exists.
      *
      * @return {@code true} if the value was updated, {@code false} if absent.
@@ -61,11 +67,28 @@ public interface CacheClient {
     void setAdd(String key, String member);
 
     /**
+     * Atomically adds {@code member} to the set identified by {@code key} only if
+     * the set already exists and the member is not already present.
+     *
+     * @return {@code true} if the member was added, {@code false} if the set is
+     * absent or the member already exists.
+     */
+    boolean setAddIfAbsent(String key, String member);
+
+    /**
      * Adds {@code member} only if the set identified by {@code key} already exists.
      *
      * @return {@code true} if added to an existing set, {@code false} if absent.
      */
     boolean setAddIfPresent(String key, String member);
+
+    /**
+     * Removes {@code member} from the set identified by {@code key}.
+     *
+     * @return {@code true} if the member was removed, {@code false} if the set
+     * or member did not exist.
+     */
+    boolean setRemove(String key, String member);
 
     /**
      * Ensures a set exists for {@code key}. No-op if already present.

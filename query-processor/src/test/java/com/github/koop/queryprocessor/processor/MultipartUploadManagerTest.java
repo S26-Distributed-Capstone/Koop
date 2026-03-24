@@ -254,8 +254,11 @@ class MultipartUploadManagerTest {
                 uploadId,
                 List.of(new StorageService.CompletedPart(1)));
 
-        assertEquals(null, cache.get(MultipartUploadSession.sessionKey(uploadId)));
-        assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).isEmpty());
+        String serializedSession = cache.get(MultipartUploadSession.sessionKey(uploadId));
+        assertNotNull(serializedSession);
+        MultipartUploadSession completedSession = MultipartUploadSession.deserialize(serializedSession);
+        assertEquals(MultipartUploadSession.UploadStatus.COMPLETED, completedSession.status());
+        assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).contains("1"));
         assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
     }
 

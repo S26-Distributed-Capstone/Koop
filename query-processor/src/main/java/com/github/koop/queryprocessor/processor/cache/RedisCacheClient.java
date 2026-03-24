@@ -22,6 +22,11 @@ public class RedisCacheClient implements CacheClient {
     }
 
     @Override
+    public void putWithTTL(String key, String value, long ttlSeconds) {
+        throw new UnsupportedOperationException("RedisCacheClient.putWithTTL not implemented");
+    }
+
+    @Override
     public boolean putIfPresent(String key, String value) {
         throw new UnsupportedOperationException("RedisCacheClient.putIfPresent not implemented");
     }
@@ -47,8 +52,18 @@ public class RedisCacheClient implements CacheClient {
     }
 
     @Override
+    public boolean setAddIfAbsent(String key, String member) {
+        throw new UnsupportedOperationException("RedisCacheClient.setAddIfAbsent not implemented");
+    }
+
+    @Override
     public boolean setAddIfPresent(String key, String member) {
         throw new UnsupportedOperationException("RedisCacheClient.setAddIfPresent not implemented");
+    }
+
+    @Override
+    public boolean setRemove(String key, String member) {
+        throw new UnsupportedOperationException("RedisCacheClient.setRemove not implemented");
     }
 
     @Override

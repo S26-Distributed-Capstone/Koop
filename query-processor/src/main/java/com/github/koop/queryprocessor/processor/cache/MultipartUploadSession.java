@@ -42,12 +42,16 @@ public record MultipartUploadSession(
      *       no further parts should be accepted.</li>
      *   <li>{@code ABORTING}   — {@code AbortMultipartUpload} has been acknowledged
      *       to the client; cleanup of part shards is in progress.</li>
+     *   <li>{@code COMPLETED}  — multipart upload successfully completed; session
+     *       retained with TTL for background garbage collection to discover
+     *       and clean up orphaned part shards.</li>
      * </ul>
      */
     public enum UploadStatus {
         ACTIVE,
         COMPLETING,
-        ABORTING
+        ABORTING,
+        COMPLETED
     }
 
     // ─── Serialization ────────────────────────────────────────────────────────
