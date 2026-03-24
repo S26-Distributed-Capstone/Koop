@@ -1,6 +1,6 @@
-# Distributed Object Store
+# Koop
 
-**Team Members:** TBD, TBD, TBD, TBD
+**Team Members:** Koop, Eitan, Yonatan
 
 
 ## Overview
