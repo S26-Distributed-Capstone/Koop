@@ -43,17 +43,17 @@ public class StorageNodeServerV2 {
     private final StorageNodeV2 storageNode;
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
-    
+
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
-    
+
     // Tracks active partition subscriptions and their dedicated executors
     private final Set<Integer> subscribedPartitions = new HashSet<>();
     private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
-    
+
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
+
     // HTTP Client for sending asynchronous acknowledgments
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -61,7 +61,8 @@ public class StorageNodeServerV2 {
 
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
-    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient, PubSubClient pubSubClient) {
+    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
+            PubSubClient pubSubClient) {
         this.port = port;
         this.ip = ip;
         this.storageNode = new StorageNodeV2(db, dir);
@@ -88,9 +89,9 @@ public class StorageNodeServerV2 {
         }
 
         // Injected dependencies
-        Database db = null; 
-        MetadataClient metadataClient = null; 
-        PubSubClient pubSubClient = null; 
+        Database db = null;
+        MetadataClient metadataClient = null;
+        PubSubClient pubSubClient = null;
 
         StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
 
@@ -118,13 +119,15 @@ public class StorageNodeServerV2 {
                     break;
                 }
             }
-            if (myErasureSetId != -1) break;
+            if (myErasureSetId != -1)
+                break;
         }
 
         Set<Integer> targetPartitions = new HashSet<>();
 
         if (myErasureSetId == -1) {
-            logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip, this.port);
+            logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
+                    this.port);
         } else {
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
                 if (spread.getErasureSet() == myErasureSetId) {
@@ -141,7 +144,7 @@ public class StorageNodeServerV2 {
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
             subscribedPartitions.remove(partition);
-            
+
             ExecutorService executor = partitionExecutors.remove(partition);
             if (executor != null) {
                 executor.shutdown();
@@ -162,21 +165,23 @@ public class StorageNodeServerV2 {
         for (Integer partition : toAdd) {
             String topic = "partition-" + partition;
             logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
-            
-            ExecutorService partitionExecutor = Executors.newSingleThreadExecutor();
+
+            ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
+                    Thread.ofVirtual().name("partition-" + partition + "-worker").factory());
             partitionExecutors.put(partition, partitionExecutor);
-            
+
             pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
                 partitionExecutor.submit(() -> {
                     try {
                         Message message = objectMapper.readValue(messageBytes, Message.class);
                         processSequencerMessage(partition, message, offset);
                     } catch (Exception e) {
-                        logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic, offset, e);
+                        logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic,
+                                offset, e);
                     }
                 });
             });
-            
+
             subscribedPartitions.add(partition);
         }
     }
@@ -209,10 +214,10 @@ public class StorageNodeServerV2 {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
-            
+
             String versionParam = ctx.queryParam("version");
             long targetVersion = -1;
-            
+
             if (versionParam != null && !versionParam.isBlank()) {
                 try {
                     targetVersion = Long.parseLong(versionParam);
@@ -221,20 +226,20 @@ public class StorageNodeServerV2 {
                     return;
                 }
             }
-            
+
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
-            
+
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
-                
+
                 long responseSequenceNumber = switch (response) {
                     case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
                     case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
                     case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
                 };
-                
+
                 ctx.header("X-Object-Version", String.valueOf(responseSequenceNumber));
-                
+
                 if (response instanceof StorageNodeV2.FileObject fo) {
                     var fc = fo.data();
                     ctx.status(200)
@@ -247,24 +252,28 @@ public class StorageNodeServerV2 {
                     while (position < size) {
                         long transferred = fc.transferTo(position, size - position, outputChannel);
                         if (transferred <= 0) {
-                            logger.warn("Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
+                            logger.warn(
+                                    "Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
                                     partition, key, position, size);
                             break;
                         }
                         position += transferred;
                     }
                     fo.close();
-                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key, responseSequenceNumber, size);
-                    
+                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key,
+                            responseSequenceNumber, size);
+
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.status(200)
                             .header("Content-Type", "application/json")
                             .json(md.version().chunks());
-                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key, responseSequenceNumber);
-                    
+                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key,
+                            responseSequenceNumber);
+
                 } else if (response instanceof StorageNodeV2.Tombstone) {
                     ctx.status(404).result("NOT_FOUND (Tombstone)");
-                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key, responseSequenceNumber);
+                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key,
+                            responseSequenceNumber);
                 }
             } else {
                 ctx.status(404).result("NOT_FOUND");
@@ -344,7 +353,8 @@ public class StorageNodeServerV2 {
                         if (res.statusCode() >= 200 && res.statusCode() < 300) {
                             logger.debug("Successfully sent ACK for requestId: {} to {}", requestId, url);
                         } else {
-                            logger.warn("Received non-2xx status {} when sending ACK for requestId: {} to {}", res.statusCode(), requestId, url);
+                            logger.warn("Received non-2xx status {} when sending ACK for requestId: {} to {}",
+                                    res.statusCode(), requestId, url);
                         }
                     })
                     .exceptionally(ex -> {
@@ -357,7 +367,8 @@ public class StorageNodeServerV2 {
     }
 
     private String buildKey(String bucket, String key) {
-        if (bucket == null || bucket.isEmpty()) return key;
+        if (bucket == null || bucket.isEmpty())
+            return key;
         return bucket + "/" + key;
     }
 
@@ -398,10 +409,10 @@ public class StorageNodeServerV2 {
         if (app != null) {
             app.stop();
         }
-        
+
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
-        
+
         try {
             if (metadataClient != null) {
                 metadataClient.close();
