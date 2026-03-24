@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -133,6 +134,22 @@ class MultipartUploadManagerTest {
         assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
 
+        @Test
+        void uploadPart_bucketOrKeyMismatch_throwsConflict() {
+                String uploadId = manager.initiateMultipartUpload("bucket", "file");
+                byte[] payload = "x".getBytes(StandardCharsets.UTF_8);
+
+                MultipartUploadResult result = manager.uploadPart(
+                                "other-bucket",
+                                "other-key",
+                                uploadId,
+                                1,
+                                new ByteArrayInputStream(payload),
+                                payload.length);
+
+                assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
+        }
+
     @Test
     void complete_allPartsPresent_assemblesAndStores() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
@@ -184,6 +201,19 @@ class MultipartUploadManagerTest {
         assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
     }
 
+        @Test
+        void complete_bucketOrKeyMismatch_throwsConflict() {
+                String uploadId = manager.initiateMultipartUpload("bucket", "final-key");
+
+                MultipartUploadResult result = manager.completeMultipartUpload(
+                                "other-bucket",
+                                "other-key",
+                                uploadId,
+                                List.of(new StorageService.CompletedPart(1)));
+
+                assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
+        }
+
     @Test
     void complete_cleansUpCacheAfterSuccess() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
@@ -210,6 +240,64 @@ class MultipartUploadManagerTest {
     }
 
     @Test
+    void complete_omittedUploadedParts_areAlsoCleanedUp() throws Exception {
+        when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
+                .thenReturn(true);
+
+        String uploadId = manager.initiateMultipartUpload("bucket", "final-key");
+        byte[] p1 = "hello ".getBytes(StandardCharsets.UTF_8);
+        byte[] p2 = "world".getBytes(StandardCharsets.UTF_8);
+
+        manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
+        manager.uploadPart("bucket", "final-key", uploadId, 2, new ByteArrayInputStream(p2), p2.length);
+
+        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
+        String part2Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 2);
+
+        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
+                .thenReturn(new ByteArrayInputStream(p1));
+
+        MultipartUploadResult result = manager.completeMultipartUpload(
+                "bucket",
+                "final-key",
+                uploadId,
+                List.of(new StorageService.CompletedPart(1)));
+
+        assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
+        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part1Key));
+        verify(storageWorker, times(1)).delete(any(UUID.class), eq("bucket"), eq(part2Key));
+        assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
+        assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 2)));
+    }
+
+    @Test
+    void complete_storeFailure_canRetryWithoutStuckCompleting() throws Exception {
+        when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
+                .thenReturn(true);
+
+        String uploadId = manager.initiateMultipartUpload("bucket", "final-key");
+        byte[] p1 = "a".getBytes(StandardCharsets.UTF_8);
+
+        manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
+
+        reset(storageWorker);
+
+        String part1Key = MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1);
+        when(storageWorker.get(any(UUID.class), eq("bucket"), eq(part1Key)))
+                .thenReturn(new ByteArrayInputStream(p1), new ByteArrayInputStream(p1));
+        when(storageWorker.put(any(UUID.class), eq("bucket"), eq("final-key"), anyLong(), any(InputStream.class)))
+                .thenReturn(false, true);
+
+        List<StorageService.CompletedPart> parts = List.of(new StorageService.CompletedPart(1));
+
+        MultipartUploadResult first = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+        MultipartUploadResult second = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+
+        assertEquals(MultipartUploadResult.Status.STORAGE_FAILURE, first.status());
+        assertEquals(MultipartUploadResult.Status.SUCCESS, second.status());
+    }
+
+    @Test
     void abort_marksAsAborting_thenCleansUp() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
                 .thenReturn(true);
@@ -233,6 +321,15 @@ class MultipartUploadManagerTest {
         manager.abortMultipartUpload("bucket", "file", "missing-upload");
         verify(storageWorker, never()).delete(any(UUID.class), anyString(), anyString());
     }
+
+        @Test
+        void abort_bucketOrKeyMismatch_throwsConflict() {
+                String uploadId = manager.initiateMultipartUpload("bucket", "file");
+
+                MultipartUploadResult result = manager.abortMultipartUpload("other-bucket", "other-key", uploadId);
+
+                assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
+        }
 
     @Test
     void concurrent_twoPartsUploadedSimultaneously() throws Exception {

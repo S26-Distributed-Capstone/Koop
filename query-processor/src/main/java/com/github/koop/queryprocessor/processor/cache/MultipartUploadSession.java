@@ -59,7 +59,7 @@ public record MultipartUploadSession(
      * cache key-value store.
      */
     public String serialize() {
-        return uploadId + DELIMITER + bucket + DELIMITER + key + DELIMITER + status.name();
+        return escapeComponent(uploadId) + DELIMITER + escapeComponent(bucket) + DELIMITER + escapeComponent(key) + DELIMITER + status.name();
     }
 
     /**
@@ -76,11 +76,18 @@ public record MultipartUploadSession(
             throw new IllegalArgumentException("Malformed session value: " + value);
         }
         return new MultipartUploadSession(
-                parts[0],
-                parts[1],
-                parts[2],
+                unescapeComponent(parts[0]),
+                unescapeComponent(parts[1]),
+                unescapeComponent(parts[2]),
                 UploadStatus.valueOf(parts[3])
         );
+    }
+
+    /**
+     * Unescapes special characters in a component.
+     */
+    private static String unescapeComponent(String component) {
+        return component.replace("\\:", ":").replace("\\\\", "\\");
     }
 
     // ─── Cache Key Helpers ────────────────────────────────────────────────────
@@ -102,12 +109,22 @@ public record MultipartUploadSession(
 
     // ─── Storage Key Helper ───────────────────────────────────────────────────
 
+    private static final String PART_STORAGE_PREFIX = "__mpu__:";
+
     /**
      * Derives the storage-node key for a specific part shard.
-     * Format: {@code {bucket}-{key}-mpu-{uploadId}-part-{partNumber}}
+     * Uses a non-user-controllable namespace to prevent collisions with user keys.
+     * Format: {@code __mpu__:{bucket}:{key}:{uploadId}:{partNumber}}
      */
     public static String partStorageKey(String bucket, String key, String uploadId, int partNumber) {
-        return bucket + "-" + key + "-mpu-" + uploadId + "-part-" + partNumber;
+        return PART_STORAGE_PREFIX + escapeComponent(bucket) + ":" + escapeComponent(key) + ":" + escapeComponent(uploadId) + ":" + partNumber;
+    }
+
+    /**
+     * Escapes special characters in a component to prevent key collisions.
+     */
+    private static String escapeComponent(String component) {
+        return component.replace("\\", "\\\\").replace(":", "\\:");
     }
 
     // ─── Convenience Factory ──────────────────────────────────────────────────

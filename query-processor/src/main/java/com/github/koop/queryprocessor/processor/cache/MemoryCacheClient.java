@@ -68,7 +68,7 @@ public class MemoryCacheClient implements CacheClient {
             return Collections.emptySet();
         }
         // Return an unmodifiable snapshot so callers cannot mutate internal state
-        return Collections.unmodifiableSet(members);
+        return Set.copyOf(members);
     }
 
     @Override

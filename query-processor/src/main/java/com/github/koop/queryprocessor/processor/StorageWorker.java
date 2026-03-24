@@ -322,6 +322,11 @@ public final class StorageWorker {
             }
         }
 
+        if (tasks.isEmpty()) {
+            logger.warn("No nodes available to send message for topic {}", topic);
+            return false;
+        }
+
         long numSucceeded;
         try {
             numSucceeded = executor.invokeAll(tasks).stream().map(t -> {
@@ -337,8 +342,6 @@ public final class StorageWorker {
             return false;
         }
         
-        // Require success on a majority of nodes (K or more out of TOTAL * 3)
-        int totalNodes = TOTAL * 3;
         return numSucceeded >= ErasureCoder.K;
     }
 

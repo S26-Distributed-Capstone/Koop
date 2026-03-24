@@ -76,14 +76,16 @@ public class Main {
         return app;
     }
 
-    private static void verifyContentLength(Context ctx) {
+    private static boolean verifyContentLength(Context ctx) {
         long contentLength = ctx.contentLength();
         if(contentLength <= 0) {
             ctx.status(400);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InvalidRequest",
                     "Content-Length header is required and must be greater than 0.", ctx.path()));
+            return false;
         }
+        return true;
     }
 
     // ─── Health ───────────────────────────────────────────────────────────────
@@ -264,7 +266,9 @@ public class Main {
         String partNumberStr = ctx.queryParam("partNumber");
         String resourcePath = "/" + bucket + "/" + key;
         long contentLength = ctx.contentLength();
-        verifyContentLength(ctx);
+        if (!verifyContentLength(ctx)) {
+            return;
+        }
         try {
             if (uploadId != null && partNumberStr != null) {
                 // ── UploadPart ──
