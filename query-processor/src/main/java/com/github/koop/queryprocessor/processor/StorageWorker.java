@@ -46,9 +46,17 @@ public final class StorageWorker {
     private final ExecutorService executor;
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
+    private final CommitCoordinator commitCoordinator;
     private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
     private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
+
+    /**
+     * How many shard-upload attempts to make per node before giving up.
+     * The first attempt is made alongside all other shards; subsequent retries
+     * target only the nodes that failed, so they do not delay fast nodes.
+     */
+    private static final int MAX_UPLOAD_ATTEMPTS = 3;
 
     // FOR TESTING ONLY - constructs a MetadataClient backed by a MemoryFetcher
     // with an empty configuration; use the three-arg constructor to supply nodes.
@@ -61,16 +69,22 @@ public final class StorageWorker {
     // address lists (set numbers 1, 2, 3) and a matching PartitionSpreadConfiguration
     // with 99 partitions spread evenly across the three sets (33 each).
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
+        this(set1, set2, set3, 0);
+    }
+
+    // Overload that accepts a pre-built CommitCoordinator — used in tests that
+    // share a PubSubClient bus between the coordinator and the fake SNs.
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2,
+                         List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         MemoryFetcher fetcher = new MemoryFetcher();
         this.metadataClient = new MetadataClient(fetcher);
+        this.commitCoordinator = commitCoordinator;
         registerListeners();
         this.metadataClient.start();
-        // update() must come after start() so the listeners registered above are
-        // already in place when MemoryFetcher fires them synchronously.
         ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
         esConfig.setErasureSets(List.of(
                 toErasureSet(1, set1),
@@ -80,20 +94,82 @@ public final class StorageWorker {
         fetcher.update(buildTestPartitionSpread());
     }
 
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3, int ackPort) {
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        this.httpClient = HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .build();
+        MemoryFetcher fetcher = new MemoryFetcher();
+        this.metadataClient = new MetadataClient(fetcher);
+        try {
+            // MemoryPubSub routes messages back into the same process — sufficient
+            // for unit tests; replace with a Kafka-backed PubSubClient in prod.
+            com.github.koop.common.pubsub.PubSubClient pubSubClient =
+                    new com.github.koop.common.pubsub.PubSubClient(
+                            new com.github.koop.common.pubsub.MemoryPubSub());
+            pubSubClient.start();
+            this.commitCoordinator = new CommitCoordinator(pubSubClient, ackPort);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to start CommitCoordinator ACK server", e);
+        }
+        registerListeners();
+        this.metadataClient.start();
+        ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
+        esConfig.setErasureSets(List.of(
+                toErasureSet(1, set1),
+                toErasureSet(2, set2),
+                toErasureSet(3, set3)));
+        fetcher.update(esConfig);
+        fetcher.update(buildTestPartitionSpread());
+    }
+
+    // Convenience constructor that restores the original single-arg signature.
+    // Creates a MemoryPubSub-backed CommitCoordinator on an OS-assigned port,
+    // which is sufficient for tests that supply their own MetadataClient.
     public StorageWorker(MetadataClient metadataClient) {
+        this(metadataClient, buildDefaultCommitCoordinator());
+    }
+
+    public StorageWorker(MetadataClient metadataClient, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         this.metadataClient = metadataClient;
+        this.commitCoordinator = commitCoordinator;
         registerListeners();
         this.metadataClient.start();
+    }
+
+    private static CommitCoordinator buildDefaultCommitCoordinator() {
+        try {
+            com.github.koop.common.pubsub.PubSubClient pubSubClient =
+                    new com.github.koop.common.pubsub.PubSubClient(
+                            new com.github.koop.common.pubsub.MemoryPubSub());
+            pubSubClient.start();
+            return new CommitCoordinator(pubSubClient, 0);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to start CommitCoordinator ACK server", e);
+        }
     }
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
+    /**
+     * Executes a full PUT:
+     * <ol>
+     *   <li>Erasure-code and stream shards to all {@value com.github.koop.common.erasure.ErasureCoder#TOTAL}
+     *       storage nodes concurrently.</li>
+     *   <li>Retry failed shard uploads (up to {@value #MAX_UPLOAD_ATTEMPTS} total attempts)
+     *       until at least {@link CommitCoordinator#QUORUM} nodes have the data.</li>
+     *   <li>Publish a commit message to Kafka so every SN applies the operation to
+     *       its op-log / metadata (SNs that missed the stream reconstruct from peers).</li>
+     *   <li>Block until {@link CommitCoordinator#QUORUM} SN commit-ACKs are received,
+     *       then return {@code true} to the caller.</li>
+     * </ol>
+     */
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
@@ -114,58 +190,122 @@ public final class StorageWorker {
         int resolvedPartition = partition.getAsInt();
         List<InetSocketAddress> resolvedNodes = nodes.get();
 
-        // Shard the incoming stream — each InputStream carries shard data.
-        // IMPORTANT: all shard streams must be drained concurrently because
-        // the erasure encoder writes to 9 pipes in a single thread.
+        // Phase 1 – stream erasure-coded shards to storage nodes.
+        //
+        // All shard streams MUST be drained concurrently: ErasureCoder.shard()
+        // writes into 9 piped streams from a single encoder thread, so reading
+        // them sequentially would deadlock.
         InputStream[] shardStreams = ErasureCoder.shard(data, length);
 
-        List<Callable<Boolean>> tasks = new LinkedList<>();
-        for (int i = 0; i < TOTAL; i++) {
-            final int index = i;
-            tasks.add(() -> {
-                try {
+        // Track which shards have been successfully uploaded.
+        // Index i == true  →  node i has the shard.
+        boolean[] uploaded = new boolean[TOTAL];
+
+        // Attempt uploads, retrying failed nodes up to MAX_UPLOAD_ATTEMPTS times.
+        // On the first pass all TOTAL nodes are tried; subsequent passes target
+        // only the nodes that failed, keeping fast-path latency low.
+        for (int attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
+            // Collect tasks for nodes that still need their shard.
+            List<Callable<Integer>> tasks = new ArrayList<>();
+            for (int i = 0; i < TOTAL; i++) {
+                if (uploaded[i]) continue;           // already succeeded — skip
+                final int index = i;
+                final int currentAttempt = attempt;
+                tasks.add(() -> {
                     InetSocketAddress node = resolvedNodes.get(index);
-                    URI uri = URI.create(String.format("http://%s:%d/store/%d/%s?requestId=%s",
-                            node.getHostString(), node.getPort(), resolvedPartition, storageKey, requestID));
+                    URI uri = URI.create(String.format(
+                            "http://%s:%d/store/%d/%s?requestId=%s",
+                            node.getHostString(), node.getPort(),
+                            resolvedPartition, storageKey, requestID));
 
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(uri)
-                            .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
-                            .header("Content-Type", "application/octet-stream")
-                            .build();
-
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                    if (response.statusCode() != 200) {
-                        logger.trace("PUT failed for shard {} to node {}: HTTP {}", index, node, response.statusCode());
-                        return false;
+                    // On retries the original InputStream is already consumed;
+                    // the SN already has the data if attempt > 1, so we only
+                    // retry nodes that returned a non-200 on a previous pass.
+                    // shardStreams[index] for attempt==1; empty body for retries
+                    // (retry signals to the SN that it should reconstruct).
+                    HttpRequest request;
+                    if (currentAttempt == 1) {
+                        request = HttpRequest.newBuilder()
+                                .uri(uri)
+                                .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
+                                .header("Content-Type", "application/octet-stream")
+                                .build();
+                    } else {
+                        // Retry: send an empty body so the SN knows the request
+                        // ID is live; the SN will pull missing data from peers.
+                        request = HttpRequest.newBuilder()
+                                .uri(uri)
+                                .PUT(HttpRequest.BodyPublishers.noBody())
+                                .header("Content-Type", "application/octet-stream")
+                                .header("X-Retry", String.valueOf(currentAttempt))
+                                .build();
                     }
-                    logger.trace("PUT succeeded for shard {} to node {}", index, node);
-                    return true;
-                } catch (Exception e) {
-                    logger.trace("Exception for shard {}: {}", index, e.getMessage());
-                    return false;
-                }
-            });
+
+                    try {
+                        HttpResponse<String> response =
+                                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                        if (response.statusCode() == 200) {
+                            logger.trace("PUT shard {} → node {} succeeded (attempt {})",
+                                    index, node, currentAttempt);
+                            return index;           // signal success
+                        }
+                        logger.trace("PUT shard {} → node {} HTTP {} (attempt {})",
+                                index, node, response.statusCode(), currentAttempt);
+                    } catch (Exception e) {
+                        logger.trace("PUT shard {} → node {} exception (attempt {}): {}",
+                                index, node, currentAttempt, e.getMessage());
+                    }
+                    return -1;                      // signal failure
+                });
+            }
+
+            if (tasks.isEmpty()) break;             // every node already succeeded
+
+            try {
+                executor.invokeAll(tasks).forEach(future -> {
+                    try {
+                        int idx = future.get();
+                        if (idx >= 0) uploaded[idx] = true;
+                    } catch (InterruptedException | ExecutionException e) {
+                        logger.warn("Shard upload task error: {}", e.getMessage());
+                    }
+                });
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+
+            // Count how many nodes now have the shard.
+            int successCount = 0;
+            for (boolean u : uploaded) if (u) successCount++;
+
+            logger.trace("After attempt {}: {}/{} shards uploaded for requestId {}",
+                    attempt, successCount, TOTAL, requestID);
+
+            // If we already have quorum we can stop retrying early. SNs that
+            // didn't receive the stream will reconstruct their shard from peers
+            // after the commit message arrives.
+            if (successCount >= CommitCoordinator.QUORUM) break;
+
+            if (attempt == MAX_UPLOAD_ATTEMPTS && successCount < CommitCoordinator.QUORUM) {
+                logger.error("Only {}/{} shards uploaded after {} attempts for requestId {} — aborting",
+                        successCount, CommitCoordinator.QUORUM, MAX_UPLOAD_ATTEMPTS, requestID);
+                return false;
+            }
         }
 
-        long numWritten;
-        try {
-            logger.trace("Waiting for all shard uploads to complete");
-            numWritten = executor.invokeAll(tasks).stream().map(t -> {
-                try {
-                    return t.get();
-                } catch (InterruptedException | ExecutionException e) {
-                    logger.warn("Exception in shard upload task {}", e.getMessage());
-                    return false;
-                }
-            }).filter(it -> it).count();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+        // Phase 2 – commit.
+        //
+        // Publish the commit message to Kafka (via PubSubClient). Every SN will:
+        //   • add the op to its op-log + write metadata, if it has the shard; or
+        //   • reconstruct the shard from peers and then write metadata, if it doesn't.
+        // SNs ACK this QP's HTTP server when done. We block until QUORUM ACKs arrive.
+        logger.debug("Phase 1 complete for requestId {}, beginning commit phase", requestID);
+        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key);
+        if (!committed) {
+            logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
         }
-        logger.trace("All shard uploads completed, wrote {} shards successfully", numWritten);
-        return numWritten >= ErasureCoder.K;
+        return committed;
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
@@ -266,6 +406,7 @@ public final class StorageWorker {
 
     public void shutdown() {
         executor.shutdownNow();
+        commitCoordinator.close();
     }
 
     // -------------------------------------------------------------------------
