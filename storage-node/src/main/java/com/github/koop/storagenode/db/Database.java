@@ -5,10 +5,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
-/**
- * High-level database facade exposing exactly the operations the storage node
- * needs.
- */
 public class Database implements AutoCloseable {
     private final StorageStrategy strategy;
 
@@ -16,26 +12,50 @@ public class Database implements AutoCloseable {
         this.strategy = strategy;
     }
 
+    public void putUncommittedWrite(String requestID, long timestamp) throws Exception {
+        strategy.putUncommitted(requestID, timestamp);
+    }
+
     // -------------------------------------------------------------------------
     // PUT item — atomic write into metadata and oplog
     // -------------------------------------------------------------------------
 
-    /** Commits a regular (single-blob) version of {@code key}. */
-    public void putItem(String key, int partition, long seqNumber, String location) throws Exception {
-        List<FileVersion> versions = currentVersions(key);
-        versions.add(new RegularFileVersion(seqNumber, location));
-        strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(partition, seqNumber, key, Operation.PUT),
-                new Metadata(key, partition, versions));
+    public void putItem(String key, int partition, long seqNumber, String requestID) throws Exception {
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            boolean materialized = false;
+            Optional<Long> uncommitted = txn.getUncommitted(requestID);
+            
+            if (uncommitted.isPresent()) {
+                materialized = true;
+                txn.deleteUncommitted(requestID);
+            }
+
+            List<FileVersion> versions = txn.getMetadata(key)
+                    .map(m -> new ArrayList<>(m.versions()))
+                    .orElseGet(ArrayList::new);
+            
+            versions.add(new RegularFileVersion(seqNumber, requestID, materialized));
+            
+            txn.putLog(new OpLog(partition, seqNumber, key, Operation.PUT));
+            txn.putMetadata(new Metadata(key, partition, versions));
+            
+            txn.commit();
+        }
     }
 
-    /** Commits a completed multipart version of {@code key}. */
     public void putMultipartItem(String key, int partition, long seqNumber, List<String> chunks) throws Exception {
-        List<FileVersion> versions = currentVersions(key);
-        versions.add(new MultipartFileVersion(seqNumber, chunks));
-        strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(partition, seqNumber, key, Operation.PUT),
-                new Metadata(key, partition, versions));
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            List<FileVersion> versions = txn.getMetadata(key)
+                    .map(m -> new ArrayList<>(m.versions()))
+                    .orElseGet(ArrayList::new);
+            
+            versions.add(new MultipartFileVersion(seqNumber, chunks));
+            
+            txn.putLog(new OpLog(partition, seqNumber, key, Operation.PUT));
+            txn.putMetadata(new Metadata(key, partition, versions));
+            
+            txn.commit();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -43,11 +63,18 @@ public class Database implements AutoCloseable {
     // -------------------------------------------------------------------------
 
     public void deleteItem(String key, int partition, long seqNumber) throws Exception {
-        List<FileVersion> versions = currentVersions(key);
-        versions.add(new TombstoneFileVersion(seqNumber));
-        strategy.atomicallyUpdateLogAndMetadata(
-                new OpLog(partition, seqNumber, key, Operation.DELETE),
-                new Metadata(key, partition, versions));
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            List<FileVersion> versions = txn.getMetadata(key)
+                    .map(m -> new ArrayList<>(m.versions()))
+                    .orElseGet(ArrayList::new);
+            
+            versions.add(new TombstoneFileVersion(seqNumber));
+            
+            txn.putLog(new OpLog(partition, seqNumber, key, Operation.DELETE));
+            txn.putMetadata(new Metadata(key, partition, versions));
+            
+            txn.commit();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -79,9 +106,11 @@ public class Database implements AutoCloseable {
     // -------------------------------------------------------------------------
 
     public void createBucket(String bucketKey, int partition, long seqNumber) throws Exception {
-        strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(partition, seqNumber, bucketKey, Operation.CREATE_BUCKET),
-                new Bucket(bucketKey, partition, seqNumber, false));
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            txn.putLog(new OpLog(partition, seqNumber, bucketKey, Operation.CREATE_BUCKET));
+            txn.putBucket(new Bucket(bucketKey, partition, seqNumber, false));
+            txn.commit();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -89,9 +118,11 @@ public class Database implements AutoCloseable {
     // -------------------------------------------------------------------------
 
     public void deleteBucket(String bucketKey, int partition, long seqNumber) throws Exception {
-        strategy.atomicallyUpdateLogAndBucket(
-                new OpLog(partition, seqNumber, bucketKey, Operation.DELETE_BUCKET),
-                new Bucket(bucketKey, partition, seqNumber, true));
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            txn.putLog(new OpLog(partition, seqNumber, bucketKey, Operation.DELETE_BUCKET));
+            txn.putBucket(new Bucket(bucketKey, partition, seqNumber, true));
+            txn.commit();
+        }
     }
 
     // -------------------------------------------------------------------------

@@ -22,9 +22,9 @@ import com.github.koop.storagenode.StorageNodeV2.MultipartData;
 import com.github.koop.storagenode.StorageNodeV2.Tombstone;
 import com.github.koop.storagenode.StorageNodeV2.FileObject;
 import com.github.koop.storagenode.db.Database;
-import com.github.koop.storagenode.db.InMemoryStorageStrategy;
 import com.github.koop.storagenode.db.Metadata;
 import com.github.koop.storagenode.db.MultipartFileVersion;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 
 public class StorageNodeV2Test {
 
@@ -35,8 +35,8 @@ public class StorageNodeV2Test {
     Path tempDir;
 
     @BeforeEach
-    public void setup() {
-        db = new Database(new InMemoryStorageStrategy());
+    public void setup() throws Exception {
+        db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
         storageNode = new StorageNodeV2(db, tempDir);
     }
 

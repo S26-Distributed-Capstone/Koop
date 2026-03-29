@@ -11,11 +11,13 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 public class RocksDbStorageStrategy implements StorageStrategy {
-    private final RocksDB db;
+    private final TransactionDB txnDb;
     private final List<ColumnFamilyHandle> handles;
     private final ColumnFamilyHandle logHandle;
     private final ColumnFamilyHandle metaHandle;
     private final ColumnFamilyHandle bucketsHandle;
+    private final ColumnFamilyHandle uncommittedHandle;
+    private volatile boolean closed = false;
 
     public RocksDbStorageStrategy(String dbPath) throws RocksDBException {
         RocksDB.loadLibrary();
@@ -24,25 +26,47 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("op_log".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("metadata".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
+                new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
+                new ColumnFamilyDescriptor("uncommitted_writes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
         try (DBOptions options = new DBOptions()
                 .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true)) {
-            db = RocksDB.open(options, dbPath, descriptors, handles);
-            logHandle     = handles.get(1);
-            metaHandle    = handles.get(2);
-            bucketsHandle = handles.get(3);
+                .setCreateMissingColumnFamilies(true);
+             TransactionDBOptions txnDbOptions = new TransactionDBOptions()) {
+            
+            txnDb = TransactionDB.open(options, txnDbOptions, dbPath, descriptors, handles);
+            logHandle         = handles.get(1);
+            metaHandle        = handles.get(2);
+            bucketsHandle     = handles.get(3);
+            uncommittedHandle = handles.get(4);
         }
     }
 
     @Override
+    public StorageTransaction beginTransaction() throws Exception {
+        WriteOptions writeOptions = new WriteOptions();
+        Transaction txn = txnDb.beginTransaction(writeOptions);
+        return new RocksDbTransaction(txn, writeOptions, logHandle, metaHandle, bucketsHandle, uncommittedHandle);
+    }
+
+    @Override
+    public void putUncommitted(String requestId, long timestamp) throws Exception {
+        byte[] key = requestId.getBytes(StandardCharsets.UTF_8);
+        byte[] val = ByteBuffer.allocate(8).putLong(timestamp).array();
+        txnDb.put(uncommittedHandle, key, val);
+    }
+
+    @Override
     public void close() throws Exception {
+        if (closed){
+            throw new IllegalStateException("StorageStrategy already closed");
+        }
         for (ColumnFamilyHandle handle : handles) {
             if (handle != null) handle.close();
         }
-        if (db != null) db.close();
+        if (txnDb != null) txnDb.close();
+        closed = true;
     }
 
     // --- Table #1: Operation Log ---
@@ -52,20 +76,15 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public void addLog(OpLog log) throws Exception {
-        db.put(logHandle, opLogKey(log.partition(), log.seqNum()), log.serialize());
-    }
-
-    @Override
     public Optional<OpLog> getLog(int partition, long seqNum) throws Exception {
-        byte[] value = db.get(logHandle, opLogKey(partition, seqNum));
+        byte[] value = txnDb.get(logHandle, opLogKey(partition, seqNum));
         return value == null ? Optional.empty() : Optional.of(OpLog.from(value));
     }
 
     @Override
     public Stream<OpLog> getLogs(int partition, long from, long downTo) throws Exception {
         byte[] startKey = opLogKey(partition, from);
-        RocksIterator iterator = db.newIterator(logHandle);
+        RocksIterator iterator = txnDb.newIterator(logHandle);
         iterator.seekForPrev(startKey);
         return Stream.generate(() -> {
             if (!iterator.isValid()) return null;
@@ -82,34 +101,15 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     // --- Table #2: Metadata ---
 
     @Override
-    public void updateMetadata(Metadata metadata) throws Exception {
-        byte[] key = metadata.key().getBytes(StandardCharsets.UTF_8);
-        db.put(metaHandle, key, metadata.serialize());
-    }
-
-    @Override
-    public void atomicallyUpdateLogAndMetadata(OpLog log, Metadata metadata) throws Exception {
-        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
-            batch.put(logHandle,
-                    opLogKey(log.partition(), log.seqNum()),
-                    log.serialize());
-            batch.put(metaHandle,
-                    metadata.key().getBytes(StandardCharsets.UTF_8),
-                    metadata.serialize());
-            db.write(opts, batch);
-        }
-    }
-
-    @Override
     public Optional<Metadata> getMetadata(String key) throws Exception {
-        byte[] value = db.get(metaHandle, key.getBytes(StandardCharsets.UTF_8));
+        byte[] value = txnDb.get(metaHandle, key.getBytes(StandardCharsets.UTF_8));
         return value == null ? Optional.empty() : Optional.of(Metadata.from(value));
     }
 
     @Override
     public Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception {
         byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-        RocksIterator iterator = db.newIterator(metaHandle);
+        RocksIterator iterator = txnDb.newIterator(metaHandle);
         iterator.seek(prefixBytes);
         return Stream.generate(() -> {
             if (!iterator.isValid()) return null;
@@ -123,33 +123,14 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     // --- Table #3: Buckets ---
 
     @Override
-    public void updateBucket(Bucket bucket) throws Exception {
-        byte[] key = bucket.key().getBytes(StandardCharsets.UTF_8);
-        db.put(bucketsHandle, key, bucket.serialize());
-    }
-
-    @Override
-    public void atomicallyUpdateLogAndBucket(OpLog log, Bucket bucket) throws Exception {
-        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
-            batch.put(logHandle,
-                    opLogKey(log.partition(), log.seqNum()),
-                    log.serialize());
-            batch.put(bucketsHandle,
-                    bucket.key().getBytes(StandardCharsets.UTF_8),
-                    bucket.serialize());
-            db.write(opts, batch);
-        }
-    }
-
-    @Override
     public Optional<Bucket> getBucket(String key) throws Exception {
-        byte[] value = db.get(bucketsHandle, key.getBytes(StandardCharsets.UTF_8));
+        byte[] value = txnDb.get(bucketsHandle, key.getBytes(StandardCharsets.UTF_8));
         return value == null ? Optional.empty() : Optional.of(Bucket.from(value));
     }
 
     @Override
     public Stream<Bucket> streamBuckets() throws Exception {
-        RocksIterator iterator = db.newIterator(bucketsHandle);
+        RocksIterator iterator = txnDb.newIterator(bucketsHandle);
         iterator.seekToFirst();
         return Stream.generate(() -> {
             if (!iterator.isValid()) return null;
@@ -167,5 +148,85 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             if (source[i] != match[i]) return false;
         }
         return true;
+    }
+
+    // --- Transaction Implementation ---
+
+    private static class RocksDbTransaction implements StorageTransaction {
+        private final Transaction txn;
+        private final WriteOptions writeOptions;
+        private final ColumnFamilyHandle logHandle;
+        private final ColumnFamilyHandle metaHandle;
+        private final ColumnFamilyHandle bucketsHandle;
+        private final ColumnFamilyHandle uncommittedHandle;
+        private final ReadOptions readOptions;
+
+        public RocksDbTransaction(Transaction txn, WriteOptions writeOptions, 
+                                  ColumnFamilyHandle logHandle, ColumnFamilyHandle metaHandle,
+                                  ColumnFamilyHandle bucketsHandle, ColumnFamilyHandle uncommittedHandle) {
+            this.txn = txn;
+            this.writeOptions = writeOptions;
+            this.logHandle = logHandle;
+            this.metaHandle = metaHandle;
+            this.bucketsHandle = bucketsHandle;
+            this.uncommittedHandle = uncommittedHandle;
+            this.readOptions = new ReadOptions();
+        }
+
+        @Override
+        public Optional<Metadata> getMetadata(String key) throws Exception {
+            byte[] value = txn.get(readOptions, metaHandle, key.getBytes(StandardCharsets.UTF_8));
+            return value == null ? Optional.empty() : Optional.of(Metadata.from(value));
+        }
+
+        @Override
+        public void putMetadata(Metadata metadata) throws Exception {
+            txn.put(metaHandle, metadata.key().getBytes(StandardCharsets.UTF_8), metadata.serialize());
+        }
+
+        @Override
+        public void putLog(OpLog log) throws Exception {
+            byte[] key = ByteBuffer.allocate(12).putInt(log.partition()).putLong(log.seqNum()).array();
+            txn.put(logHandle, key, log.serialize());
+        }
+
+        @Override
+        public Optional<Bucket> getBucket(String key) throws Exception {
+            byte[] value = txn.get(readOptions, bucketsHandle, key.getBytes(StandardCharsets.UTF_8));
+            return value == null ? Optional.empty() : Optional.of(Bucket.from(value));
+        }
+
+        @Override
+        public void putBucket(Bucket bucket) throws Exception {
+            txn.put(bucketsHandle, bucket.key().getBytes(StandardCharsets.UTF_8), bucket.serialize());
+        }
+
+        @Override
+        public Optional<Long> getUncommitted(String requestId) throws Exception {
+            byte[] value = txn.get(readOptions, uncommittedHandle, requestId.getBytes(StandardCharsets.UTF_8));
+            return value == null ? Optional.empty() : Optional.of(ByteBuffer.wrap(value).getLong());
+        }
+
+        @Override
+        public void deleteUncommitted(String requestId) throws Exception {
+            txn.delete(uncommittedHandle, requestId.getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public void commit() throws Exception {
+            txn.commit();
+        }
+
+        @Override
+        public void rollback() throws Exception {
+            txn.rollback();
+        }
+
+        @Override
+        public void close() throws Exception {
+            readOptions.close();
+            writeOptions.close();
+            txn.close();
+        }
     }
 }

@@ -5,18 +5,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Metadata.
- *
- * <p>Binary format per version entry:
- * <pre>
- *   [type (byte): 0x00=Regular, 0x01=Multipart, 0x02=Tombstone]
- *   [seqNum (long)]
- *   if Regular:   [locationLen (int)][location]
- *   if Multipart: [chunkCount (int)] ([chunkLen (int)][chunk]) * chunkCount
- *   if Tombstone: (nothing extra)
- * </pre>
- */
 public record Metadata(String key, int partition, List<FileVersion> versions) {
 
     public byte[] serialize() {
@@ -32,7 +20,6 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
         ByteBuffer buffer = ByteBuffer.allocate(totalLength);
         buffer.putInt(keyBytes.length);
         buffer.put(keyBytes);
-        buffer.putInt(partition);
         buffer.putInt(versions.size());
         for (byte[] ev : encodedVersions) buffer.put(ev);
         return buffer.array();
@@ -48,7 +35,6 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
         return new Metadata(key, partition, versions);
     }
 
-    // -------------------------------------------------------------------------
     private static final byte TAG_REGULAR   = 0x00;
     private static final byte TAG_MULTIPART = 0x01;
     private static final byte TAG_TOMBSTONE = 0x02;
@@ -56,11 +42,12 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
     private static byte[] encodeVersion(FileVersion v) {
         if (v instanceof RegularFileVersion r) {
             byte[] locBytes = r.location().getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + 4 + locBytes.length);
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + 4 + locBytes.length + 1);
             buf.put(TAG_REGULAR);
             buf.putLong(r.sequenceNumber());
             buf.putInt(locBytes.length);
             buf.put(locBytes);
+            buf.put((byte) (r.materialized() ? 1 : 0));
             return buf.array();
         } else if (v instanceof MultipartFileVersion m) {
             List<byte[]> chunkBytes = new ArrayList<>(m.chunks().size());
@@ -90,7 +77,11 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
         byte tag = buffer.get();
         long seqNum = buffer.getLong();
         return switch (tag) {
-            case TAG_REGULAR   -> new RegularFileVersion(seqNum, readString(buffer));
+            case TAG_REGULAR   -> {
+                String loc = readString(buffer);
+                boolean materialized = buffer.get() == 1;
+                yield new RegularFileVersion(seqNum, loc, materialized);
+            }
             case TAG_MULTIPART -> {
                 int count = buffer.getInt();
                 List<String> chunks = new ArrayList<>(count);
