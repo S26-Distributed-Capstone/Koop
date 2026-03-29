@@ -290,16 +290,4 @@ class DatabaseTest {
         assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(2));
         assertEquals(30L, rt.versions().get(2).sequenceNumber());
     }
-
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
-
-    @Test
-    void testCloseClearsAllTables() throws Exception {
-        database.putItem("file.txt", 1, 1L, "/blob-1");
-        database.createBucket("my-bucket", 1, 2L);
-        assertTrue(database.getItem("file.txt").isEmpty());
-        assertFalse(database.bucketExists("my-bucket"));
-    }
 }

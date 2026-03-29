@@ -20,6 +20,7 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
         ByteBuffer buffer = ByteBuffer.allocate(totalLength);
         buffer.putInt(keyBytes.length);
         buffer.put(keyBytes);
+        buffer.putInt(partition); // <--- FIX: Properly write the partition
         buffer.putInt(versions.size());
         for (byte[] ev : encodedVersions) buffer.put(ev);
         return buffer.array();
