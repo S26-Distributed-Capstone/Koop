@@ -317,4 +317,55 @@ class StorageNodeServerV2Test {
                 "ACK payload should contain the correct JSON formatting");
 
     }
+
+    @Test
+    void testGetCommittedButUnmaterializedRegularFile() throws Exception {
+        int partition = 6;
+        String bucket = "missing-bucket";
+        String key = "missing-file";
+        String fullKey = bucket + "/" + key;
+        String reqId = "req-missing-123";
+
+        // Commit the file metadata via sequencer message WITHOUT performing the HTTP PUT first.
+        // This simulates a scenario where the DB commit arrives but the file isn't on disk.
+        server.processSequencerMessage(partition, 
+            new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
+
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, fullKey))
+                .GET()
+                .build();
+        HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
+
+        // StorageNodeV2 checks Files.exists(path) for RegularFileVersion and returns Optional.empty(),
+        // which the server translates to 404 NOT_FOUND.
+        assertEquals(404, getResp.statusCode(), "GET should return 404 when file metadata exists but the physical file is missing from disk");
+    }
+
+    @Test
+    void testGetCommittedButUnmaterializedMultipartManifest() throws Exception {
+        int partition = 7;
+        String bucket = "missing-multi-bucket";
+        String key = "missing-multi";
+        String fullKey = bucket + "/" + key;
+        String reqId = "req-multi-missing";
+
+        // Commit the multipart manifest WITHOUT putting the actual chunk files on disk.
+        List<String> chunks = List.of("missing-chunk1", "missing-chunk2");
+        server.processSequencerMessage(partition, 
+            new Message.MultipartCommitMessage(bucket, key, reqId, getDummySender(), chunks), 400L);
+
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(storeUri(partition, fullKey))
+                .GET()
+                .build();
+        HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
+
+        // StorageNodeV2 DOES NOT verify physical existence of individual chunks during a manifest retrieval.
+        // It returns the JSON list of chunks immediately.
+        assertEquals(200, getResp.statusCode(), "GET should return 200 for multipart manifest even if physical chunk files are unmaterialized");
+        assertEquals("application/json", getResp.headers().firstValue("Content-Type").orElse(""));
+        assertTrue(getResp.body().contains("missing-chunk1"));
+        assertTrue(getResp.body().contains("missing-chunk2"));
+    }
 }
