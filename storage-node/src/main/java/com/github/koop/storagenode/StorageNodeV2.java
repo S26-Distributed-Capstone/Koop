@@ -127,17 +127,17 @@ public class StorageNodeV2 {
             ReadableByteChannel data,
             long length) throws IOException {
 
-        // 1. Record the uncommitted write intent in the database first.
+        // 1. Perform the physical file write.
+        Path path = getObjectPath(requestID);
+        Files.createDirectories(path.getParent());
+        write(path, data, length);
+
+        // 2. Record the uncommitted write intent in the database
         try {
             db.putUncommittedWrite(requestID, System.currentTimeMillis());
         } catch (Exception e) {
             throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
         }
-
-        // 2. Perform the physical file write.
-        Path path = getObjectPath(requestID);
-        Files.createDirectories(path.getParent());
-        write(path, data, length);
     }
 
     /**
