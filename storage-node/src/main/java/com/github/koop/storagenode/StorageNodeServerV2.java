@@ -194,6 +194,7 @@ public class StorageNodeServerV2 {
 
     private void handleGet(Context ctx) {
         try {
+            logger.debug("Received GET request: {}", ctx.req().getRequestURI());
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
 
@@ -208,6 +209,7 @@ public class StorageNodeServerV2 {
                     return;
                 }
             }
+            logger.debug("GET partition={} key={} targetVersion={}", partition, key, targetVersion);
 
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
 
