@@ -72,6 +72,10 @@ class StorageNodeServerV2Test {
                 .build();
     }
 
+    private InetSocketAddress getDummySender() {
+        return new InetSocketAddress("127.0.0.1", ackServer.port());
+    }
+
     @AfterEach
     void tearDown() throws Exception {
         server.stop();
@@ -166,7 +170,7 @@ class StorageNodeServerV2Test {
         assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode());
 
         Message.FileCommitMessage commitMsg = new Message.FileCommitMessage(
-                bucket, key, reqId, new InetSocketAddress("127.0.0.1", 8080));
+                bucket, key, reqId, getDummySender());
         server.processSequencerMessage(partition, commitMsg, seqNum);
 
         HttpRequest getReq = HttpRequest.newBuilder()
@@ -229,11 +233,11 @@ class StorageNodeServerV2Test {
                 .PUT(HttpRequest.BodyPublishers.ofString("To Be Deleted")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, new InetSocketAddress("127.0.0.1", 8080)), 50L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 50L);
 
         // Delete object via sequencer
         server.processSequencerMessage(partition,
-                new Message.DeleteMessage(bucket, key, "req-delete", new InetSocketAddress("127.0.0.1", 8080)), 51L);
+                new Message.DeleteMessage(bucket, key, "req-delete", getDummySender()), 51L);
 
         // Verify it returns 404 and Tombstone
         HttpRequest getReq = HttpRequest.newBuilder()
@@ -255,7 +259,7 @@ class StorageNodeServerV2Test {
         // Commit a multipart object
         List<String> chunks = List.of("chunk1", "chunk2");
         server.processSequencerMessage(partition,
-                new Message.MultipartCommitMessage(bucket, key, "req-multi", new InetSocketAddress("127.0.0.1", 8080),
+                new Message.MultipartCommitMessage(bucket, key, "req-multi", getDummySender(),
                         chunks),
                 200L);
 
