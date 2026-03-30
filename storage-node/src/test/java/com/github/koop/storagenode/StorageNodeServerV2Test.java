@@ -43,6 +43,10 @@ class StorageNodeServerV2Test {
     private MemoryFetcher fetcher;
     private MemoryPubSub pubSub;
 
+    // A dummy server to absorb all the async ACKs and prevent connection errors in
+    // the logs
+    private Javalin ackServer;
+
     @TempDir
     Path tempDir;
 
@@ -53,6 +57,11 @@ class StorageNodeServerV2Test {
         metadataClient = new MetadataClient(fetcher);
         pubSub = new MemoryPubSub();
         pubSubClient = new PubSubClient(pubSub);
+        // Start the ACK blackhole server on a random port
+        ackServer = Javalin.create(config -> {
+            config.startup.showJavalinBanner = false;
+            config.routes.post("/ack", ctx -> ctx.status(200));
+        }).start(0);
 
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
         server.start();
