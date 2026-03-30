@@ -50,9 +50,7 @@ public class StorageNodeServerV2 {
 
     // Tracks active partition subscriptions and their dedicated executors
     private final Set<Integer> subscribedPartitions = new HashSet<>();
-    private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ExecutorService executorService;
 
     // HTTP Client for sending asynchronous acknowledgments
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -68,6 +66,7 @@ public class StorageNodeServerV2 {
         this.storageNode = new StorageNodeV2(db, dir);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
+        this.executorService = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public static void main(String[] args) {
@@ -144,19 +143,6 @@ public class StorageNodeServerV2 {
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
             subscribedPartitions.remove(partition);
-
-            ExecutorService executor = partitionExecutors.remove(partition);
-            if (executor != null) {
-                executor.shutdown();
-                try {
-                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                        executor.shutdownNow();
-                    }
-                } catch (InterruptedException e) {
-                    executor.shutdownNow();
-                    Thread.currentThread().interrupt();
-                }
-            }
         }
 
         Set<Integer> toAdd = new HashSet<>(targetPartitions);
@@ -166,14 +152,10 @@ public class StorageNodeServerV2 {
             String topic = "partition-" + partition;
             logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
 
-            ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
-                    Thread.ofVirtual().name("partition-" + partition + "-worker").factory());
-            partitionExecutors.put(partition, partitionExecutor);
-
             pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
-                partitionExecutor.submit(() -> {
+                executorService.submit(() -> {
                     try {
-                        Message message = objectMapper.readValue(messageBytes, Message.class);
+                        Message message = Message.deserializeMessage(messageBytes);
                         processSequencerMessage(partition, message, offset);
                     } catch (Exception e) {
                         logger.error("Failed to deserialize or process message on topic {} at offset {}", incomingTopic,
@@ -409,9 +391,6 @@ public class StorageNodeServerV2 {
         if (app != null) {
             app.stop();
         }
-
-        partitionExecutors.values().forEach(ExecutorService::shutdownNow);
-        partitionExecutors.clear();
 
         try {
             if (metadataClient != null) {
