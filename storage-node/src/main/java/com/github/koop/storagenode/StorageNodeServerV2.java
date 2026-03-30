@@ -50,7 +50,7 @@ public class StorageNodeServerV2 {
 
     // Tracks active partition subscriptions and their dedicated executors
     private final Set<Integer> subscribedPartitions = new HashSet<>();
-    private final ExecutorService executorService;
+    private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
 
     // HTTP Client for sending asynchronous acknowledgments
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -66,7 +66,6 @@ public class StorageNodeServerV2 {
         this.storageNode = new StorageNodeV2(db, dir);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
-        this.executorService = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public static void main(String[] args) {
@@ -143,6 +142,20 @@ public class StorageNodeServerV2 {
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
             subscribedPartitions.remove(partition);
+
+            // Shutdown the dedicated executor for this partition
+            ExecutorService executor = partitionExecutors.remove(partition);
+            if (executor != null) {
+                executor.shutdown();
+                try {
+                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    executor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
 
         Set<Integer> toAdd = new HashSet<>(targetPartitions);
@@ -152,8 +165,13 @@ public class StorageNodeServerV2 {
             String topic = "partition-" + partition;
             logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
 
+            // Create a single-threaded executor backed by a virtual thread for sequential processing
+            ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
+                    Thread.ofVirtual().name("partition-" + partition + "-").factory());
+            partitionExecutors.put(partition, partitionExecutor);
+
             pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
-                executorService.submit(() -> {
+                partitionExecutor.submit(() -> {
                     try {
                         Message message = Message.deserializeMessage(messageBytes);
                         processSequencerMessage(partition, message, offset);
@@ -404,6 +422,11 @@ public class StorageNodeServerV2 {
         } catch (Exception e) {
             logger.error("Error shutting down clients", e);
         }
+
+        // Clean up the partition executors
+        partitionExecutors.values().forEach(ExecutorService::shutdownNow);
+        partitionExecutors.clear();
+
         logger.info("StorageNodeServerV2 stopped");
     }
 
