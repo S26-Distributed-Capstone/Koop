@@ -80,6 +80,7 @@ class StorageNodeServerV2Test {
     void tearDown() throws Exception {
         server.stop();
         db.close();
+        ackServer.stop();
     }
 
     private URI storeUri(int partition, String key) {

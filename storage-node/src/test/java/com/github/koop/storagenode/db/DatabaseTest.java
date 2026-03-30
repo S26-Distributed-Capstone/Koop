@@ -4,7 +4,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 
 import java.nio.file.Path;
@@ -245,8 +244,8 @@ class DatabaseTest {
     @Test
     void testMetadataSerializationRoundTripRegular() {
         Metadata original = new Metadata("animals/cat.jpg", 1,
-                List.of(new RegularFileVersion(100L, "/uuid1.blob", true),
-                        new RegularFileVersion(101L, "/uuid2.blob", false)));
+                List.of(new RegularFileVersion(100L, "uuid1.blob", true),
+                        new RegularFileVersion(101L, "uuid2.blob", false)));
         Metadata rt = Metadata.from(original.serialize());
         assertEquals(2, rt.versions().size());
         assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
