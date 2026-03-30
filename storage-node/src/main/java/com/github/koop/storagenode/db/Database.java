@@ -46,12 +46,15 @@ public class Database implements AutoCloseable {
                         .findFirst();
                 if(versionCommitted.isPresent()){
                     //already committed - materialize:
+                    var presentVersion = (RegularFileVersion)versionCommitted.get();
+                    long seqNum = presentVersion.sequenceNumber();
+                    String location = presentVersion.location();
                     var otherVersions = metadata.versions().stream()
                             .filter(v -> v != versionCommitted.get())
                             .toList();
                     var versions = new ArrayList<FileVersion>();
                     versions.addAll(otherVersions);
-                    versions.add(new RegularFileVersion(timestamp, requestId, true));
+                    versions.add(new RegularFileVersion(seqNum, location, true));
                     txn.putMetadata(new Metadata(key, metadata.partition(), new ArrayList<>(versions)));
                 }else{
                     //not committed yet - record uncommitted write intent:

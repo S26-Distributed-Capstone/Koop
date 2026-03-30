@@ -188,7 +188,7 @@ public class StorageNodeServerV2 {
 
     // --- HTTP Handlers ---
 
-    private void handlePut(Context ctx) {
+   private void handlePut(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
@@ -200,7 +200,7 @@ public class StorageNodeServerV2 {
                 return;
             }
 
-            storageNode.store(partition, requestId, Channels.newChannel(ctx.bodyInputStream()), length);
+            storageNode.store(partition, key, requestId, Channels.newChannel(ctx.bodyInputStream()), length);
 
             ctx.status(200).result("OK");
             logger.debug("PUT (Uncommitted) partition={} key={} requestId={}", partition, key, requestId);

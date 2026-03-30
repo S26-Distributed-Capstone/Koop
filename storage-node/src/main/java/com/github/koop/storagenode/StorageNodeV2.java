@@ -121,8 +121,9 @@ public class StorageNodeV2 {
      * @param length
      * @throws IOException
      */
-    protected void store(
+protected void store(
             int partition,
+            String key,
             String requestID,
             ReadableByteChannel data,
             long length) throws IOException {
@@ -134,7 +135,7 @@ public class StorageNodeV2 {
 
         // 2. Record the uncommitted write intent in the database
         try {
-            db.putUncommittedWrite(requestID, System.currentTimeMillis());
+            db.registerBlobArrival(key, requestID, System.currentTimeMillis());
         } catch (Exception e) {
             throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
         }
