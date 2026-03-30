@@ -368,4 +368,46 @@ class StorageNodeServerV2Test {
         assertTrue(getResp.body().contains("missing-chunk1"));
         assertTrue(getResp.body().contains("missing-chunk2"));
     }
+
+    @Test
+    void testPostCommitMaterialization() throws Exception {
+        int partition = 8;
+        String bucket = "post-commit-bucket";
+        String key = "late-file";
+        String fullKey = bucket + "/" + key;
+        String reqId = "req-late-123";
+        String dataStr = "Better late than never";
+
+        // 1. Commit the file metadata via sequencer message FIRST (before the file is uploaded)
+        server.processSequencerMessage(partition, 
+            new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 500L);
+
+        // 2. Verify the file is not yet available (returns 404 because physical file is missing)
+        HttpRequest getReq1 = HttpRequest.newBuilder()
+                .uri(storeUri(partition, fullKey))
+                .GET()
+                .build();
+        assertEquals(404, http.send(getReq1, HttpResponse.BodyHandlers.ofString()).statusCode(), 
+            "GET should return 404 when committed but not yet materialized");
+
+        // 3. Materialize the physical file on disk via HTTP PUT
+        HttpRequest putReq = HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey, reqId))
+                .PUT(HttpRequest.BodyPublishers.ofString(dataStr))
+                .build();
+        assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode(), 
+            "PUT should succeed in materializing the file");
+
+        // 4. Verify the file is now successfully retrievable
+        HttpRequest getReq2 = HttpRequest.newBuilder()
+                .uri(storeUri(partition, fullKey))
+                .GET()
+                .build();
+        HttpResponse<String> getResp2 = http.send(getReq2, HttpResponse.BodyHandlers.ofString());
+        
+        assertEquals(200, getResp2.statusCode(), "GET should return 200 after the file is materialized");
+        assertEquals(dataStr, getResp2.body(), "GET should return the correctly materialized data");
+        assertEquals("500", getResp2.headers().firstValue("X-Object-Version").orElse(""), 
+            "The version headers should match the initial sequencer commit");
+    }
 }
