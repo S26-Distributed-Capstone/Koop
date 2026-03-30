@@ -34,7 +34,7 @@ class DatabaseTest {
     // PUT ITEM (regular)
     // =========================================================================
 
-@Test
+    @Test
     void testPutItemCreatesMetadataAndLog() throws Exception {
         database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
 
