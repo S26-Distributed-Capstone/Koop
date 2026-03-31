@@ -47,6 +47,10 @@ public class MultipartUploadManager {
 
     /**
      * Uploads a single part of an in-progress multipart upload.
+     * 
+     * TODO(architecture): The current implementation caches the part in Redis first,
+     * then uploads to the Storage Node. According to docs, we should ideally verify the part doesn't already exist,
+     * upload to the Storage Node first, and only update the cache upon success.
      */
     public MultipartUploadResult uploadPart(String bucket, String key, String uploadId,
                              int partNumber, InputStream data, long length)
@@ -97,6 +101,12 @@ public class MultipartUploadManager {
 
         if (!cache.exists(MultipartUploadSession.sessionKey(uploadId))) {
             cache.setRemove(partsKey, partMember);
+            // Best effort to remove the orphaned shard
+            try {
+                storageWorker.delete(UUID.randomUUID(), sessionBucket, partStorageKey);
+            } catch (Exception ignored) {
+                // Best-effort; ignore
+            }
             return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT,
                     "Upload " + uploadId + " is no longer ACTIVE");
         }
@@ -186,14 +196,13 @@ public class MultipartUploadManager {
         
             // TODO: Populate sender with the actual query-processor's bound address
             // for proper routing, debugging, and acknowledgement on storage nodes.
-            // Currently uses 127.0.0.1:0 as a placeholder. This should be replaced
-            // with the real InetSocketAddress of this query-processor instance,
-            // obtained from configuration or runtime binding info. See PR #73 discussion.
+            // Until that is wired in, omit the sender (null) instead of using a
+            // hard-coded placeholder like 127.0.0.1:0, which is invalid in production.
         Message manifestMessage = new Message.MultipartCommitMessage(
             sessionBucket,
             sessionKey,
             uploadId,
-            new InetSocketAddress("127.0.0.1", 0),
+            null,
             partNumberStrings);
         
         boolean published;
@@ -219,24 +228,30 @@ public class MultipartUploadManager {
             //   uploadId|partNum1,partNum2,...,partNumN  
             // and is stored under a cache key derived from {bucket,key}.  
             // TODO(multipart-temp): Transitional fallback for PR #73.
-            // This cache-persisted manifest is temporary until storage-node side multipart
-            // commit is fully implemented (sequencer consumer + durable RocksDB metadata
-            // under final object key). Once storage nodes can durably commit/retrieve multipart
-            // metadata, remove this cache manifest as a source of truth.
-            String manifestCacheKey = "multipart:manifest:" + sessionBucket + ":" + sessionKey;  
+            // According to docs, this cache-persisted
+            // manifest is temporary until storage-node side multipart commit is fully 
+            // implemented. Storage Nodes should be the reliable source of truth by durably
+            // committing the multipart metadata into RocksDB upon receiving the 
+            // MultipartCommitMessage on Kafka. Once Storage Nodes support this, remove the 
+            // cache manifest entirely and instead wait for ACKs from the Storage Nodes.
+            String escapedBucket = MultipartUploadSession.escapeComponent(sessionBucket);
+            String escapedKey = MultipartUploadSession.escapeComponent(sessionKey);
+            String manifestCacheKey = "multipart:manifest:" + escapedBucket + ":" + escapedKey;  
             String manifestPayload =  
                    uploadId + "|" + String.join(",", partNumberStrings);  
-            cache.put(manifestCacheKey, manifestPayload);  
 
             // Mark upload as COMPLETED in cache but retain session and parts metadata  
             // so that background GC can later discover and clean up physical part shards.  
             // The session is retained with a TTL (48 hours) to give GC time to run;  
             // after TTL expiration, the cache automatically removes the session entry.  
-            // TODO(multipart-temp): Transitional retention for orphan-part GC while storage-node
-            // durable multipart lifecycle is incomplete. Final design should move authoritative
-            // completion state + GC discoverability to storage-node metadata/logging, then
-            // remove/relax this query-processor cache retention policy.
-            final long SESSION_RETENTION_TTL_SECONDS = 48 * 60 * 60;  // 172800 seconds  
+            // TODO(multipart-temp): Transitional retention via TTL. 
+            // According to docs, the Query Processor should explicitly delete 
+            // the active session keys immediately upon successful completion. We are 
+            // temporarily retaining it with a TTL for orphan-part GC until the storage-node
+            // robustly tracks and cleans up incomplete parts based on its durable logs.
+            final long SESSION_RETENTION_TTL_SECONDS = 48 * 60 * 60;  // 172800 seconds
+            
+            cache.putWithTTL(manifestCacheKey, manifestPayload, SESSION_RETENTION_TTL_SECONDS);    
             cache.putWithTTL(  
                 MultipartUploadSession.sessionKey(uploadId),  
                 session.withStatus(MultipartUploadSession.UploadStatus.COMPLETED).serialize(),  
@@ -275,12 +290,13 @@ public class MultipartUploadManager {
         }
 
         Set<String> partMembers = cache.setMembers(MultipartUploadSession.partsKey(uploadId));
+        // Freeze parts set immediately after getting snapshot to prevent new reservations
+        cache.setDelete(MultipartUploadSession.partsKey(uploadId));
 
-        // TODO: Team decision pending — should physical part deletion be synchronous
-        // here (current behavior) or deferred/async? Synchronous deletion means the
-        // client waits for all shard deletes before receiving the 204 ACK. Deferred
-        // deletion would ACK immediately and clean up in the background (or via a
-        // separate GC process). See PR #73 discussion.
+        // TODO(architecture): The architecture doc specify that 
+        // part deletion should be scheduled/asynchronous here. The client should receive 
+        // an immediate ACK, and the query-processor (or a background GC process) should 
+        // issue the delete commands to the Storage Nodes later. Currently we block synchronously.
         for (String partMember : partMembers) {
             int partNumber = Integer.parseInt(partMember);
             String partStorageKey = MultipartUploadSession.partStorageKey(sessionBucket, sessionKey, uploadId, partNumber);
@@ -293,7 +309,6 @@ public class MultipartUploadManager {
         }
 
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
-        cache.setDelete(MultipartUploadSession.partsKey(uploadId));
 
         return MultipartUploadResult.success();
     }

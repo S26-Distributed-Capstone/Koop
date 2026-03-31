@@ -54,6 +54,13 @@ public class MemoryCacheClient implements CacheClient {
 
     @Override
     public boolean putIfPresent(String key, String value) {
+        // Enforce TTL validation before updating
+        Long expirationTime = expirationTimes.get(key);
+        if (expirationTime != null && System.currentTimeMillis() > expirationTime) {
+            kvStore.remove(key);
+            expirationTimes.remove(key);
+            return false;
+        }
         boolean updated = kvStore.computeIfPresent(key, (k, v) -> value) != null;
         if (!updated) {
             expirationTimes.remove(key);
@@ -81,6 +88,13 @@ public class MemoryCacheClient implements CacheClient {
 
     @Override
     public boolean exists(String key) {
+        // Enforce TTL validation before returning exists
+        Long expirationTime = expirationTimes.get(key);
+        if (expirationTime != null && System.currentTimeMillis() > expirationTime) {
+            kvStore.remove(key);
+            expirationTimes.remove(key);
+            return false;
+        }
         return kvStore.containsKey(key);
     }
 

@@ -173,7 +173,7 @@ public record MultipartUploadSession(
     /**
      * Escapes special characters in a component to prevent key collisions.
      */
-    private static String escapeComponent(String component) {
+    public static String escapeComponent(String component) {
         return component
                 .replace("\\", "\\\\")
                 .replace(":", "\\:")

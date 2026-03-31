@@ -194,7 +194,9 @@ public class Main {
             if (data != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
-                //ctx.header("ETag", "\"dummy-etag-12345\"");
+                // Provide a stable, per-object ETag derived from bucket and key.
+                //String etag = "\"" + Integer.toHexString((bucket + "/" + key).hashCode()) + "\"";
+                //ctx.header("ETag", etag); //Ignore Etag for now. 
                 ctx.result(data);
             } else {
                 ctx.status(404);

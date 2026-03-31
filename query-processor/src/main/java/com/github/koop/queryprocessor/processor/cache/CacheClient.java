@@ -31,8 +31,13 @@ public interface CacheClient {
     void put(String key, String value);
 
     /**
-     * Stores {@code value} under {@code key} with an expiration time in seconds.
-     * After the TTL expires, the key is automatically deleted.
+     * Stores {@code value} under {@code key} with a time-to-live (TTL) in seconds.
+     *
+     * <p>Implementations must ensure that calls to {@link #get(String)} made after
+     * the TTL has elapsed behave as if the key is absent. Implementations are not
+     * required to eagerly delete expired keys or to take TTL into account for
+     * {@link #exists(String)} or {@link #putIfPresent(String, String)}; in-memory
+     * implementations in particular may rely on lazy expiration on read.
      */
     void putWithTTL(String key, String value, long ttlSeconds);
 
