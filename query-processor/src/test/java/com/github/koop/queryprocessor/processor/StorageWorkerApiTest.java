@@ -2,6 +2,7 @@ package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.messages.Message.FileCommitMessage;
+import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.common.metadata.MemoryFetcher;
@@ -252,7 +253,7 @@ public class StorageWorkerApiTest {
 
         // Subscribe to all 99 partition topics.
         for (int p = 0; p < 99; p++) {
-            String topic = CommitCoordinator.topicFor(p);
+            String topic = CommitTopics.forPartition(p);
             spy.sub(topic, (t, offset, bytes) -> {
                 receivedTopics.add(t);
                 receivedMessages.add(Message.deserializeMessage(bytes));
@@ -288,7 +289,7 @@ public class StorageWorkerApiTest {
             // Cross-check: the topic the coordinator published on matches what
             // topicFor() would produce for the resolved partition number.
             int partitionNum = Integer.parseInt(publishedTopic.substring("partition-".length()));
-            assertEquals(CommitCoordinator.topicFor(partitionNum), publishedTopic);
+            assertEquals(CommitTopics.forPartition(partitionNum), publishedTopic);
         } finally {
             spyWorker.shutdown();
             for (AckingFakeStorageNodeServer n : spyNodes) n.close();

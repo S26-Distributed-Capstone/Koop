@@ -1,6 +1,7 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.messages.Message;
+import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.FakeStorageNodeServer;
@@ -11,6 +12,11 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.concurrent.atomic.AtomicInteger;
+
+
+// -------------------------------------------------------------------------
+// AckingFakeStorageNodeServer
+// -------------------------------------------------------------------------
 
 /**
  * Extends {@link FakeStorageNodeServer} with commit-protocol awareness.
@@ -29,7 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       reconstructed its shard from peers).</li>
  * </ul>
  */
-public final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
+final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
 
     private final HttpClient http = HttpClient.newHttpClient();
     private volatile boolean enabled = true;
@@ -41,7 +47,7 @@ public final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
         // Subscribe to all 99 partition topics so this node receives every
         // commit message regardless of which partition the key maps to.
         for (int p = 0; p < 99; p++) {
-            String topic = CommitCoordinator.topicFor(p);
+            String topic = CommitTopics.forPartition(p);
             pubSubClient.sub(topic, (t, offset, bytes) -> {
                 if (!enabled) return;
                 Message msg = Message.deserializeMessage(bytes);

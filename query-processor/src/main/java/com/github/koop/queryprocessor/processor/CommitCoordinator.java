@@ -3,19 +3,22 @@ package com.github.koop.queryprocessor.processor;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.messages.Message.FileCommitMessage;
 import com.github.koop.common.messages.Message.MultipartCommitMessage;
+import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
-import com.sun.net.httpserver.HttpServer;
+
+import io.javalin.Javalin;
+import io.javalin.http.Context;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -27,19 +30,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>Caller invokes {@link #beginCommit} which:
  *       <ul>
  *         <li>Registers an in-flight {@link PendingCommit} keyed by {@code requestId}.</li>
- *         <li>Publishes a {@link FileCommitMessage} (or {@link MultipartCommitMessage}) to
- *             the Kafka topic so every Storage Node receives the commit command.</li>
+ *         <li>Publishes a {@link FileCommitMessage} (or {@link MultipartCommitMessage})
+ *             to the per-partition Kafka topic ({@code "partition-N"}) so every Storage
+ *             Node for that partition receives the commit command.</li>
  *       </ul>
  *   </li>
- *   <li>Each SN that successfully commits sends an HTTP POST to
- *       {@code /ack/{requestId}} on this server.</li>
+ *   <li>Each SN that successfully commits POSTs to {@code /ack/{requestId}} on
+ *       the Javalin HTTP server embedded in this coordinator.</li>
  *   <li>{@link #beginCommit} blocks until {@value #QUORUM} ACKs arrive or the
  *       timeout elapses, then returns {@code true}/{@code false}.</li>
  * </ol>
  *
- * <p>The embedded {@link HttpServer} is started once at construction time and
- * shared across all concurrent PUT operations — each pending commit is identified
- * by its {@code requestId} so concurrent operations do not interfere.
+ * <p>The Javalin server is started once at construction time and shared across
+ * all concurrent PUT operations — each pending commit is identified by its
+ * {@code requestId} so concurrent operations do not interfere.
  */
 public final class CommitCoordinator implements AutoCloseable {
 
@@ -59,26 +63,17 @@ public final class CommitCoordinator implements AutoCloseable {
      */
     private static final int ACK_TIMEOUT_SECONDS = 30;
 
-    /**
-     * Derives the Kafka topic for a commit from the partition number.
-     * Each partition has its own topic so SNs only consume messages relevant
-     * to their own partition, and so topic-level ordering is preserved per partition.
-     */
-    static String topicFor(int partition) {
-        return "partition-" + partition;
-    }
-
     private static final Logger logger = LogManager.getLogger(CommitCoordinator.class);
 
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
 
-    /** Map from requestId -> pending commit state. Thread-safe by ConcurrentHashMap. */
+    /** Map from requestId to pending commit state. Thread-safe by ConcurrentHashMap. */
     private final ConcurrentHashMap<String, PendingCommit> inFlight = new ConcurrentHashMap<>();
 
     private final PubSubClient pubSubClient;
-    private final HttpServer ackServer;
+    private final Javalin ackServer;
     private final InetSocketAddress ackAddress;
     private final int ackTimeoutSeconds;
 
@@ -92,7 +87,7 @@ public final class CommitCoordinator implements AutoCloseable {
      * @param ackPort      the port this QP node should listen on for SN ACKs.
      *                     Pass {@code 0} to let the OS pick a free port.
      */
-    public CommitCoordinator(PubSubClient pubSubClient, int ackPort) throws IOException {
+    public CommitCoordinator(PubSubClient pubSubClient, int ackPort) {
         this(pubSubClient, ackPort, ACK_TIMEOUT_SECONDS);
     }
 
@@ -103,47 +98,21 @@ public final class CommitCoordinator implements AutoCloseable {
      *
      * @param ackTimeoutSeconds how long to wait for quorum before timing out.
      */
-    public CommitCoordinator(PubSubClient pubSubClient, int ackPort, int ackTimeoutSeconds) throws IOException {
-        this.ackTimeoutSeconds = ackTimeoutSeconds;
+    public CommitCoordinator(PubSubClient pubSubClient, int ackPort, int ackTimeoutSeconds) {
         this.pubSubClient = pubSubClient;
+        this.ackTimeoutSeconds = ackTimeoutSeconds;
 
-        // Bind the ACK server. Using a virtual-thread executor so that many
-        // concurrent ACK requests (one per SN per in-flight PUT) never block.
-        this.ackServer = HttpServer.create(new InetSocketAddress(ackPort), /*backlog=*/ 64);
-        this.ackServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        this.ackServer.createContext("/ack/", exchange -> {
-            try {
-                // URI is /ack/{requestId}
-                String path = exchange.getRequestURI().getPath();          // e.g. "/ack/abc-123"
-                String requestId = path.substring("/ack/".length());
-
-                PendingCommit commit = inFlight.get(requestId);
-                if (commit == null) {
-                    // Unknown or already-completed request — ignore gracefully.
-                    logger.warn("Received ACK for unknown requestId {}", requestId);
-                    exchange.sendResponseHeaders(404, -1);
-                    return;
-                }
-
-                int acks = commit.ackCount.incrementAndGet();
-                logger.trace("ACK {}/{} received for requestId {}", acks, TOTAL_NODES, requestId);
-
-                // Release one permit on the latch; the committer thread wakes
-                // up as soon as QUORUM permits have been released.
-                commit.latch.countDown();
-
-                exchange.sendResponseHeaders(200, -1);
-            } finally {
-                exchange.close();
-            }
+        this.ackServer = Javalin.create(config -> {
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
+            config.routes.post("/ack/{requestId}", this::handleAck);
         });
 
-        this.ackServer.start();
+        this.ackServer.start(ackPort);
 
-        // Record the actual bound address (important when ackPort == 0).
         this.ackAddress = new InetSocketAddress(
                 resolveLocalHostname(),
-                this.ackServer.getAddress().getPort());
+                this.ackServer.port());
 
         logger.info("CommitCoordinator ACK server listening on {}", ackAddress);
     }
@@ -157,7 +126,8 @@ public final class CommitCoordinator implements AutoCloseable {
      * Nodes ACK the commit (or the timeout expires).
      *
      * @param requestId the UUID that was used for the preceding shard uploads.
-     * @param partition the partition number — used as the Kafka topic.
+     * @param partition the partition number — used as the Kafka topic via
+     *                  {@link CommitTopics#forPartition}.
      * @param bucket    object bucket.
      * @param key       object key.
      * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
@@ -166,9 +136,9 @@ public final class CommitCoordinator implements AutoCloseable {
         return runCommit(requestId, () -> {
             FileCommitMessage msg = new FileCommitMessage(
                     bucket, key, requestId.toString(), ackAddress);
-            pubSubClient.pub(topicFor(partition), Message.serializeMessage(msg));
-            logger.debug("Published FileCommitMessage for requestId {} on topic {}",
-                    requestId, topicFor(partition));
+            String topic = CommitTopics.forPartition(partition);
+            pubSubClient.pub(topic, Message.serializeMessage(msg));
+            logger.debug("Published FileCommitMessage for requestId {} on topic {}", requestId, topic);
         });
     }
 
@@ -176,7 +146,8 @@ public final class CommitCoordinator implements AutoCloseable {
      * Publishes a multipart commit command and blocks until quorum.
      *
      * @param requestId the UUID for the upload.
-     * @param partition the partition number — used as the Kafka topic.
+     * @param partition the partition number — used as the Kafka topic via
+     *                  {@link CommitTopics#forPartition}.
      * @param bucket    object bucket.
      * @param key       object key.
      * @param chunks    ordered list of part/chunk identifiers.
@@ -186,16 +157,15 @@ public final class CommitCoordinator implements AutoCloseable {
         return runCommit(requestId, () -> {
             MultipartCommitMessage msg = new MultipartCommitMessage(
                     bucket, key, requestId.toString(), ackAddress, chunks);
-            pubSubClient.pub(topicFor(partition), Message.serializeMessage(msg));
-            logger.debug("Published MultipartCommitMessage for requestId {} on topic {}",
-                    requestId, topicFor(partition));
+            String topic = CommitTopics.forPartition(partition);
+            pubSubClient.pub(topic, Message.serializeMessage(msg));
+            logger.debug("Published MultipartCommitMessage for requestId {} on topic {}", requestId, topic);
         });
     }
 
     @Override
     public void close() {
-        // Give any in-flight HTTP exchanges a moment to drain, then stop.
-        ackServer.stop(1);
+        ackServer.stop();
         logger.info("CommitCoordinator ACK server stopped");
     }
 
@@ -204,26 +174,49 @@ public final class CommitCoordinator implements AutoCloseable {
     // -----------------------------------------------------------------------
 
     /**
+     * Javalin handler for {@code POST /ack/{requestId}}.
+     *
+     * <p>Called by each Storage Node once it has committed the operation to its
+     * op-log and metadata store. Decrements the {@link CountDownLatch} of the
+     * matching in-flight commit, waking the blocked caller when quorum is reached.
+     */
+    private void handleAck(Context ctx) {
+        String requestId = ctx.pathParam("requestId");
+
+        PendingCommit commit = inFlight.get(requestId);
+        if (commit == null) {
+            // Unknown or already-completed request — ignore gracefully.
+            logger.warn("Received ACK for unknown requestId {}", requestId);
+            ctx.status(404);
+            return;
+        }
+
+        int acks = commit.ackCount.incrementAndGet();
+        logger.trace("ACK {}/{} received for requestId {}", acks, TOTAL_NODES, requestId);
+
+        // Release one permit on the latch; the committer thread wakes up as
+        // soon as QUORUM permits have been released. Extra ACKs (from nodes
+        // beyond QUORUM) call countDown() on an already-zero latch — safe no-op.
+        commit.latch.countDown();
+
+        ctx.status(200);
+    }
+
+    /**
      * Core template used by both {@link #beginCommit} and {@link #beginMultipartCommit}.
      *
      * <ol>
-     *   <li>Registers the pending commit (so arriving ACKs can find it).</li>
+     *   <li>Registers the pending commit <em>before</em> publishing, so no ACK can
+     *       arrive before the entry exists in {@link #inFlight}.</li>
      *   <li>Runs {@code publishAction} to send the Kafka/pubsub message.</li>
-     *   <li>Waits up to {@value #ACK_TIMEOUT_SECONDS}s for {@value #QUORUM} ACKs.</li>
+     *   <li>Waits up to {@link #ackTimeoutSeconds}s for {@value #QUORUM} ACKs.</li>
      *   <li>Cleans up the in-flight entry regardless of outcome.</li>
      * </ol>
      */
     private boolean runCommit(UUID requestId, ThrowingRunnable publishAction) {
         String id = requestId.toString();
 
-        // A CountDownLatch initialised to QUORUM: each ACK calls countDown().
-        // The coordinator thread unblocks exactly when the QUORUM-th ACK arrives.
-        // Extra ACKs from the remaining SNs call countDown() on an already-zero
-        // latch, which is a safe no-op.
         PendingCommit commit = new PendingCommit(QUORUM);
-
-        // Register BEFORE publishing so there is no window where an ACK could
-        // arrive before the entry exists in inFlight.
         inFlight.put(id, commit);
 
         try {
@@ -247,21 +240,21 @@ public final class CommitCoordinator implements AutoCloseable {
             logger.error("Error during commit for requestId {}: {}", id, e.getMessage(), e);
             return false;
         } finally {
-            // Always remove from inFlight so late ACKs get 404 rather than
-            // being mistakenly associated with a future request that reuses
-            // the same UUID (which shouldn't happen, but defence-in-depth).
+            // Always remove so late ACKs get 404 rather than matching a future
+            // request that happens to reuse the same UUID (defence-in-depth).
             inFlight.remove(id);
         }
     }
 
     /**
-     * Returns a hostname that Storage Nodes can actually connect back to.
-     * Prefers an externally visible address; falls back to loopback in dev/test.
+     * Returns a hostname that Storage Nodes can reach to POST their ACKs.
+     * Falls back to loopback in environments where the local hostname cannot
+     * be resolved (e.g. some CI containers).
      */
     private static String resolveLocalHostname() {
         try {
-            return java.net.InetAddress.getLocalHost().getHostAddress();
-        } catch (java.net.UnknownHostException e) {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
             logger.warn("Could not resolve local hostname, falling back to loopback");
             return "127.0.0.1";
         }
