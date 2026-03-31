@@ -196,13 +196,12 @@ public class MultipartUploadManager {
         
             // TODO: Populate sender with the actual query-processor's bound address
             // for proper routing, debugging, and acknowledgement on storage nodes.
-            // Until that is wired in, omit the sender (null) instead of using a
-            // hard-coded placeholder like 127.0.0.1:0, which is invalid in production.
+            // Using a localhost placeholder temporarily since serialization requires non-null.
         Message manifestMessage = new Message.MultipartCommitMessage(
             sessionBucket,
             sessionKey,
             uploadId,
-            null,
+            new InetSocketAddress("127.0.0.1", 0),
             partNumberStrings);
         
         boolean published;
