@@ -8,6 +8,8 @@ import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.pubsub.MemoryPubSub;
+import com.github.koop.common.pubsub.PubSubClient;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -46,6 +48,7 @@ public final class StorageWorker {
     private final ExecutorService executor;
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
+    private final CommitCoordinator commitCoordinator;
     private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
     private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
@@ -61,16 +64,22 @@ public final class StorageWorker {
     // address lists (set numbers 1, 2, 3) and a matching PartitionSpreadConfiguration
     // with 99 partitions spread evenly across the three sets (33 each).
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
+        this(set1, set2, set3, 0);
+    }
+
+    // Overload that accepts a pre-built CommitCoordinator — used in tests that
+    // share a PubSubClient bus between the coordinator and the fake SNs.
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2,
+                         List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         MemoryFetcher fetcher = new MemoryFetcher();
         this.metadataClient = new MetadataClient(fetcher);
+        this.commitCoordinator = commitCoordinator;
         registerListeners();
         this.metadataClient.start();
-        // update() must come after start() so the listeners registered above are
-        // already in place when MemoryFetcher fires them synchronously.
         ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
         esConfig.setErasureSets(List.of(
                 toErasureSet(1, set1),
@@ -80,20 +89,77 @@ public final class StorageWorker {
         fetcher.update(buildTestPartitionSpread());
     }
 
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3, int ackPort) {
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        this.httpClient = HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .build();
+        MemoryFetcher fetcher = new MemoryFetcher();
+        this.metadataClient = new MetadataClient(fetcher);
+        try {
+            // MemoryPubSub routes messages back into the same process — sufficient
+            // for unit tests; replace with a Kafka-backed PubSubClient in prod.
+            PubSubClient pubSubClient = new PubSubClient(new MemoryPubSub());
+            pubSubClient.start();
+            this.commitCoordinator = new CommitCoordinator(pubSubClient, ackPort);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to start CommitCoordinator ACK server", e);
+        }
+        registerListeners();
+        this.metadataClient.start();
+        ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
+        esConfig.setErasureSets(List.of(
+                toErasureSet(1, set1),
+                toErasureSet(2, set2),
+                toErasureSet(3, set3)));
+        fetcher.update(esConfig);
+        fetcher.update(buildTestPartitionSpread());
+    }
+
+    // Convenience constructor that restores the original single-arg signature.
+    // Creates a MemoryPubSub-backed CommitCoordinator on an OS-assigned port,
+    // which is sufficient for tests that supply their own MetadataClient.
     public StorageWorker(MetadataClient metadataClient) {
+        this(metadataClient, buildDefaultCommitCoordinator());
+    }
+
+    public StorageWorker(MetadataClient metadataClient, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         this.metadataClient = metadataClient;
+        this.commitCoordinator = commitCoordinator;
         registerListeners();
         this.metadataClient.start();
+    }
+
+    private static CommitCoordinator buildDefaultCommitCoordinator() {
+        try {
+            PubSubClient pubSubClient = new PubSubClient(new MemoryPubSub());
+            pubSubClient.start();
+            return new CommitCoordinator(pubSubClient, 0);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to start CommitCoordinator ACK server", e);
+        }
     }
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
+    /**
+     * Executes a full PUT:
+     * <ol>
+     *   <li>Erasure-code and stream shards to all {@value com.github.koop.common.erasure.ErasureCoder#TOTAL}
+     *       storage nodes concurrently.</li>
+     *   <li>Publish a commit message to the per-partition Kafka topic so every SN
+     *       applies the operation to its op-log and metadata. SNs that missed the
+     *       stream reconstruct their shard from peers before committing.</li>
+     *   <li>Block until {@link CommitCoordinator#QUORUM} SN commit-ACKs are received,
+     *       then return {@code true} to the caller.</li>
+     * </ol>
+     */
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
@@ -114,58 +180,69 @@ public final class StorageWorker {
         int resolvedPartition = partition.getAsInt();
         List<InetSocketAddress> resolvedNodes = nodes.get();
 
-        // Shard the incoming stream — each InputStream carries shard data.
-        // IMPORTANT: all shard streams must be drained concurrently because
-        // the erasure encoder writes to 9 pipes in a single thread.
+        // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
+        //
+        // All shard streams MUST be drained concurrently: ErasureCoder.shard()
+        // writes into 9 piped streams from a single encoder thread, so reading
+        // them sequentially would deadlock.
         InputStream[] shardStreams = ErasureCoder.shard(data, length);
 
-        List<Callable<Boolean>> tasks = new LinkedList<>();
+        List<Callable<Boolean>> tasks = new ArrayList<>();
         for (int i = 0; i < TOTAL; i++) {
             final int index = i;
             tasks.add(() -> {
+                InetSocketAddress node = resolvedNodes.get(index);
+                URI uri = URI.create(String.format(
+                        "http://%s:%d/store/%d/%s?requestId=%s",
+                        node.getHostString(), node.getPort(),
+                        resolvedPartition, storageKey, requestID));
                 try {
-                    InetSocketAddress node = resolvedNodes.get(index);
-                    URI uri = URI.create(String.format("http://%s:%d/store/%d/%s?requestId=%s",
-                            node.getHostString(), node.getPort(), resolvedPartition, storageKey, requestID));
-
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
                             .build();
-
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                    if (response.statusCode() != 200) {
-                        logger.trace("PUT failed for shard {} to node {}: HTTP {}", index, node, response.statusCode());
-                        return false;
+                    HttpResponse<String> response =
+                            httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                    if (response.statusCode() == 200) {
+                        logger.trace("PUT shard {} → node {} succeeded", index, node);
+                        return true;
                     }
-                    logger.trace("PUT succeeded for shard {} to node {}", index, node);
-                    return true;
+                    logger.trace("PUT shard {} → node {} HTTP {}", index, node, response.statusCode());
                 } catch (Exception e) {
-                    logger.trace("Exception for shard {}: {}", index, e.getMessage());
-                    return false;
+                    logger.trace("PUT shard {} → node {} exception: {}", index, node, e.getMessage());
                 }
+                return false;
             });
         }
 
-        long numWritten;
+        long uploaded;
         try {
-            logger.trace("Waiting for all shard uploads to complete");
-            numWritten = executor.invokeAll(tasks).stream().map(t -> {
-                try {
-                    return t.get();
-                } catch (InterruptedException | ExecutionException e) {
-                    logger.warn("Exception in shard upload task {}", e.getMessage());
+            uploaded = executor.invokeAll(tasks).stream().filter(f -> {
+                try { return f.get(); }
+                catch (InterruptedException | ExecutionException e) {
+                    logger.warn("Shard upload task error: {}", e.getMessage());
                     return false;
                 }
-            }).filter(it -> it).count();
+            }).count();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
         }
-        logger.trace("All shard uploads completed, wrote {} shards successfully", numWritten);
-        return numWritten >= ErasureCoder.K;
+
+        logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, TOTAL, requestID);
+
+        // Phase 2 – commit.
+        //
+        // Publish the commit message to the partition's Kafka topic. Every SN will:
+        //   - add the op to its op-log + write metadata, if it received the shard; or
+        //   - reconstruct the shard from peers and then commit, if it didn't.
+        // SNs POST an ACK back to this QP's server. We block until QUORUM ACKs arrive.
+        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key);
+        if (!committed) {
+            logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
+        }
+        return committed;
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
@@ -266,6 +343,7 @@ public final class StorageWorker {
 
     public void shutdown() {
         executor.shutdownNow();
+        commitCoordinator.close();
     }
 
     // -------------------------------------------------------------------------
