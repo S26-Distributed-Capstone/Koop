@@ -1,6 +1,7 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
+import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
 import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
@@ -8,6 +9,7 @@ import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.pubsub.PubSubClient;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -46,6 +48,7 @@ public final class StorageWorker {
     private final ExecutorService executor;
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
+    private final PubSubClient pubSubClient;
     private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
     private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
@@ -67,6 +70,7 @@ public final class StorageWorker {
                 .build();
         MemoryFetcher fetcher = new MemoryFetcher();
         this.metadataClient = new MetadataClient(fetcher);
+        this.pubSubClient = null; // Set to null for test-only constructors
         registerListeners();
         this.metadataClient.start();
         // update() must come after start() so the listeners registered above are
@@ -81,11 +85,16 @@ public final class StorageWorker {
     }
 
     public StorageWorker(MetadataClient metadataClient) {
+        this(metadataClient, null);
+    }
+
+    public StorageWorker(MetadataClient metadataClient, PubSubClient pubSubClient) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
         this.metadataClient = metadataClient;
+        this.pubSubClient = pubSubClient;
         registerListeners();
         this.metadataClient.start();
     }
@@ -101,7 +110,7 @@ public final class StorageWorker {
         if (data == null)      throw new IllegalArgumentException("data is null");
         if (length < 0)        throw new IllegalArgumentException("length < 0");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -173,7 +182,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -205,7 +214,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -264,6 +273,51 @@ public final class StorageWorker {
         return success;
     }
 
+        /**
+     * Publishes a message to the partition-specific topic via the pub/sub client.
+     * 
+     * The message is routed to the topic corresponding to the partition that owns
+     * the given bucket/key combination.
+     * 
+     * @param bucket the bucket name
+     * @param key the object key
+     * @param message the {@link Message} to publish
+     * @return true if the message was successfully published, false otherwise
+     */
+    public boolean sendMessage(String bucket, String key, Message message) {
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (message == null)
+            throw new IllegalArgumentException("message is null");
+        if (pubSubClient == null) {
+            logger.warn("PubSubClient not configured, cannot send message");
+            return false;
+        }
+
+        String storageKey = toStorageKey(bucket, key);
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(storageKey);
+        if (partition.isEmpty()) {
+            logger.error("Routing failed for key {}, cannot send message", storageKey);
+            return false;
+        }
+
+        int partitionNumber = partition.getAsInt();
+        String topic = "partition-" + partitionNumber;
+        
+        try {
+            byte[] serialized = Message.serializeMessage(message);
+            pubSubClient.pub(topic, serialized);
+            logger.trace("Published message to topic {} for partition {}", topic, partitionNumber);
+            return true;
+        } catch (Exception e) {
+            logger.error("Exception publishing message to topic {}: {}", topic, e.getMessage());
+            return false;
+        }
+    }
+
     public void shutdown() {
         executor.shutdownNow();
     }
@@ -310,6 +364,10 @@ public final class StorageWorker {
             throw new IllegalStateException(
                     "ErasureRouting is not ready — waiting for PartitionSpreadConfiguration and ErasureSetConfiguration");
         return r;
+    }
+
+    private static String toStorageKey(String bucket, String key) {
+        return bucket + "-" + key;
     }
 
     private void streamReconstruct(int partition, String storageKey,
