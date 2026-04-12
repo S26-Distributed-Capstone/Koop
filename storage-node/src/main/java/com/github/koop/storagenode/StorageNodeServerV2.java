@@ -180,14 +180,16 @@ public class StorageNodeServerV2 {
             String key = ctx.pathParam("key");
             String fullKey = bucket + "/" + key;
             String requestId = ctx.queryParam("requestId");
-            long length = ctx.req().getContentLengthLong();
+
+            logger.debug("Received PUT request: partition={} fullKey={} requestId={}", partition, fullKey,
+                    requestId);
 
             if (requestId == null || requestId.isBlank()) {
                 ctx.status(400).result("Missing requestId parameter");
                 return;
             }
 
-            storageNode.store(partition, fullKey, requestId, Channels.newChannel(ctx.bodyInputStream()), length);
+            storageNode.store(partition, fullKey, requestId, Channels.newChannel(ctx.bodyInputStream()));
 
             ctx.status(200).result("OK");
             logger.debug("PUT (Uncommitted) partition={} fullKey={} requestId={}", partition, fullKey, requestId);

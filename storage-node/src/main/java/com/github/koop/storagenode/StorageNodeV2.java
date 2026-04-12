@@ -125,13 +125,12 @@ protected void store(
             int partition,
             String key,
             String requestID,
-            ReadableByteChannel data,
-            long length) throws IOException {
+            ReadableByteChannel data) throws IOException {
 
         // 1. Perform the physical file write.
         Path path = getObjectPath(requestID);
         Files.createDirectories(path.getParent());
-        write(path, data, length);
+        write(path, data);
 
         // 2. Record the uncommitted write intent in the database
         try {
@@ -305,41 +304,41 @@ protected void store(
         return db.listItemsInBucket(bucketPrefix);
     }
 
-    private void write(Path path, ReadableByteChannel data, long length) throws IOException {
+   private void write(Path path, ReadableByteChannel data) throws IOException {
         try (FileChannel fc = FileChannel.open(path,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE)) {
 
             long written = 0;
-            // Pre-allocate a 64KB direct buffer outside the loop for fallback reads
-            java.nio.ByteBuffer fallbackBuffer = java.nio.ByteBuffer.allocateDirect(64 * 1024);
+            // Define a chunk size (e.g., 8MB) to request in each transfer block
+            final long CHUNK_SIZE = 8 * 1024 * 1024; 
+            
+            // A tiny 1-byte buffer exclusively used to test for EOF
+            java.nio.ByteBuffer eofBuffer = java.nio.ByteBuffer.allocateDirect(1);
 
-            while (written < length) {
-                long n = fc.transferFrom(data, written, length - written);
-                if (n > 0) {
-                    written += n;
-                } else if (!data.isOpen()) {
-                    throw new IOException("Data channel closed before expected length was written");
+            while (true) {
+                long transferred = fc.transferFrom(data, written, CHUNK_SIZE);
+                
+                if (transferred > 0) {
+                    written += transferred;
                 } else {
-                    fallbackBuffer.clear();
-
-                    // Cap the buffer limit to avoid reading past the expected length
-                    int remaining = (int) Math.min((long) fallbackBuffer.capacity(), length - written);
-                    fallbackBuffer.limit(remaining);
-
-                    int readBytes = data.read(fallbackBuffer);
-
+                    // transferFrom returned 0. This means either:
+                    // 1. The stream is at EOF.
+                    // 2. The source channel has no bytes immediately available.
+                    
+                    // To definitively check for EOF without dropping data, attempt a 1-byte read.
+                    eofBuffer.clear();
+                    int readBytes = data.read(eofBuffer);
+                    
                     if (readBytes == -1) {
-                        throw new EOFException("Unexpected EOF. Expected " + length + " bytes, got " + written);
-                    }
-
-                    // Enforce the blocking mode assumption
-                    assert readBytes != 0 : "Blocking channel guarantee violated: read() returned 0 bytes";
-
-                    fallbackBuffer.flip();
-                    while (fallbackBuffer.hasRemaining()) {
-                        written += fc.write(fallbackBuffer, written);
+                        break; // EOF confirmed, exit the loop
+                    } else if (readBytes > 0) {
+                        // The stream wasn't at EOF, so write that 1 byte and continue
+                        eofBuffer.flip();
+                        while (eofBuffer.hasRemaining()) {
+                            written += fc.write(eofBuffer, written);
+                        }
                     }
                 }
             }
