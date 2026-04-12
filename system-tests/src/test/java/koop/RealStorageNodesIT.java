@@ -86,11 +86,8 @@ public class RealStorageNodesIT {
 
             // Each node gets its own Database instance but shares the memory-backed control planes
             Database db = new Database(new RocksDbStorageStrategy(dir.resolve("db").toString()));
-            MetadataClient mc = new MetadataClient(sharedFetcher);
-            PubSubClient pc = new PubSubClient(sharedPubSub);
-
             StorageNodeServerV2 server =
-                    new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"), mc, pc);
+                    new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"), sharedMetadataClient, sharedPubSubClient);
 
             servers.add(server);
             dataDirs.add(dir);
@@ -102,9 +99,6 @@ public class RealStorageNodesIT {
             server.start();
 
             InetSocketAddress addr = new InetSocketAddress("127.0.0.1", port);
-            
-            // Wait for port to open
-            waitForPort(addr, 5000);
 
             log("[NODE " + i + "] READY");
 

@@ -129,7 +129,7 @@ public final class StorageWorker {
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
         registerListeners();
-        this.metadataClient.start();
+        tryRebuildRouting();
     }
 
     private static CommitCoordinator buildDefaultCommitCoordinator() {

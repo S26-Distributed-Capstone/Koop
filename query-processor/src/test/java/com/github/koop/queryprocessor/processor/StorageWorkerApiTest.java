@@ -154,7 +154,8 @@ public class StorageWorkerApiTest {
         try {
             List<InetSocketAddress> newSet = newNodes.stream()
                     .map(AckingFakeStorageNodeServer::address).toList();
-
+            var metadataClient = new MetadataClient(memoryFetcher);
+            metadataClient.start();
             memoryFetcher.update(buildErasureSetConfiguration(newSet, newSet, newSet));
             memoryFetcher.update(buildPartitionSpreadConfiguration());
 
@@ -163,7 +164,7 @@ public class StorageWorkerApiTest {
             // the old one is subscribed to the old sharedPubSub.
             CommitCoordinator freshCoordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker freshLiveWorker = new StorageWorker(
-                    new MetadataClient(memoryFetcher), freshCoordinator);
+                    metadataClient, freshCoordinator);
             memoryFetcher.update(buildErasureSetConfiguration(newSet, newSet, newSet));
             memoryFetcher.update(buildPartitionSpreadConfiguration());
 
@@ -195,6 +196,7 @@ public class StorageWorkerApiTest {
 
             MemoryFetcher fetcher = new MemoryFetcher();
             MetadataClient client = new MetadataClient(fetcher);
+            client.start();
             CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker prodWorker = new StorageWorker(client, coordinator);
             fetcher.update(buildErasureSetConfiguration(set, set, set));

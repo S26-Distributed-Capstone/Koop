@@ -378,6 +378,8 @@ private void sendAck(String callbackAddress, String requestId) {
 
     public void start() {
         if (metadataClient != null) {
+            this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
+            this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
             metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
                 this.currentEsConfig = current;
                 updateSubscriptions();
@@ -387,12 +389,6 @@ private void sendAck(String callbackAddress, String requestId) {
                 this.currentPsConfig = current;
                 updateSubscriptions();
             });
-
-            metadataClient.start();
-        }
-
-        if (pubSubClient != null) {
-            pubSubClient.start();
         }
 
         app = Javalin.create(config -> {

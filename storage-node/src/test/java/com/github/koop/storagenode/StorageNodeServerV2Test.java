@@ -55,8 +55,10 @@ class StorageNodeServerV2Test {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
         fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
+        metadataClient.start();
         pubSub = new MemoryPubSub();
         pubSubClient = new PubSubClient(pubSub);
+        pubSubClient.start();
         // Start the ACK blackhole server on a random port
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
