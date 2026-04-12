@@ -300,18 +300,6 @@ public class RealStorageNodesIT {
         }
     }
 
-    private static void waitForPort(InetSocketAddress addr, long timeoutMs) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            try (Socket s = new Socket()) {
-                s.connect(addr, 50);
-                return; // success
-            } catch (IOException ignored) {}
-            Thread.sleep(50);
-        }
-        fail("Server port did not open: " + addr);
-    }
-
     private static void deleteRecursive(Path root) throws IOException {
         if (!Files.exists(root)) return;
 
