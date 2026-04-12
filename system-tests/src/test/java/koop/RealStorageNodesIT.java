@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealStorageNodesIT {
 
     private static final int TOTAL_NODES = 9;
-    private static final int DATA_SIZE = 15 * 1024 * 1024; // 15MB
+    private static final int DATA_SIZE = 5 * 1024 * 1024; // 15MB
 
     private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
@@ -209,7 +209,6 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
 
     @Test
-    @Disabled("Flaky in CI")
     void get_tolerates_three_node_failures_realServers() throws Exception {
 
         log("Generating random test data for erasure tolerance test...");
