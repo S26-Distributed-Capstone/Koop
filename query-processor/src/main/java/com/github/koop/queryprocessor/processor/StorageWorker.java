@@ -1,6 +1,5 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.github.koop.common.Util;
 import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
