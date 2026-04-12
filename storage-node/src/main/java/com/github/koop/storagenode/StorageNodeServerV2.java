@@ -364,8 +364,10 @@ public class StorageNodeServerV2 {
 
     public void start() {
         if (metadataClient != null) {
-            this.currentEsConfig=metadataClient.get(ErasureSetConfiguration.class);
-            this.currentPsConfig=metadataClient.get(PartitionSpreadConfiguration.class);
+            this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
+            this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
+            updateSubscriptions();
+
             metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
                 this.currentEsConfig = current;
                 updateSubscriptions();
