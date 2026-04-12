@@ -114,14 +114,14 @@ public class StorageNodeV2 {
      * written to disk using a robust method that handles partial writes and ensures
      * data integrity. The file path is determined by the request ID, which allows
      * for sharding files into subdirectories based on their prefixes.
-     * 
-     * @param partition
-     * @param requestID
-     * @param data
-     * @param length
-     * @throws IOException
+     *
+     * @param partition the partition number for this store operation
+     * @param key the object key (bucket/object) identifying what is being stored
+     * @param requestID the unique request ID used to derive the file path
+     * @param data the data to write
+     * @throws IOException if the file cannot be written or the write intent cannot be recorded
      */
-protected void store(
+    protected void store(
             int partition,
             String key,
             String requestID,
