@@ -216,6 +216,7 @@ public class StorageNodeServerV2 {
             logger.debug("Received GET request: {}", ctx.req().getRequestURI());
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String key = ctx.pathParam("key");
+            key = key.replaceFirst("-", "/");
 
             String versionParam = ctx.queryParam("version");
             long targetVersion = -1;
@@ -372,7 +373,7 @@ private void sendAck(String callbackAddress, String requestId) {
     private String buildKey(String bucket, String key) {
         if (bucket == null || bucket.isEmpty())
             return key;
-        return Util.buildObjectKey(bucket, key);
+        return bucket + "/" + key;
     }
 
     // --- Server Lifecycle ---
