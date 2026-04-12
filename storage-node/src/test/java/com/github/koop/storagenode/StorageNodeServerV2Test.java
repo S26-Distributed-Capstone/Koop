@@ -7,7 +7,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -43,8 +42,7 @@ class StorageNodeServerV2Test {
     private MemoryFetcher fetcher;
     private MemoryPubSub pubSub;
 
-    // A dummy server to absorb all the async ACKs and prevent connection errors in
-    // the logs
+    // A dummy server to absorb all the async ACKs and prevent connection errors in the logs
     private Javalin ackServer;
 
     @TempDir
@@ -55,14 +53,15 @@ class StorageNodeServerV2Test {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
         fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
-        metadataClient.start();
         pubSub = new MemoryPubSub();
         pubSubClient = new PubSubClient(pubSub);
+        metadataClient.start();
         pubSubClient.start();
-        // Start the ACK blackhole server on a random port
+        
+        // Start the ACK blackhole server on a random port (Updated to new path param spec)
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
-            config.routes.post("/ack", ctx -> ctx.status(200));
+            config.routes.post("/ack/{requestId}", ctx -> ctx.status(200));
         }).start(0);
 
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
@@ -85,30 +84,25 @@ class StorageNodeServerV2Test {
         ackServer.stop();
     }
 
-    private URI storeUri(int partition, String key) {
-        String encodedKey = URLEncoder.encode(key, StandardCharsets.UTF_8);
-        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + encodedKey);
+    private URI storeUri(int partition, String fullKey) {
+        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey);
     }
 
-    private URI storeUriWithReq(int partition, String key, String reqId) {
-        String encodedKey = URLEncoder.encode(key, StandardCharsets.UTF_8);
-        return URI
-                .create("http://localhost:" + port + "/store/" + partition + "/" + encodedKey + "?requestId=" + reqId);
+    private URI storeUriWithReq(int partition, String fullKey, String reqId) {
+        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey + "?requestId=" + reqId);
     }
 
-    private URI storeUriWithVersion(int partition, String key, long version) {
-        String encodedKey = URLEncoder.encode(key, StandardCharsets.UTF_8);
-        return URI
-                .create("http://localhost:" + port + "/store/" + partition + "/" + encodedKey + "?version=" + version);
+    private URI storeUriWithVersion(int partition, String fullKey, long version) {
+        return URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey + "?version=" + version);
     }
 
     @Test
     void testPutMissingRequestId() throws Exception {
         int partition = 1;
-        String key = "missing-reqid";
+        String fullKey = "test-bucket/missing-reqid";
 
         HttpRequest putReq = HttpRequest.newBuilder()
-                .uri(storeUri(partition, key)) // Omitting ?requestId=
+                .uri(storeUri(partition, fullKey)) // Omitting ?requestId=
                 .PUT(HttpRequest.BodyPublishers.ofString("Data"))
                 .build();
 
@@ -120,10 +114,10 @@ class StorageNodeServerV2Test {
     @Test
     void testGetInvalidVersion() throws Exception {
         int partition = 1;
-        String key = "invalid-version-key";
+        String fullKey = "test-bucket/invalid-version-key";
 
         HttpRequest getReq = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + key + "?version=abc"))
+                .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey + "?version=abc"))
                 .GET()
                 .build();
 
@@ -135,11 +129,11 @@ class StorageNodeServerV2Test {
     @Test
     void testPutUncommittedAndGetNotFound() throws Exception {
         int partition = 1;
-        String key = "test-key";
+        String fullKey = "test-bucket/test-key";
         byte[] data = "Hello".getBytes(StandardCharsets.UTF_8);
 
         HttpRequest putReq = HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, key, "req-1"))
+                .uri(storeUriWithReq(partition, fullKey, "req-1"))
                 .PUT(HttpRequest.BodyPublishers.ofByteArray(data))
                 .header("Content-Type", "application/octet-stream")
                 .build();
@@ -148,7 +142,7 @@ class StorageNodeServerV2Test {
         assertEquals(200, putResp.statusCode(), "PUT should succeed");
 
         HttpRequest getReq = HttpRequest.newBuilder()
-                .uri(storeUri(partition, key))
+                .uri(storeUri(partition, fullKey))
                 .GET()
                 .build();
 
@@ -190,24 +184,24 @@ class StorageNodeServerV2Test {
     @Test
     void testGetSpecificVersion() throws Exception {
         int partition = 3;
-        String key = "versioned-key";
+        String fullKey = "test-bucket/versioned-key";
 
         HttpRequest putReq1 = HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, key, "req-v1"))
+                .uri(storeUriWithReq(partition, fullKey, "req-v1"))
                 .PUT(HttpRequest.BodyPublishers.ofString("Version 1"))
                 .build();
         http.send(putReq1, HttpResponse.BodyHandlers.ofString());
-        db.putItem(key, partition, 10L, "req-v1");
+        db.putItem(fullKey, partition, 10L, "req-v1");
 
         HttpRequest putReq2 = HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, key, "req-v2"))
+                .uri(storeUriWithReq(partition, fullKey, "req-v2"))
                 .PUT(HttpRequest.BodyPublishers.ofString("Version 2"))
                 .build();
         http.send(putReq2, HttpResponse.BodyHandlers.ofString());
-        db.putItem(key, partition, 20L, "req-v2");
+        db.putItem(fullKey, partition, 20L, "req-v2");
 
         HttpRequest getV1 = HttpRequest.newBuilder()
-                .uri(storeUriWithVersion(partition, key, 10L))
+                .uri(storeUriWithVersion(partition, fullKey, 10L))
                 .GET()
                 .build();
         HttpResponse<String> respV1 = http.send(getV1, HttpResponse.BodyHandlers.ofString());
@@ -215,7 +209,7 @@ class StorageNodeServerV2Test {
         assertEquals("Version 1", respV1.body());
 
         HttpRequest getLatest = HttpRequest.newBuilder()
-                .uri(storeUri(partition, key))
+                .uri(storeUri(partition, fullKey))
                 .GET()
                 .build();
         HttpResponse<String> respLatest = http.send(getLatest, HttpResponse.BodyHandlers.ofString());
@@ -279,43 +273,43 @@ class StorageNodeServerV2Test {
         assertTrue(getResp.body().contains("chunk2"));
     }
 
-@Test
-void testProcessSequencerMessageSendsAck() throws Exception {
+    @Test
+    void testProcessSequencerMessageSendsAck() throws Exception {
         int partition = 1;
         String bucket = "ack-bucket";
         String reqId = "req-ack-123";
 
         CountDownLatch ackLatch = new CountDownLatch(1);
+        AtomicReference<String> receivedReqId = new AtomicReference<>();
 
-        // Start a dummy Javalin server on a random port to act as the sequencer
-        // callback endpoint
+        // Start a dummy Javalin server on a random port to act as the sequencer callback endpoint
         Javalin coordinator = Javalin.create(config -> {
-                config.concurrency.useVirtualThreads = true;
-                config.startup.showJavalinBanner = false;
-                config.http.maxRequestSize = 100_000_000L;
-                config.routes.post("/ack/{requestId}", ctx -> {
-                        ackLatch.countDown();
-                        ctx.status(200);
-                });
+            config.concurrency.useVirtualThreads = true;
+            config.startup.showJavalinBanner = false;
+            config.http.maxRequestSize = 100_000_000L;
+            config.routes.post("/ack/{requestId}", ctx -> {
+                receivedReqId.set(ctx.pathParam("requestId"));
+                ackLatch.countDown();
+                ctx.status(200);
+            });
         }).start(0);
 
         int callbackPort = coordinator.port();
         InetSocketAddress senderAddress = new InetSocketAddress("127.0.0.1", callbackPort);
 
-        // Create a simple message to trigger the sequencer processing and subsequent
-        // ACK
+        // Create a simple message to trigger the sequencer processing and subsequent ACK
         Message.CreateBucketMessage msg = new Message.CreateBucketMessage(bucket, reqId, senderAddress);
 
-        // Process the message (this handles the database operation and fires the async
-        // ACK)
+        // Process the message (this handles the database operation and fires the async ACK)
         server.processSequencerMessage(partition, msg, 1L);
 
         // Wait for the asynchronous HTTP client to send the request to the dummy server
         boolean received = ackLatch.await(5, TimeUnit.SECONDS);
 
         assertTrue(received, "ACK was not received by the callback server within the timeout limit");
-
-}
+        assertEquals(reqId, receivedReqId.get(), "ACK should use path parameter for requestId");
+        coordinator.stop();
+    }
 
     @Test
     void testGetCommittedButUnmaterializedRegularFile() throws Exception {
@@ -326,7 +320,6 @@ void testProcessSequencerMessageSendsAck() throws Exception {
         String reqId = "req-missing-123";
 
         // Commit the file metadata via sequencer message WITHOUT performing the HTTP PUT first.
-        // This simulates a scenario where the DB commit arrives but the file isn't on disk.
         server.processSequencerMessage(partition, 
             new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
 

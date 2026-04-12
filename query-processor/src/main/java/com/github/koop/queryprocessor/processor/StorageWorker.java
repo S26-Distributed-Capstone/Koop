@@ -166,7 +166,7 @@ public final class StorageWorker {
         if (data == null)      throw new IllegalArgumentException("data is null");
         if (length < 0)        throw new IllegalArgumentException("length < 0");
 
-        String storageKey = Util.buildObjectKey(bucket, key);
+        String storageKey = bucket+"/"+key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -249,7 +249,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = Util.buildObjectKey(bucket, key);
+        String storageKey = bucket+"/"+key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -281,7 +281,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = Util.buildObjectKey(bucket, key);
+        String storageKey = bucket+"/"+key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()

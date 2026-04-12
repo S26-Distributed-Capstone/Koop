@@ -12,10 +12,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-/**
- * Fake storage node HTTP server for testing.
- * Mimics the real StorageNodeServer Javalin endpoints.
- */
 public class FakeStorageNodeServer implements Closeable {
 
     private final Javalin app;
@@ -28,14 +24,14 @@ public class FakeStorageNodeServer implements Closeable {
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
-            config.http.maxRequestSize = 100_000_000L; // 100 MB — tests use large payloads
+            config.http.maxRequestSize = 100_000_000L;
 
-            config.routes.put("/store/{partition}/{key}", this::handlePut);
-            config.routes.get("/store/{partition}/{key}", this::handleGet);
-            config.routes.delete("/store/{partition}/{key}", this::handleDelete);
+            config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
+            config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
+            config.routes.delete("/store/{partition}/{bucket}/<key>", this::handleDelete);
         });
 
-        app.start(0); // OS picks a free port
+        app.start(0);
     }
 
     public InetSocketAddress address() {
@@ -53,10 +49,12 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String key    = ctx.pathParam("key");
+            String bucket = ctx.pathParam("bucket");
+            String key    = ctx.pathParam("key"); 
+            String fullKey = bucket + "/" + key;
             byte[] data   = ctx.bodyAsBytes();
 
-            store.put(mapKey(partition, key), data);
+            store.put(mapKey(partition, fullKey), data);
             ctx.status(200).result("OK");
         } catch (Exception e) {
             logger.error("Error in fake PUT", e);
@@ -71,9 +69,11 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String bucket = ctx.pathParam("bucket");
             String key    = ctx.pathParam("key");
+            String fullKey = bucket + "/" + key;
 
-            byte[] data = store.get(mapKey(partition, key));
+            byte[] data = store.get(mapKey(partition, fullKey));
             if (data != null) {
                 ctx.status(200)
                    .header("Content-Type", "application/octet-stream")
@@ -94,9 +94,11 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String bucket = ctx.pathParam("bucket");
             String key    = ctx.pathParam("key");
+            String fullKey = bucket + "/" + key;
 
-            store.remove(mapKey(partition, key));
+            store.remove(mapKey(partition, fullKey));
             ctx.status(200).result("OK");
         } catch (Exception e) {
             logger.error("Error in fake DELETE", e);
@@ -104,8 +106,8 @@ public class FakeStorageNodeServer implements Closeable {
         }
     }
 
-    private static String mapKey(int partition, String key) {
-        return partition + "|" + key;
+    private static String mapKey(int partition, String fullKey) {
+        return partition + "|" + fullKey;
     }
 
     @Override
