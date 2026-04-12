@@ -209,7 +209,6 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
 
     @Test
-    @Disabled("Flaky in CI")
     void get_tolerates_three_node_failures_realServers() throws Exception {
 
         log("Generating random test data for erasure tolerance test...");
