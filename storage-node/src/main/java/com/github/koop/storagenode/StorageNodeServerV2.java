@@ -21,6 +21,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.koop.common.Util;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MetadataClient;
@@ -371,7 +372,7 @@ private void sendAck(String callbackAddress, String requestId) {
     private String buildKey(String bucket, String key) {
         if (bucket == null || bucket.isEmpty())
             return key;
-        return bucket + "/" + key;
+        return Util.buildObjectKey(bucket, key);
     }
 
     // --- Server Lifecycle ---

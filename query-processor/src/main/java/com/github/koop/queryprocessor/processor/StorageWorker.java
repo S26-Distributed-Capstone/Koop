@@ -1,5 +1,6 @@
 package com.github.koop.queryprocessor.processor;
 
+import com.github.koop.common.Util;
 import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
@@ -165,7 +166,7 @@ public final class StorageWorker {
         if (data == null)      throw new IllegalArgumentException("data is null");
         if (length < 0)        throw new IllegalArgumentException("length < 0");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = Util.buildObjectKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -248,7 +249,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = Util.buildObjectKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -280,7 +281,7 @@ public final class StorageWorker {
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
         if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "-" + key;
+        String storageKey = Util.buildObjectKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
