@@ -48,6 +48,10 @@ public class MetadataClient implements AutoCloseable {
         });
     }
 
+    public <T> T get(Class<T> clazz) {
+        return clazz.cast(cache.get(clazz));
+    }
+
     @Override
     public void close() throws Exception {
         fetcher.close();

@@ -49,8 +49,6 @@ public final class StorageWorker {
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
     private final CommitCoordinator commitCoordinator;
-    private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
-    private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
     // FOR TESTING ONLY - constructs a MetadataClient backed by a MemoryFetcher
@@ -352,16 +350,14 @@ public final class StorageWorker {
 
     private void registerListeners() {
         this.metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
-            erasureSetConfig.set(current);
             logger.info("ErasureSetConfiguration updated: {} erasure sets",
                     current.getErasureSets() == null ? 0 : current.getErasureSets().size());
-            tryRebuildRouting(partitionSpreadConfig.get(), current);
+            tryRebuildRouting();
         });
         this.metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
-            partitionSpreadConfig.set(current);
             logger.info("PartitionSpreadConfiguration updated: {} spread entries",
                     current.getPartitionSpread() == null ? 0 : current.getPartitionSpread().size());
-            tryRebuildRouting(current, erasureSetConfig.get());
+            tryRebuildRouting();
         });
     }
 
@@ -371,10 +367,16 @@ public final class StorageWorker {
      * if one hasn't arrived yet this is a no-op and the first update of the
      * lagging config will trigger the rebuild instead.
      */
-    private void tryRebuildRouting(PartitionSpreadConfiguration ps, ErasureSetConfiguration es) {
+    private void tryRebuildRouting() {
+        PartitionSpreadConfiguration ps = metadataClient.get(PartitionSpreadConfiguration.class);
+        ErasureSetConfiguration es = metadataClient.get(ErasureSetConfiguration.class);
         if (ps != null && es != null) {
             routing.set(new ErasureRouting(ps, es));
             logger.info("ErasureRouting rebuilt");
+        }else {
+            logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
+                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                    ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }
 
