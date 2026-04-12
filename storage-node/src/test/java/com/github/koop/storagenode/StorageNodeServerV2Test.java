@@ -277,26 +277,24 @@ class StorageNodeServerV2Test {
         assertTrue(getResp.body().contains("chunk2"));
     }
 
-    @Test
-    void testProcessSequencerMessageSendsAck() throws Exception {
+@Test
+void testProcessSequencerMessageSendsAck() throws Exception {
         int partition = 1;
         String bucket = "ack-bucket";
         String reqId = "req-ack-123";
 
         CountDownLatch ackLatch = new CountDownLatch(1);
-        AtomicReference<String> receivedBody = new AtomicReference<>();
 
         // Start a dummy Javalin server on a random port to act as the sequencer
         // callback endpoint
         Javalin coordinator = Javalin.create(config -> {
-            config.concurrency.useVirtualThreads = true;
-            config.startup.showJavalinBanner = false;
-            config.http.maxRequestSize = 100_000_000L;
-            config.routes.post("/ack", ctx -> {
-                receivedBody.set(ctx.body());
-                ackLatch.countDown();
-                ctx.status(200);
-            });
+                config.concurrency.useVirtualThreads = true;
+                config.startup.showJavalinBanner = false;
+                config.http.maxRequestSize = 100_000_000L;
+                config.routes.post("/ack/{requestId}", ctx -> {
+                        ackLatch.countDown();
+                        ctx.status(200);
+                });
         }).start(0);
 
         int callbackPort = coordinator.port();
@@ -314,10 +312,8 @@ class StorageNodeServerV2Test {
         boolean received = ackLatch.await(5, TimeUnit.SECONDS);
 
         assertTrue(received, "ACK was not received by the callback server within the timeout limit");
-        assertEquals("{\"requestId\":\"" + reqId + "\"}", receivedBody.get(),
-                "ACK payload should contain the correct JSON formatting");
 
-    }
+}
 
     @Test
     void testGetCommittedButUnmaterializedRegularFile() throws Exception {

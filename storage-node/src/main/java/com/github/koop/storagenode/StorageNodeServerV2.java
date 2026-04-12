@@ -335,19 +335,20 @@ public class StorageNodeServerV2 {
         }
     }
 
-    private void sendAck(String callbackAddress, String requestId) {
+private void sendAck(String callbackAddress, String requestId) {
         if (callbackAddress == null || callbackAddress.isBlank() || requestId == null || requestId.isBlank()) {
             return;
         }
 
         try {
-            String url = callbackAddress.endsWith("/") ? callbackAddress + "ack" : callbackAddress + "/ack";
-            String jsonPayload = String.format("{\"requestId\":\"%s\"}", requestId);
+            // Standardize URL to use path parameters: http://host:port/ack/{requestId}
+            String baseUrl = callbackAddress.endsWith("/") ? 
+                    callbackAddress.substring(0, callbackAddress.length() - 1) : callbackAddress;
+            String url = baseUrl + "/ack/" + requestId;
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .POST(HttpRequest.BodyPublishers.noBody()) // Simplest: Empty body
                     .build();
 
             httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
@@ -367,7 +368,6 @@ public class StorageNodeServerV2 {
             logger.error("Invalid callback URL format: {} for requestId: {}", callbackAddress, requestId, e);
         }
     }
-
     private String buildKey(String bucket, String key) {
         if (bucket == null || bucket.isEmpty())
             return key;
