@@ -174,6 +174,7 @@ public class RealStorageNodesIT {
     // MAIN ROUNDTRIP TEST
     // -------------------------------------------------------
     @Test
+    @Order(2)
     void put_get_roundTrip_realServers() throws Exception {
 
         log("Generating random test data...");
@@ -209,6 +210,7 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
 
     @Test
+    @Order(1)
     void get_tolerates_three_node_failures_realServers() throws Exception {
 
         log("Generating random test data for erasure tolerance test...");
@@ -239,6 +241,7 @@ public class RealStorageNodesIT {
     }
 
     @Test
+    @Order(3)
     void get_fails_with_four_node_failures_realServers() throws Exception {
 
         log("Generating random test data for erasure failure test...");
