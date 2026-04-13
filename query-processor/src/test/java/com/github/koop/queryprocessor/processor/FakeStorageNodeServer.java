@@ -16,7 +16,7 @@ import org.apache.logging.log4j.Logger;
  * Fake storage node HTTP server for testing.
  * Mimics the real StorageNodeServer Javalin endpoints.
  */
-public final class FakeStorageNodeServer implements Closeable {
+public class FakeStorageNodeServer implements Closeable {
 
     private final Javalin app;
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();

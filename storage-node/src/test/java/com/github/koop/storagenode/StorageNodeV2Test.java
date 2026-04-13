@@ -22,9 +22,9 @@ import com.github.koop.storagenode.StorageNodeV2.MultipartData;
 import com.github.koop.storagenode.StorageNodeV2.Tombstone;
 import com.github.koop.storagenode.StorageNodeV2.FileObject;
 import com.github.koop.storagenode.db.Database;
-import com.github.koop.storagenode.db.InMemoryStorageStrategy;
 import com.github.koop.storagenode.db.Metadata;
 import com.github.koop.storagenode.db.MultipartFileVersion;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 
 public class StorageNodeV2Test {
 
@@ -35,8 +35,8 @@ public class StorageNodeV2Test {
     Path tempDir;
 
     @BeforeEach
-    public void setup() {
-        db = new Database(new InMemoryStorageStrategy());
+    public void setup() throws Exception {
+        db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
         storageNode = new StorageNodeV2(db, tempDir);
     }
 
@@ -54,7 +54,7 @@ public class StorageNodeV2Test {
         long seqNumber = 100L;
 
         // 1. Store data
-        storageNode.store(partition, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)),
+        storageNode.store(partition, key, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)),
                 requestData.length);
 
         // 2. Commit metadata
@@ -101,7 +101,7 @@ public class StorageNodeV2Test {
         String requestID = "req-del";
 
         // Setup existing object
-        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
         storageNode.commit(1, key, requestID, 10L);
 
         // Ensure it's there
@@ -125,14 +125,14 @@ public class StorageNodeV2Test {
         String requestID = "req-recreate";
 
         // Setup existing object
-        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
         storageNode.commit(1, key, requestID, 10L);
 
         // Delete object
         storageNode.delete(1, key, 11L);
 
         // Recreate object
-        storageNode.store(1, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
         storageNode.commit(1, key, requestID, 12L);
 
         // Retrieve should get new data
@@ -193,13 +193,13 @@ public class StorageNodeV2Test {
     @Test
     public void testListItemsInBucket() throws Exception {
         String prefix = "test-bucket/";
-        storageNode.store(1, "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())), 1);
+        storageNode.store(1,prefix+"file1", "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())), 1);
         storageNode.commit(1, prefix + "file1", "req-1", 100L);
 
-        storageNode.store(1, "req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())), 1);
+        storageNode.store(1, prefix+"file2","req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())), 1);
         storageNode.commit(1, prefix + "file2", "req-2", 101L);
 
-        storageNode.store(1, "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())), 1);
+        storageNode.store(1,"other-bucket/file3", "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())), 1);
         storageNode.commit(1, "other-bucket/file3", "req-3", 102L);
 
         List<Metadata> items = storageNode.listItemsInBucket(prefix).toList();

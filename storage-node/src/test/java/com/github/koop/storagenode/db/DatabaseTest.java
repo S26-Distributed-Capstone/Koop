@@ -3,7 +3,10 @@ package com.github.koop.storagenode.db;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.rocksdb.RocksDBException;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -12,11 +15,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DatabaseTest {
 
+    @TempDir
+    Path tempDir;
     private Database database;
 
     @BeforeEach
-    void setUp() {
-        database = new Database(new InMemoryStorageStrategy());
+    void setUp() throws RocksDBException {
+        database = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
     }
 
     @AfterEach
@@ -30,25 +35,29 @@ class DatabaseTest {
 
     @Test
     void testPutItemCreatesMetadataAndLog() throws Exception {
-        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
+        database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
 
         var meta = database.getItem("animals/cat.jpg").orElseThrow();
         assertEquals(1, meta.versions().size());
         assertInstanceOf(RegularFileVersion.class, meta.versions().get(0));
         assertEquals(100L, meta.versions().get(0).sequenceNumber());
-        assertEquals("/uuid-100.blob", ((RegularFileVersion) meta.versions().get(0)).location());
+        assertEquals("uuid-100.blob", ((RegularFileVersion) meta.versions().get(0)).location());
+        // Without storing uncommitted data first, materialized resolves to false here
+        assertFalse(((RegularFileVersion) meta.versions().get(0)).materialized());
     }
 
     @Test
     void testPutItemAppendsVersions() throws Exception {
-        database.putItem("animals/cat.jpg", 1, 100L, "/uuid-100.blob");
-        database.putItem("animals/cat.jpg", 1, 101L, "/uuid-101.blob");
+        database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
+        database.putItem("animals/cat.jpg", 1, 101L, "uuid-101.blob");
 
         var versions = database.getItem("animals/cat.jpg").orElseThrow().versions();
         assertEquals(2, versions.size());
         assertEquals(100L, versions.get(0).sequenceNumber());
         assertEquals(101L, versions.get(1).sequenceNumber());
     }
+
+
 
     // =========================================================================
     // PUT MULTIPART ITEM
@@ -235,12 +244,14 @@ class DatabaseTest {
     @Test
     void testMetadataSerializationRoundTripRegular() {
         Metadata original = new Metadata("animals/cat.jpg", 1,
-                List.of(new RegularFileVersion(100L, "/uuid1.blob"),
-                        new RegularFileVersion(101L, "/uuid2.blob")));
+                List.of(new RegularFileVersion(100L, "uuid1.blob", true),
+                        new RegularFileVersion(101L, "uuid2.blob", false)));
         Metadata rt = Metadata.from(original.serialize());
         assertEquals(2, rt.versions().size());
         assertInstanceOf(RegularFileVersion.class, rt.versions().get(0));
         assertEquals(100L, rt.versions().get(0).sequenceNumber());
+        assertTrue(((RegularFileVersion) rt.versions().get(0)).materialized());
+        assertFalse(((RegularFileVersion) rt.versions().get(1)).materialized());
     }
 
     @Test
@@ -256,7 +267,7 @@ class DatabaseTest {
     @Test
     void testMetadataSerializationRoundTripTombstone() {
         Metadata original = new Metadata("animals/cat.jpg", 1,
-                List.of(new RegularFileVersion(100L, "/uuid1.blob"),
+                List.of(new RegularFileVersion(100L, "/uuid1.blob", true),
                         new TombstoneFileVersion(101L)));
         Metadata rt = Metadata.from(original.serialize());
         assertEquals(2, rt.versions().size());
@@ -268,7 +279,7 @@ class DatabaseTest {
     @Test
     void testMetadataSerializationRoundTripAllThreeTypes() {
         Metadata original = new Metadata("mixed/key", 2, List.of(
-                new RegularFileVersion(10L, "/blob-10"),
+                new RegularFileVersion(10L, "/blob-10", true),
                 new MultipartFileVersion(20L, List.of("chunk-a", "chunk-b")),
                 new TombstoneFileVersion(30L)));
         Metadata rt = Metadata.from(original.serialize());
@@ -277,18 +288,5 @@ class DatabaseTest {
         assertInstanceOf(MultipartFileVersion.class, rt.versions().get(1));
         assertInstanceOf(TombstoneFileVersion.class, rt.versions().get(2));
         assertEquals(30L, rt.versions().get(2).sequenceNumber());
-    }
-
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
-
-    @Test
-    void testCloseClearsAllTables() throws Exception {
-        database.putItem("file.txt", 1, 1L, "/blob-1");
-        database.createBucket("my-bucket", 1, 2L);
-        database.close();
-        assertTrue(database.getItem("file.txt").isEmpty());
-        assertFalse(database.bucketExists("my-bucket"));
     }
 }

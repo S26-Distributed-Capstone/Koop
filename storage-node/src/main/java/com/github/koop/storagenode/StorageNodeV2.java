@@ -69,7 +69,7 @@ public class StorageNodeV2 {
             throw new IllegalArgumentException("id must not be null or blank");
         }
         // Reject obvious path traversal and separator characters.
-        if (id.contains("..") || id.contains("/") || id.contains("\\") ) {
+        if (id.contains("..") || id.contains("/") || id.contains("\\")) {
             throw new IllegalArgumentException("id contains invalid path characters");
         }
         // Use the first three characters of the ID to create a sharded subdirectory
@@ -121,15 +121,24 @@ public class StorageNodeV2 {
      * @param length
      * @throws IOException
      */
-    protected void store(
+protected void store(
             int partition,
+            String key,
             String requestID,
             ReadableByteChannel data,
             long length) throws IOException {
 
+        // 1. Perform the physical file write.
         Path path = getObjectPath(requestID);
         Files.createDirectories(path.getParent());
         write(path, data, length);
+
+        // 2. Record the uncommitted write intent in the database
+        try {
+            db.registerBlobArrival(key, requestID, System.currentTimeMillis());
+        } catch (Exception e) {
+            throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
+        }
     }
 
     /**
