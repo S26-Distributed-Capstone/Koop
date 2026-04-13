@@ -210,7 +210,7 @@ public class MultipartUploadManager {
         // Explicitly delete the active session keys since the Storage Nodes are 
         // now the source of truth for the completed multipart upload.
         cache.delete(MultipartUploadSession.sessionKey(uploadId));
-        cache.delete(MultipartUploadSession.partsKey(uploadId));
+        cache.setDelete(MultipartUploadSession.partsKey(uploadId));
         
         // Clean up part size metadata, but keep parts in storage for reconstruction on read
         for (int partNumber : sortedPartNumbers) {
