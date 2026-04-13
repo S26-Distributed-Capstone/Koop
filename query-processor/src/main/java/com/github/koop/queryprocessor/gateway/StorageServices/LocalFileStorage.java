@@ -1,5 +1,7 @@
 package com.github.koop.queryprocessor.gateway.StorageServices;
 
+import com.github.koop.queryprocessor.processor.MultipartUploadResult;
+
 import java.io.InputStream;
 import java.nio.file.*;
 import java.util.List;
@@ -74,21 +76,21 @@ public class LocalFileStorage implements StorageService {
     }
 
     @Override
-    public String uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
+    public MultipartUploadResult uploadPart(String bucket, String key, String uploadId, int partNumber, InputStream data, long length)
             throws Exception {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'uploadPart'");
     }
 
     @Override
-    public String completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
+    public MultipartUploadResult completeMultipartUpload(String bucket, String key, String uploadId, List<CompletedPart> parts)
             throws Exception {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'completeMultipartUpload'");
     }
 
     @Override
-    public void abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
+    public MultipartUploadResult abortMultipartUpload(String bucket, String key, String uploadId) throws Exception {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'abortMultipartUpload'");
     }

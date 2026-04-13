@@ -1,6 +1,7 @@
 package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
+import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
 import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
@@ -362,6 +363,36 @@ public final class StorageWorker {
         return success;
     }
 
+    /**
+     * Starts multipart commit using the same partition routing and quorum-ACK
+     * flow as regular puts.
+     */
+    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
+        if (bucket == null)   throw new IllegalArgumentException("bucket is null");
+        if (key == null)      throw new IllegalArgumentException("key is null");
+        if (uploadId == null) throw new IllegalArgumentException("uploadId is null");
+        if (chunks == null)   throw new IllegalArgumentException("chunks is null");
+
+        UUID requestId;
+        try {
+            requestId = UUID.fromString(uploadId);
+        } catch (IllegalArgumentException e) {
+            logger.error("Invalid multipart uploadId {}, cannot begin commit", uploadId);
+            return false;
+        }
+
+        String storageKey = toStorageKey(bucket, key);
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(storageKey);
+        if (partition.isEmpty()) {
+            logger.error("Routing failed for key {}, aborting multipart commit", storageKey);
+            return false;
+        }
+
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks);
+    }
+
+
     public void shutdown() {
         executor.shutdownNow();
         commitCoordinator.close();
@@ -413,6 +444,10 @@ public final class StorageWorker {
             throw new IllegalStateException(
                     "ErasureRouting is not ready — waiting for PartitionSpreadConfiguration and ErasureSetConfiguration");
         return r;
+    }
+
+    private static String toStorageKey(String bucket, String key) {
+        return bucket + "/" + key;
     }
 
     private void streamReconstruct(int partition, String storageKey,
