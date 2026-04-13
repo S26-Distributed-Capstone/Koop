@@ -16,7 +16,9 @@ import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
-import com.github.koop.storagenode.StorageNodeServer;
+import com.github.koop.storagenode.StorageNodeServerV2;
+import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -44,15 +46,16 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Integration tests for multipart upload using real {@link StorageNodeServer} instances.
+ * Integration tests for multipart upload using real {@link StorageNodeServerV2} instances.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class MultipartUploadIT {
 
     private static final int TOTAL_NODES = 9;
 
-    private final List<StorageNodeServer> servers = new ArrayList<>();
+    private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
+    private final List<Database> databases = new ArrayList<>();
     private final List<Integer> nodePorts = new ArrayList<>();
 
     private StorageWorker worker;
@@ -64,29 +67,39 @@ public class MultipartUploadIT {
     void startCluster() throws Exception {
         List<InetSocketAddress> addrs = new ArrayList<>();
 
-        for (int i = 0; i < TOTAL_NODES; i++) {
-            int port = freePort();
-            nodePorts.add(port);
-            Path dir = Files.createTempDirectory("mpu-it-node-" + i + "-");
-            dataDirs.add(dir);
-
-            StorageNodeServer server = new StorageNodeServer(port, dir);
-            servers.add(server);
-            server.start();
-            addrs.add(new InetSocketAddress("127.0.0.1", port));
-        }
-
         MemoryFetcher fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
         pubSubClient = new PubSubClient(new MemoryPubSub());
         pubSubClient.start();
         CommitCoordinator commitCoordinator = new CommitCoordinator(pubSubClient, 0);
 
+        metadataClient.start();
         worker = new StorageWorker(metadataClient, commitCoordinator);
+        manager = new MultipartUploadManager(worker, new MemoryCacheClient());
+
+        for (int i = 0; i < TOTAL_NODES; i++) {
+            int port = freePort();
+            nodePorts.add(port);
+            Path dir = Files.createTempDirectory("mpu-it-node-" + i + "-");
+            dataDirs.add(dir);
+
+            Database db = new Database(new RocksDbStorageStrategy(dir.resolve("db").toString()));
+            databases.add(db);
+
+            StorageNodeServerV2 server = new StorageNodeServerV2(
+                    port,
+                    "127.0.0.1",
+                    db,
+                    dir.resolve("data"),
+                    metadataClient,
+                    pubSubClient);
+            servers.add(server);
+            server.start();
+            addrs.add(new InetSocketAddress("127.0.0.1", port));
+        }
+
         fetcher.update(buildErasureSetConfiguration(addrs, addrs, addrs));
         fetcher.update(buildPartitionSpreadConfiguration());
-
-        manager = new MultipartUploadManager(worker, new MemoryCacheClient());
     }
 
     @BeforeEach
@@ -103,13 +116,21 @@ public class MultipartUploadIT {
             metadataClient.close();
         }
 
-        for (StorageNodeServer server : servers) {
+        for (StorageNodeServerV2 server : servers) {
             server.stop();
+        }
+        for (Database database : databases) {
+            try {
+                database.close();
+            } catch (Exception ignored) {
+            }
         }
         for (Path dir : dataDirs) {
             deleteRecursive(dir);
         }
-        worker.shutdown();
+        if (worker != null) {
+            worker.shutdown();
+        }
     }
 
     @Test
@@ -209,7 +230,14 @@ public class MultipartUploadIT {
             for (int i = 0; i < 3; i++) {
                 int port = nodePorts.get(i);
                 Path dir = dataDirs.get(i);
-                StorageNodeServer replacement = new StorageNodeServer(port, dir);
+                Database db = databases.get(i);
+                StorageNodeServerV2 replacement = new StorageNodeServerV2(
+                        port,
+                        "127.0.0.1",
+                        db,
+                        dir.resolve("data"),
+                        metadataClient,
+                        pubSubClient);
                 servers.set(i, replacement);
                 replacement.start();
             }
