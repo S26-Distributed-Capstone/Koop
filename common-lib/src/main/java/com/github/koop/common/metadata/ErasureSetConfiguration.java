@@ -17,6 +17,10 @@ public class ErasureSetConfiguration {
 
     public static class ErasureSet {
         private int number;
+        private int n;
+        private int k;
+        private int readQuorum;
+        private int writeQuorum;
         private List<Machine> machines;
 
         public int getNumber() {
@@ -25,6 +29,38 @@ public class ErasureSetConfiguration {
 
         public void setNumber(int number) {
             this.number = number;
+        }
+
+        public int getN() {
+            return n;
+        }
+
+        public void setN(int n) {
+            this.n = n;
+        }
+
+        public int getK() {
+            return k;
+        }
+
+        public void setK(int k) {
+            this.k = k;
+        }
+
+        public int getReadQuorum() {
+            return readQuorum;
+        }
+
+        public void setReadQuorum(int readQuorum) {
+            this.readQuorum = readQuorum;
+        }
+
+        public int getWriteQuorum() {
+            return writeQuorum;
+        }
+
+        public void setWriteQuorum(int writeQuorum) {
+            this.writeQuorum = writeQuorum;
         }
 
         public List<Machine> getMachines() {

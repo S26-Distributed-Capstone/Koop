@@ -109,6 +109,11 @@ public class RealStorageNodesIT {
         ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
         ErasureSet es = new ErasureSet();
         es.setNumber(1);
+        es.setN(9);
+        es.setK(6);
+        es.setReadQuorum(6);
+        es.setWriteQuorum(7);
+        
         List<Machine> machines = new ArrayList<>();
         for (InetSocketAddress addr : addrs) {
             Machine m = new Machine();

@@ -29,9 +29,6 @@ import java.util.Arrays;
  */
 public final class ErasureCoder {
 
-    public static final int K = 6;
-    public static final int M = 3;
-    public static final int TOTAL = K + M;
     public static final int SHARD_SIZE = 1 << 20; // 1 MB per shard per stripe
 
     private ErasureCoder() {}
@@ -53,32 +50,30 @@ public final class ErasureCoder {
      * @param length number of bytes to read from {@code data}
      * @return array of {@value TOTAL} InputStreams, index 0..K-1 = data, K..TOTAL-1 = parity
      */
-    public static InputStream[] shard(InputStream data, long length) throws IOException {
+public static InputStream[] shard(InputStream data, long length, int k, int n) throws IOException {
         if (data == null) throw new IllegalArgumentException("data is null");
         if (length < 0) throw new IllegalArgumentException("length < 0");
 
-        long numStripes = (length + (long) K * SHARD_SIZE - 1) / ((long) K * SHARD_SIZE);
-        // Buffer enough for the whole file per shard so the encoder never blocks
-        // For large files this could be huge; cap at 8 stripes and rely on concurrent reads.
+        int m = n - k;
+        long numStripes = (length + (long) k * SHARD_SIZE - 1) / ((long) k * SHARD_SIZE);
         int pipeBuffer = (int) Math.min(8L * SHARD_SIZE, numStripes * SHARD_SIZE + 8);
 
-        PipedOutputStream[] pos = new PipedOutputStream[TOTAL];
-        PipedInputStream[] pis = new PipedInputStream[TOTAL];
-        for (int i = 0; i < TOTAL; i++) {
+        PipedOutputStream[] pos = new PipedOutputStream[n];
+        PipedInputStream[] pis = new PipedInputStream[n];
+        for (int i = 0; i < n; i++) {
             pos[i] = new PipedOutputStream();
             pis[i] = new PipedInputStream(pos[i], pipeBuffer);
         }
 
         Thread.startVirtualThread(() -> {
             try {
-                // 8-byte original-length prefix on every shard stream
                 byte[] lenBytes = new byte[8];
                 writeLong(lenBytes, length);
-                for (int i = 0; i < TOTAL; i++) pos[i].write(lenBytes);
+                for (int i = 0; i < n; i++) pos[i].write(lenBytes);
 
-                ReedSolomon rs = ReedSolomon.create(K, M);
-                byte[] stripeBuf = new byte[K * SHARD_SIZE];
-                byte[][] shards    = new byte[TOTAL][SHARD_SIZE];
+                ReedSolomon rs = ReedSolomon.create(k, m);
+                byte[] stripeBuf = new byte[k * SHARD_SIZE];
+                byte[][] shards    = new byte[n][SHARD_SIZE];
                 long remaining = length;
 
                 while (remaining > 0) {
@@ -90,31 +85,23 @@ public final class ErasureCoder {
                         Arrays.fill(stripeBuf, want, stripeBuf.length, (byte) 0);
                     }
 
-                    for (int i = 0; i < K; i++) {
+                    for (int i = 0; i < k; i++) {
                         System.arraycopy(stripeBuf, i * SHARD_SIZE, shards[i], 0, SHARD_SIZE);
                     }
-                    for (int i = K; i < TOTAL; i++) {
+                    for (int i = k; i < n; i++) {
                         Arrays.fill(shards[i], (byte) 0);
                     }
 
                     rs.encodeParity(shards, 0, SHARD_SIZE);
 
-                    for (int i = 0; i < TOTAL; i++) {
-                        pos[i].write(shards[i], 0, SHARD_SIZE);
-                    }
+                    for (int i = 0; i < n; i++) pos[i].write(shards[i], 0, SHARD_SIZE);
                 }
-
-                for (int i = 0; i < TOTAL; i++) pos[i].flush();
-
+                for (int i = 0; i < n; i++) pos[i].flush();
             } catch (IOException e) {
-                // Fall through to finally — closing pipes signals EOF to consumers
             } finally {
-                for (PipedOutputStream p : pos) {
-                    try { p.close(); } catch (IOException ignored) {}
-                }
+                for (PipedOutputStream p : pos) try { p.close(); } catch (IOException ignored) {}
             }
         });
-
         return pis;
     }
 
@@ -129,69 +116,64 @@ public final class ErasureCoder {
      * @param present boolean mask; {@code false} = shard unavailable
      * @return InputStream yielding exactly the original bytes
      */
-    public static InputStream reconstruct(InputStream[] shards, boolean[] present) throws IOException {
-        if (shards  == null || shards.length  != TOTAL) throw new IllegalArgumentException("shards must have length " + TOTAL);
-        if (present == null || present.length != TOTAL) throw new IllegalArgumentException("present must have length " + TOTAL);
+   public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
+        if (shards == null || shards.length != n) throw new IllegalArgumentException("shards must have length " + n);
+        if (present == null || present.length != n) throw new IllegalArgumentException("present must have length " + n);
 
         int count = 0;
         for (boolean b : present) if (b) count++;
-        if (count < K) throw new IllegalArgumentException("need at least " + K + " shards, got " + count);
+        if (count < k) throw new IllegalArgumentException("need at least " + k + " shards, got " + count);
 
-        DataInputStream[] dis = new DataInputStream[TOTAL];
-        for (int i = 0; i < TOTAL; i++) {
+        int m = n - k;
+        DataInputStream[] dis = new DataInputStream[n];
+        for (int i = 0; i < n; i++) {
             if (present[i]) dis[i] = new DataInputStream(new BufferedInputStream(shards[i]));
         }
 
         PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream pis = new PipedInputStream(pos, 4 * K * SHARD_SIZE);
-
-        final boolean[] pres = Arrays.copyOf(present, TOTAL);
+        PipedInputStream pis = new PipedInputStream(pos, 4 * k * SHARD_SIZE);
+        final boolean[] pres = Arrays.copyOf(present, n);
 
         Thread.startVirtualThread(() -> {
             try (pos) {
                 int first = -1;
-                for (int i = 0; i < TOTAL; i++) if (pres[i]) { first = i; break; }
+                for (int i = 0; i < n; i++) if (pres[i]) { first = i; break; }
 
                 long originalLength = dis[first].readLong();
-                for (int i = 0; i < TOTAL; i++) {
+                for (int i = 0; i < n; i++) {
                     if (pres[i] && i != first) dis[i].readLong();
                 }
 
-                ReedSolomon rs = ReedSolomon.create(K, M);
-                byte[][] stripe = new byte[TOTAL][SHARD_SIZE];
+                ReedSolomon rs = ReedSolomon.create(k, m);
+                byte[][] stripe = new byte[n][SHARD_SIZE];
                 long remaining = originalLength;
 
                 while (remaining > 0) {
-                    for (int i = 0; i < TOTAL; i++) {
+                    for (int i = 0; i < n; i++) {
                         if (pres[i]) readFully(dis[i], stripe[i], 0, SHARD_SIZE);
                     }
 
                     rs.decodeMissing(stripe, pres, 0, SHARD_SIZE);
 
-                    int toWrite = (int) Math.min((long) K * SHARD_SIZE, remaining);
+                    int toWrite = (int) Math.min((long) k * SHARD_SIZE, remaining);
                     int left = toWrite;
-                    for (int i = 0; i < K && left > 0; i++) {
-                        int n = Math.min(SHARD_SIZE, left);
-                        pos.write(stripe[i], 0, n);
-                        left -= n;
+                    for (int i = 0; i < k && left > 0; i++) {
+                        int nBytes = Math.min(SHARD_SIZE, left);
+                        pos.write(stripe[i], 0, nBytes);
+                        left -= nBytes;
                     }
                     remaining -= toWrite;
                 }
-
                 pos.flush();
-
             } catch (IOException e) {
-                // closing pos signals EOF to consumer
             } finally {
-                for (int i = 0; i < TOTAL; i++) {
+                for (int i = 0; i < n; i++) {
                     if (dis[i] != null) try { dis[i].close(); } catch (IOException ignored) {}
                 }
             }
         });
-
         return pis;
     }
-
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

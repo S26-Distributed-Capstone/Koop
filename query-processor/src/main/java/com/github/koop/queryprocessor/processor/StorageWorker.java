@@ -33,8 +33,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import static com.github.koop.common.erasure.ErasureCoder.TOTAL;
-
 /**
  * Distributes erasure-coded shards to storage nodes via HTTP.
  * Each storage node runs a Javalin server with endpoints:
@@ -84,19 +82,6 @@ public final class StorageWorker {
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Executes a full PUT:
-     * <ol>
-     * <li>Erasure-code and stream shards to all
-     * {@value com.github.koop.common.erasure.ErasureCoder#TOTAL}
-     * storage nodes concurrently.</li>
-     * <li>Publish a commit message to the per-partition Kafka topic so every SN
-     * applies the operation to its op-log and metadata. SNs that missed the
-     * stream reconstruct their shard from peers before committing.</li>
-     * <li>Block until {@link CommitCoordinator#QUORUM} SN commit-ACKs are received,
-     * then return {@code true} to the caller.</li>
-     * </ol>
-     */
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
         if (requestID == null)
             throw new IllegalArgumentException("requestID is null");
@@ -112,25 +97,29 @@ public final class StorageWorker {
         String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
-        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
-                ? r.getNodes(partition.getAsInt())
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
                 : Optional.empty();
-        if (partition.isEmpty() || nodes.isEmpty()) {
+
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting put", storageKey);
             return false;
         }
+
         int resolvedPartition = partition.getAsInt();
-        List<InetSocketAddress> resolvedNodes = nodes.get();
+        ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
+        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+
+        int n = es.getN();
+        int k = es.getK();
+        int writeQuorum = es.getWriteQuorum();
 
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
-        //
-        // All shard streams MUST be drained concurrently: ErasureCoder.shard()
-        // writes into 9 piped streams from a single encoder thread, so reading
-        // them sequentially would deadlock.
-        InputStream[] shardStreams = ErasureCoder.shard(data, length);
+        InputStream[] shardStreams = ErasureCoder.shard(data, length, k, n);
 
         List<Callable<Boolean>> tasks = new ArrayList<>();
-        for (int i = 0; i < TOTAL; i++) {
+        for (int i = 0; i < n; i++) {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = resolvedNodes.get(index);
@@ -172,20 +161,15 @@ public final class StorageWorker {
             return false;
         }
 
-        if (uploaded < CommitCoordinator.QUORUM) {
-            logger.error("Phase 1 failed: only {}/{} shards uploaded. Aborting commit.", uploaded, TOTAL);
+        if (uploaded < writeQuorum) {
+            logger.error("Phase 1 failed: only {}/{} shards uploaded. Aborting commit.", uploaded, n);
             return false;
         }
 
-        logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, TOTAL, requestID);
+        logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, n, requestID);
 
         // Phase 2 – commit.
-        //
-        // Publish the commit message to the partition's Kafka topic. Every SN will:
-        // - add the op to its op-log + write metadata, if it received the shard; or
-        // - reconstruct the shard from peers and then commit, if it didn't.
-        // SNs POST an ACK back to this QP's server. We block until QUORUM ACKs arrive.
-        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key);
+        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, writeQuorum);
         if (!committed) {
             logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
         }
@@ -203,22 +187,26 @@ public final class StorageWorker {
         String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
-        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
-                ? r.getNodes(partition.getAsInt())
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
                 : Optional.empty();
-        if (partition.isEmpty() || nodes.isEmpty()) {
+
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting get", storageKey);
             return InputStream.nullInputStream();
         }
+
         int resolvedPartition = partition.getAsInt();
-        List<InetSocketAddress> resolvedNodes = nodes.get();
+        ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
+        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
         executor.execute(() -> {
             try (pos) {
-                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, pos);
+                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), es.getReadQuorum(), pos);
             } catch (Exception e) {
                 logger.error("Failed to reconstruct stream for key {}", storageKey, e);
                 try {
@@ -242,18 +230,22 @@ public final class StorageWorker {
         String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
-        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
-                ? r.getNodes(partition.getAsInt())
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
                 : Optional.empty();
-        if (partition.isEmpty() || nodes.isEmpty()) {
+
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
+
         int resolvedPartition = partition.getAsInt();
-        List<InetSocketAddress> resolvedNodes = nodes.get();
+        ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
+        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         List<Callable<Boolean>> tasks = new LinkedList<>();
-        for (int i = 0; i < TOTAL; i++) {
+        for (int i = 0; i < es.getN(); i++) {
             final int index = i;
             tasks.add(() -> {
                 try {
@@ -298,10 +290,6 @@ public final class StorageWorker {
         return success;
     }
 
-    /**
-     * Starts multipart commit using the same partition routing and quorum-ACK
-     * flow as regular puts.
-     */
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
         if (bucket == null)   throw new IllegalArgumentException("bucket is null");
         if (key == null)      throw new IllegalArgumentException("key is null");
@@ -324,9 +312,14 @@ public final class StorageWorker {
             return false;
         }
 
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks);
-    }
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = r.getErasureSet(partition.getAsInt());
+        if (erasureSetOpt.isEmpty()) {
+            logger.error("Routing failed for key {}, aborting multipart commit", storageKey);
+            return false;
+        }
 
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, erasureSetOpt.get().getWriteQuorum());
+    }
 
     public void shutdown() {
         executor.shutdownNow();
@@ -350,12 +343,6 @@ public final class StorageWorker {
         });
     }
 
-    /**
-     * Rebuilds the shared {@link ErasureRouting} instance whenever either config
-     * is updated. Both configs must be present before routing can be constructed;
-     * if one hasn't arrived yet this is a no-op and the first update of the
-     * lagging config will trigger the rebuild instead.
-     */
     private void tryRebuildRouting() {
         PartitionSpreadConfiguration ps = metadataClient.get(PartitionSpreadConfiguration.class);
         ErasureSetConfiguration es = metadataClient.get(ErasureSetConfiguration.class);
@@ -369,10 +356,6 @@ public final class StorageWorker {
         }
     }
 
-    /**
-     * Returns the current {@link ErasureRouting}, which is rebuilt automatically
-     * whenever either config is updated via the metadata listener.
-     */
     private ErasureRouting getRouting() {
         ErasureRouting r = routing.get();
         if (r == null)
@@ -386,12 +369,12 @@ public final class StorageWorker {
     }
 
     private void streamReconstruct(int partition, String storageKey,
-            List<InetSocketAddress> nodes, OutputStream out) throws IOException {
+            List<InetSocketAddress> nodes, int k, int n, int readQuorum, OutputStream out) throws IOException {
 
-        InputStream[] ins = new InputStream[TOTAL];
-        boolean[] present = new boolean[TOTAL];
+        InputStream[] ins = new InputStream[n];
+        boolean[] present = new boolean[n];
 
-        for (int i = 0; i < TOTAL; i++) {
+        for (int i = 0; i < n; i++) {
             try {
                 InetSocketAddress node = nodes.get(i);
                 URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
@@ -415,23 +398,18 @@ public final class StorageWorker {
         for (boolean b : present)
             if (b)
                 count++;
-        if (count < ErasureCoder.K)
-            throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
+        if (count < readQuorum)
+            throw new IOException("lost too many shards; need " + readQuorum + ", got " + count);
 
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present)) {
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
             byte[] buf = new byte[64 * 1024];
-            int n;
-            while ((n = reconstructed.read(buf)) != -1)
-                out.write(buf, 0, n);
+            int bytesRead;
+            while ((bytesRead = reconstructed.read(buf)) != -1)
+                out.write(buf, 0, bytesRead);
         }
         out.flush();
     }
 
-    /**
-     * FOR TESTING ONLY - builds a PartitionSpreadConfiguration with 99 partitions
-     * spread evenly: partitions 0-32 → erasure set 1, 33-65 → erasure set 2, 66-98
-     * → erasure set 3.
-     */
     private static PartitionSpreadConfiguration buildTestPartitionSpread() {
         PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
         List<PartitionSpread> spreads = new ArrayList<>();

@@ -18,18 +18,21 @@ import org.apache.logging.log4j.Logger;
  * node addresses responsible for that partition, driven entirely by live
  * metadata rather than hardcoded boundaries.
  *
- * <p>Partition assignment:
+ * <p>
+ * Partition assignment:
  * <ol>
- *   <li>Collect all partition numbers from all spread entries and sort them.</li>
- *   <li>Hash the key with CRC32 and mod by the total count to get an index.</li>
- *   <li>Look up the partition number at that index in the sorted list.</li>
+ * <li>Collect all partition numbers from all spread entries and sort them.</li>
+ * <li>Hash the key with CRC32 and mod by the total count to get an index.</li>
+ * <li>Look up the partition number at that index in the sorted list.</li>
  * </ol>
  *
- * <p>Sorting ensures that the same key always maps to the same partition number
+ * <p>
+ * Sorting ensures that the same key always maps to the same partition number
  * regardless of the order in which partitions appear in the config or how they
  * are redistributed across erasure sets.
  *
- * <p>Errors are logged and empty Optionals returned rather than throwing, so
+ * <p>
+ * Errors are logged and empty Optionals returned rather than throwing, so
  * that a bad config entry does not crash the query processor.
  */
 public final class ErasureRouting {
@@ -40,7 +43,7 @@ public final class ErasureRouting {
     private final ErasureSetConfiguration erasureSetConfig;
 
     public ErasureRouting(PartitionSpreadConfiguration partitionSpread,
-                          ErasureSetConfiguration erasureSetConfig) {
+            ErasureSetConfiguration erasureSetConfig) {
         if (partitionSpread == null)
             throw new IllegalArgumentException("partitionSpread is null");
         if (erasureSetConfig == null)
@@ -53,7 +56,8 @@ public final class ErasureRouting {
      * Returns the partition number that owns {@code key}, or an empty
      * {@link OptionalInt} if routing cannot be resolved.
      *
-     * <p>All partition numbers across all spread entries are collected and
+     * <p>
+     * All partition numbers across all spread entries are collected and
      * sorted so that the mapping is stable even if partition assignments are
      * redistributed between erasure sets.
      */
@@ -64,7 +68,8 @@ public final class ErasureRouting {
             return OptionalInt.empty();
         }
 
-        // Collect and sort all partition numbers for a stable, order-independent mapping
+        // Collect and sort all partition numbers for a stable, order-independent
+        // mapping
         List<Integer> allPartitions = spreads.stream()
                 .flatMap(s -> s.getPartitions().stream())
                 .sorted()
@@ -84,17 +89,13 @@ public final class ErasureRouting {
     }
 
     /**
-     * Returns the node addresses responsible for {@code partition}, or an empty
-     * {@link Optional} if nodes cannot be resolved.
-     *
-     * <p>Finds which spread entry owns the partition, reads its {@code erasure_set}
-     * number directly, looks up the matching {@link ErasureSetConfiguration.ErasureSet},
-     * and maps its machines to {@link InetSocketAddress} instances.
+     * Returns the ErasureSet responsible for {@code partition}, or an empty
+     * {@link Optional} if it cannot be resolved.
      */
-    public Optional<List<InetSocketAddress>> getNodes(int partition) {
+    public Optional<ErasureSetConfiguration.ErasureSet> getErasureSet(int partition) {
         var spreads = partitionSpread.getPartitionSpread();
         if (spreads == null || spreads.isEmpty()) {
-            logger.error("getNodes failed: PartitionSpreadConfiguration has no entries");
+            logger.error("getErasureSet failed: PartitionSpreadConfiguration has no entries");
             return Optional.empty();
         }
 
@@ -102,21 +103,18 @@ public final class ErasureRouting {
             if (spread.getPartitions().contains(partition)) {
                 int setNumber = spread.getErasureSet();
 
-                Optional<List<InetSocketAddress>> nodes = erasureSetConfig.getErasureSets().stream()
+                Optional<ErasureSetConfiguration.ErasureSet> erasureSet = erasureSetConfig.getErasureSets().stream()
                         .filter(es -> es.getNumber() == setNumber)
-                        .findFirst()
-                        .map(es -> es.getMachines().stream()
-                                .map(m -> new InetSocketAddress(m.getIp(), m.getPort()))
-                                .toList());
+                        .findFirst();
 
-                if (nodes.isEmpty()) {
-                    logger.error("getNodes failed: no erasure set found for set number {}", setNumber);
+                if (erasureSet.isEmpty()) {
+                    logger.error("getErasureSet failed: no erasure set found for set number {}", setNumber);
                 }
-                return nodes;
+                return erasureSet;
             }
         }
 
-        logger.error("getNodes failed: no spread entry found for partition {}", partition);
+        logger.error("getErasureSet failed: no spread entry found for partition {}", partition);
         return Optional.empty();
     }
 }
