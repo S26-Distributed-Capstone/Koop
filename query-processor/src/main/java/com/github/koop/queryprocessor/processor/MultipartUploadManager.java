@@ -1,12 +1,10 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.github.koop.common.messages.Message;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.processor.cache.CacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
 
 import java.io.InputStream;
-import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -188,25 +186,15 @@ public class MultipartUploadManager {
                 "Upload " + uploadId + " was aborted");
         }
 
-        // Send manifest to storage nodes via pub/sub (partition-keyed topic for ordering)
+        // Send multipart commit to storage nodes via partition-keyed pub/sub flow.
         List<String> partNumberStrings = new ArrayList<>();
         for (int partNum : sortedPartNumbers) {
             partNumberStrings.add(String.valueOf(partNum));
         }
-        
-            // TODO: Populate sender with the actual query-processor's bound address
-            // for proper routing, debugging, and acknowledgement on storage nodes.
-            // Using a localhost placeholder temporarily since serialization requires non-null.
-        Message manifestMessage = new Message.MultipartCommitMessage(
-            sessionBucket,
-            sessionKey,
-            uploadId,
-            new InetSocketAddress("127.0.0.1", 0),
-            partNumberStrings);
-        
+
         boolean published;
         try {
-            published = storageWorker.sendMessage(sessionBucket, sessionKey, manifestMessage);
+            published = storageWorker.beginMultipartCommit(sessionBucket, sessionKey, uploadId, partNumberStrings);
         } catch (Exception e) {
             restoreSessionToActiveIfStillCompleting(uploadId, sessionBucket, sessionKey);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,
@@ -219,45 +207,10 @@ public class MultipartUploadManager {
                     "Failed to publish multipart manifest for upload " + uploadId);
         }
 
-            // Persist a minimal manifest keyed by the final object identifier so that  
-            // read paths can later discover how to reconstruct the object from parts,  
-            // without relying solely on the asynchronous MultipartCommitMessage.  
-            //  
-            // The manifest format is intentionally simple:  
-            //   uploadId|partNum1,partNum2,...,partNumN  
-            // and is stored under a cache key derived from {bucket,key}.  
-            // TODO(multipart-temp): Transitional fallback for PR #73.
-            // According to docs, this cache-persisted
-            // manifest is temporary until storage-node side multipart commit is fully 
-            // implemented. Storage Nodes should be the reliable source of truth by durably
-            // committing the multipart metadata into RocksDB upon receiving the 
-            // MultipartCommitMessage on Kafka. Once Storage Nodes support this, remove the 
-            // cache manifest entirely and instead wait for ACKs from the Storage Nodes.
-            String escapedBucket = MultipartUploadSession.escapeComponent(sessionBucket);
-            String escapedKey = MultipartUploadSession.escapeComponent(sessionKey);
-            String manifestCacheKey = "multipart:manifest:" + escapedBucket + ":" + escapedKey;  
-            String manifestPayload =  
-                   uploadId + "|" + String.join(",", partNumberStrings);  
-
-            // Mark upload as COMPLETED in cache but retain session and parts metadata  
-            // so that background GC can later discover and clean up physical part shards.  
-            // The session is retained with a TTL (48 hours) to give GC time to run;  
-            // after TTL expiration, the cache automatically removes the session entry.  
-            // TODO(multipart-temp): Transitional retention via TTL. 
-            // According to docs, the Query Processor should explicitly delete 
-            // the active session keys immediately upon successful completion. We are 
-            // temporarily retaining it with a TTL for orphan-part GC until the storage-node
-            // robustly tracks and cleans up incomplete parts based on its durable logs.
-            final long SESSION_RETENTION_TTL_SECONDS = 48 * 60 * 60;  // 172800 seconds
-            
-            cache.putWithTTL(manifestCacheKey, manifestPayload, SESSION_RETENTION_TTL_SECONDS);    
-            cache.putWithTTL(  
-                MultipartUploadSession.sessionKey(uploadId),  
-                session.withStatus(MultipartUploadSession.UploadStatus.COMPLETED).serialize(),  
-                SESSION_RETENTION_TTL_SECONDS  
-            );  
-            // Note: parts set (mpu:parts:{uploadId}) is retained as well, allowing  
-            // GC to discover which shards were uploaded vs. omitted by the client.
+        // Explicitly delete the active session keys since the Storage Nodes are 
+        // now the source of truth for the completed multipart upload.
+        cache.delete(MultipartUploadSession.sessionKey(uploadId));
+        cache.delete(MultipartUploadSession.partsKey(uploadId));
         
         // Clean up part size metadata, but keep parts in storage for reconstruction on read
         for (int partNumber : sortedPartNumbers) {

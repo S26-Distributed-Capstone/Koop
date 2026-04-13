@@ -10,6 +10,7 @@ import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpr
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadManager;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
@@ -78,11 +79,12 @@ public class MultipartUploadIT {
         MemoryFetcher fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
         pubSubClient = new PubSubClient(new MemoryPubSub());
+        pubSubClient.start();
+        CommitCoordinator commitCoordinator = new CommitCoordinator(pubSubClient, 0);
 
-        worker = new StorageWorker(metadataClient, pubSubClient);
+        worker = new StorageWorker(metadataClient, commitCoordinator);
         fetcher.update(buildErasureSetConfiguration(addrs, addrs, addrs));
         fetcher.update(buildPartitionSpreadConfiguration());
-        pubSubClient.start();
 
         manager = new MultipartUploadManager(worker, new MemoryCacheClient());
     }

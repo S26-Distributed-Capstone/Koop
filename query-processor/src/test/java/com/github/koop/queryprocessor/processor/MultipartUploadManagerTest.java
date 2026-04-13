@@ -1,6 +1,5 @@
 package com.github.koop.queryprocessor.processor;
 
-import com.github.koop.common.messages.Message;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 import com.github.koop.queryprocessor.processor.cache.MultipartUploadSession;
@@ -23,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -44,7 +44,7 @@ class MultipartUploadManagerTest {
         storageWorker = mock(StorageWorker.class);
         cache = new MemoryCacheClient();
         manager = new MultipartUploadManager(storageWorker, cache);
-        when(storageWorker.sendMessage(anyString(), anyString(), any(Message.class)))
+        when(storageWorker.beginMultipartCommit(anyString(), anyString(), anyString(), anyList()))
                 .thenReturn(true);
     }
 
@@ -189,7 +189,8 @@ class MultipartUploadManagerTest {
         MultipartUploadResult result = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
-        verify(storageWorker, times(1)).sendMessage(eq("bucket"), eq("final-key"), any(Message.class));
+        verify(storageWorker, times(1)).beginMultipartCommit(
+                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1", "2")));
     }
 
     @Test
@@ -222,7 +223,7 @@ class MultipartUploadManagerTest {
                                 List.of(new StorageService.CompletedPart(1)));
 
                 assertEquals(MultipartUploadResult.Status.CONFLICT, result.status());
-                verify(storageWorker, never()).sendMessage(anyString(), anyString(), any(Message.class));
+                        verify(storageWorker, never()).beginMultipartCommit(anyString(), anyString(), anyString(), anyList());
         }
 
         @Test
@@ -255,10 +256,8 @@ class MultipartUploadManagerTest {
                 List.of(new StorageService.CompletedPart(1)));
 
         String serializedSession = cache.get(MultipartUploadSession.sessionKey(uploadId));
-        assertNotNull(serializedSession);
-        MultipartUploadSession completedSession = MultipartUploadSession.deserialize(serializedSession);
-        assertEquals(MultipartUploadSession.UploadStatus.COMPLETED, completedSession.status());
-        assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).contains("1"));
+        assertEquals(null, serializedSession);
+        assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).isEmpty());
         assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
     }
 
@@ -281,7 +280,8 @@ class MultipartUploadManagerTest {
                 List.of(new StorageService.CompletedPart(1)));
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
-        verify(storageWorker, times(1)).sendMessage(eq("bucket"), eq("final-key"), any(Message.class));
+        verify(storageWorker, times(1)).beginMultipartCommit(
+                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1")));
         assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
         assertEquals(String.valueOf(p2.length), cache.get(MultipartUploadSession.partSizeKey(uploadId, 2)));
     }
@@ -297,7 +297,7 @@ class MultipartUploadManagerTest {
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
 
         reset(storageWorker);
-        when(storageWorker.sendMessage(eq("bucket"), eq("final-key"), any(Message.class)))
+        when(storageWorker.beginMultipartCommit(eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1"))))
                 .thenReturn(false, true);
 
         List<StorageService.CompletedPart> parts = List.of(new StorageService.CompletedPart(1));

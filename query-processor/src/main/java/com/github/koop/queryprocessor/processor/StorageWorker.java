@@ -342,26 +342,21 @@ public final class StorageWorker {
         return success;
     }
 
-        /**
-     * Publishes a message to the partition-specific topic via the pub/sub client.
-     * 
-     * The message is routed to the topic corresponding to the partition that owns
-     * the given bucket/key combination.
-     * 
-     * @param bucket the bucket name
-     * @param key the object key
-     * @param message the {@link Message} to publish
-     * @return true if the message was successfully published, false otherwise
+    /**
+     * Starts multipart commit using the same partition routing and quorum-ACK
+     * flow as regular puts.
      */
-    public boolean sendMessage(String bucket, String key, Message message) {
-        if (bucket == null)
-            throw new IllegalArgumentException("bucket is null");
-        if (key == null)
-            throw new IllegalArgumentException("key is null");
-        if (message == null)
-            throw new IllegalArgumentException("message is null");
-        if (pubSubClient == null) {
-            logger.warn("PubSubClient not configured, cannot send message");
+    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
+        if (bucket == null)   throw new IllegalArgumentException("bucket is null");
+        if (key == null)      throw new IllegalArgumentException("key is null");
+        if (uploadId == null) throw new IllegalArgumentException("uploadId is null");
+        if (chunks == null)   throw new IllegalArgumentException("chunks is null");
+
+        UUID requestId;
+        try {
+            requestId = UUID.fromString(uploadId);
+        } catch (IllegalArgumentException e) {
+            logger.error("Invalid multipart uploadId {}, cannot begin commit", uploadId);
             return false;
         }
 
@@ -369,23 +364,13 @@ public final class StorageWorker {
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         if (partition.isEmpty()) {
-            logger.error("Routing failed for key {}, cannot send message", storageKey);
+            logger.error("Routing failed for key {}, aborting multipart commit", storageKey);
             return false;
         }
 
-        int partitionNumber = partition.getAsInt();
-        String topic = "partition-" + partitionNumber;
-        
-        try {
-            byte[] serialized = Message.serializeMessage(message);
-            pubSubClient.pub(topic, serialized);
-            logger.trace("Published message to topic {} for partition {}", topic, partitionNumber);
-            return true;
-        } catch (Exception e) {
-            logger.error("Exception publishing message to topic {}: {}", topic, e.getMessage());
-            return false;
-        }
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks);
     }
+
 
     public void shutdown() {
         executor.shutdownNow();
