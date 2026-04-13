@@ -4,9 +4,6 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.UUID;
 
-import com.github.koop.common.metadata.MetadataClient;
-import com.github.koop.common.pubsub.PubSubClient;
-import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadManager;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;

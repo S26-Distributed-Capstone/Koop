@@ -413,11 +413,13 @@ public class Main {
 
     public static void main(String[] args) {
         var pubSubClient = new PubSubClient(new MemoryPubSub());//TODO: Replace with real PubSubClient implementation
+        pubSubClient.start();
         var metadataFetcherMap =Map.of(
             ErasureSetConfiguration.class, "erasure_set_configurations",
             PartitionSpreadConfiguration.class, "partition_spread_configurations"
         );
         var metadataClient = new MetadataClient(new EtcdFetcher(metadataFetcherMap));
+        metadataClient.start();
         var commitCoordinator = new CommitCoordinator(pubSubClient,0);
         StorageWorker storageWorker = new StorageWorker(metadataClient, commitCoordinator);
         StorageService storage = new StorageWorkerService(storageWorker);
