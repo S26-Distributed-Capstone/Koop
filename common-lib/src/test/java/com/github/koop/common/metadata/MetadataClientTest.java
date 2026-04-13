@@ -33,7 +33,9 @@ class MetadataClientTest {
 
     @AfterEach
     void tearDown() throws Exception {
-        metadataClient.close();
+        if(!metadataClient.isClosed()) {
+            metadataClient.close();
+        }
     }
 
     @Test

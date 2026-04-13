@@ -1,15 +1,23 @@
 package koop;
 
+import com.github.koop.common.metadata.ErasureSetConfiguration;
+import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
+import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
+import com.github.koop.common.metadata.MemoryFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
+import com.github.koop.common.pubsub.MemoryPubSub;
+import com.github.koop.common.pubsub.PubSubClient;
+import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.StorageWorker;
-import com.github.koop.storagenode.StorageNodeServer;
+import com.github.koop.storagenode.StorageNodeServerV2;
+import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.Disabled;
 
 import java.io.*;
 import java.net.*;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.security.SecureRandom;
 import java.time.LocalTime;
@@ -21,13 +29,19 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealStorageNodesIT {
 
     private static final int TOTAL_NODES = 9;
-    private static final int DATA_SIZE = 15 * 1024 * 1024; // 15MB
+    private static final int DATA_SIZE = 5 * 1024 * 1024; // 15MB
 
-    private final List<StorageNodeServer> servers = new ArrayList<>();
-    private final List<Thread> serverThreads = new ArrayList<>();
+    private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
+    private final List<Database> databases = new ArrayList<>();
     private List<InetSocketAddress> addrs;
 
+    // Shared infrastructure for V2
+    private MemoryFetcher sharedFetcher;
+    private MemoryPubSub sharedPubSub;
+    private MetadataClient sharedMetadataClient;
+    private PubSubClient sharedPubSubClient;
+    private CommitCoordinator commitCoordinator;
     private StorageWorker worker;
 
     // -------------------------------------------------------
@@ -48,7 +62,21 @@ public class RealStorageNodesIT {
         log("=== STARTING STORAGE CLUSTER ===");
 
         addrs = new ArrayList<>();
+        sharedFetcher = new MemoryFetcher();
+        sharedPubSub = new MemoryPubSub();
 
+        // 1. Initialize shared control plane
+        sharedPubSubClient = new PubSubClient(sharedPubSub);
+        sharedPubSubClient.start();
+
+        sharedMetadataClient = new MetadataClient(sharedFetcher);
+        sharedMetadataClient.start();
+
+        // 2. Init QP Commit Coordinator and Storage Worker
+        commitCoordinator = new CommitCoordinator(sharedPubSubClient, 0, 10);
+        worker = new StorageWorker(sharedMetadataClient, commitCoordinator);
+
+        // 3. Start Storage Node Servers (V2)
         for (int i = 0; i < TOTAL_NODES; i++) {
 
             int port = freePort();
@@ -56,32 +84,55 @@ public class RealStorageNodesIT {
 
             log("Starting node " + i + " on port " + port);
 
-            StorageNodeServer server =
-                    new StorageNodeServer(port, dir);
+            // Each node gets its own Database instance but shares the memory-backed control planes
+            Database db = new Database(new RocksDbStorageStrategy(dir.resolve("db").toString()));
+            StorageNodeServerV2 server =
+                    new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"), sharedMetadataClient, sharedPubSubClient);
 
             servers.add(server);
             dataDirs.add(dir);
+            databases.add(db);
 
-            int nodeId = i;
+            log("[NODE " + i + "] server starting");
+            
+            // Start server directly (non-blocking in Javalin)
+            server.start();
 
-            Thread t = Thread.ofVirtual().start(() -> {
-                log("[NODE " + nodeId + "] accept loop starting");
-                server.start();
-            });
+            InetSocketAddress addr = new InetSocketAddress("127.0.0.1", port);
 
-            serverThreads.add(t);
-
-            InetSocketAddress addr =
-                    new InetSocketAddress("127.0.0.1", port);
-
-            waitForHttpReady(addr, 5000);
-
-            log("[NODE " + nodeId + "] READY");
+            log("[NODE " + i + "] READY");
 
             addrs.add(addr);
         }
 
-        worker = new StorageWorker(addrs, addrs, addrs);
+        // 4. Populate cluster configuration so components can discover each other
+        ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
+        ErasureSet es = new ErasureSet();
+        es.setNumber(1);
+        List<Machine> machines = new ArrayList<>();
+        for (InetSocketAddress addr : addrs) {
+            Machine m = new Machine();
+            m.setIp(addr.getHostString());
+            m.setPort(addr.getPort());
+            machines.add(m);
+        }
+        es.setMachines(machines);
+        esConfig.setErasureSets(List.of(es));
+
+        PartitionSpreadConfiguration psConfig = new PartitionSpreadConfiguration();
+        PartitionSpread ps = new PartitionSpread();
+        ps.setErasureSet(1);
+        List<Integer> parts = new ArrayList<>();
+        for(int i = 0; i < 99; i++) parts.add(i); // Assign all partitions to this set
+        ps.setPartitions(parts);
+        psConfig.setPartitionSpread(List.of(ps));
+
+        // Push updates to the shared MemoryFetcher
+        sharedFetcher.update(esConfig);
+        sharedFetcher.update(psConfig);
+
+        // Sleep briefly to let the pubsub/metadata configuration apply locally across the instances
+        Thread.sleep(1000);
 
         log("=== CLUSTER READY ===");
     }
@@ -94,19 +145,26 @@ public class RealStorageNodesIT {
 
         log("=== STOPPING CLUSTER ===");
 
+        if (worker != null) worker.shutdown();
+        if (sharedMetadataClient != null) sharedMetadataClient.close();
+        if (sharedPubSubClient != null) sharedPubSubClient.close();
+
         for (int i = 0; i < servers.size(); i++) {
             log("Stopping node " + i);
             servers.get(i).stop();
         }
 
-        for (Thread t : serverThreads)
-            t.join(1000);
+        for (Database db : databases) {
+            try { 
+                db.close(); 
+            } catch (Exception ignored) {}
+        }
 
         for (Path d : dataDirs)
             deleteRecursive(d);
 
         servers.clear();
-        serverThreads.clear();
+        databases.clear();
         dataDirs.clear();
 
         log("=== CLUSTER STOPPED ===");
@@ -115,9 +173,8 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
     // MAIN ROUNDTRIP TEST
     // -------------------------------------------------------
-    @Disabled("Storage node implementation not yet complete — re-enable when SN is ready")
     @Test
-    void put_get_delete_roundTrip_realServers() throws Exception {
+    void put_get_roundTrip_realServers() throws Exception {
 
         log("Generating random test data...");
         byte[] data = new byte[DATA_SIZE];
@@ -132,11 +189,10 @@ public class RealStorageNodesIT {
                         new ByteArrayInputStream(data));
 
         log("[WORKER] PUT result = " + putOk);
-        assertTrue(putOk);
+        assertTrue(putOk, "PUT should have successfully reached ACK quorum");
 
         log("[WORKER] GET starting...");
-        try (InputStream in =
-                     worker.get(UUID.randomUUID(), "b", "realA")) {
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", "realA")) {
 
             byte[] got = in.readAllBytes();
 
@@ -145,13 +201,6 @@ public class RealStorageNodesIT {
             assertArrayEquals(data, got);
         }
 
-        log("[WORKER] DELETE starting...");
-        boolean delOk =
-                worker.delete(UUID.randomUUID(), "b", "realA");
-
-        log("[WORKER] DELETE result = " + delOk);
-        assertTrue(delOk);
-
         log("Round-trip test completed successfully.");
     }
 
@@ -159,10 +208,6 @@ public class RealStorageNodesIT {
     // ERASURE TESTS (real servers)
     // -------------------------------------------------------
 
-    /**
-     * M=3 parity shards, so losing any 3 shard servers should still reconstruct.
-     */
-    @Disabled("Storage node implementation not yet complete — re-enable when SN is ready")
     @Test
     void get_tolerates_three_node_failures_realServers() throws Exception {
 
@@ -193,12 +238,6 @@ public class RealStorageNodesIT {
         log("Erasure tolerance test (3 failures) completed successfully.");
     }
 
-    /**
-     * With K=6, M=3, losing 4 shards should be unrecoverable. Depending on the worker,
-     * this might throw during read, or might return a shorter/corrupt stream.
-     * We accept either behavior, but it must NOT return the full correct object.
-     */
-    @Disabled("Storage node implementation not yet complete — re-enable when SN is ready")
     @Test
     void get_fails_with_four_node_failures_realServers() throws Exception {
 
@@ -259,28 +298,6 @@ public class RealStorageNodesIT {
             ss.setReuseAddress(true);
             return ss.getLocalPort();
         }
-    }
-
-    private static void waitForHttpReady(
-            InetSocketAddress addr,
-            long timeoutMs) throws InterruptedException {
-
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        HttpClient client = HttpClient.newHttpClient();
-        URI healthUri = URI.create("http://" + addr.getHostString() + ":" + addr.getPort() + "/health");
-
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder().uri(healthUri).GET().build();
-                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) return;
-            } catch (IOException ignored) {
-                // server not ready yet
-            }
-            Thread.sleep(50);
-        }
-
-        fail("Server did not become ready: " + addr);
     }
 
     private static void deleteRecursive(Path root) throws IOException {

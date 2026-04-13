@@ -50,8 +50,6 @@ public final class StorageWorker {
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
     private final CommitCoordinator commitCoordinator;
-    private final AtomicReference<ErasureSetConfiguration> erasureSetConfig = new AtomicReference<>();
-    private final AtomicReference<PartitionSpreadConfiguration> partitionSpreadConfig = new AtomicReference<>();
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
     // FOR TESTING ONLY - constructs a MetadataClient backed by a MemoryFetcher
@@ -62,7 +60,8 @@ public final class StorageWorker {
 
     // FOR TESTING ONLY - builds a MetadataClient backed by a MemoryFetcher and
     // pre-populates it with an ErasureSetConfiguration derived from the three
-    // address lists (set numbers 1, 2, 3) and a matching PartitionSpreadConfiguration
+    // address lists (set numbers 1, 2, 3) and a matching
+    // PartitionSpreadConfiguration
     // with 99 partitions spread evenly across the three sets (33 each).
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3) {
         this(set1, set2, set3, 0);
@@ -71,7 +70,7 @@ public final class StorageWorker {
     // Overload that accepts a pre-built CommitCoordinator — used in tests that
     // share a PubSubClient bus between the coordinator and the fake SNs.
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2,
-                         List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
+            List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -90,7 +89,8 @@ public final class StorageWorker {
         fetcher.update(buildTestPartitionSpread());
     }
 
-    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3, int ackPort) {
+    public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3,
+            int ackPort) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -132,7 +132,7 @@ public final class StorageWorker {
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
         registerListeners();
-        this.metadataClient.start();
+        tryRebuildRouting();
     }
 
     private static CommitCoordinator buildDefaultCommitCoordinator() {
@@ -152,23 +152,29 @@ public final class StorageWorker {
     /**
      * Executes a full PUT:
      * <ol>
-     *   <li>Erasure-code and stream shards to all {@value com.github.koop.common.erasure.ErasureCoder#TOTAL}
-     *       storage nodes concurrently.</li>
-     *   <li>Publish a commit message to the per-partition Kafka topic so every SN
-     *       applies the operation to its op-log and metadata. SNs that missed the
-     *       stream reconstruct their shard from peers before committing.</li>
-     *   <li>Block until {@link CommitCoordinator#QUORUM} SN commit-ACKs are received,
-     *       then return {@code true} to the caller.</li>
+     * <li>Erasure-code and stream shards to all
+     * {@value com.github.koop.common.erasure.ErasureCoder#TOTAL}
+     * storage nodes concurrently.</li>
+     * <li>Publish a commit message to the per-partition Kafka topic so every SN
+     * applies the operation to its op-log and metadata. SNs that missed the
+     * stream reconstruct their shard from peers before committing.</li>
+     * <li>Block until {@link CommitCoordinator#QUORUM} SN commit-ACKs are received,
+     * then return {@code true} to the caller.</li>
      * </ol>
      */
     public boolean put(UUID requestID, String bucket, String key, long length, InputStream data) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
-        if (data == null)      throw new IllegalArgumentException("data is null");
-        if (length < 0)        throw new IllegalArgumentException("length < 0");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (data == null)
+            throw new IllegalArgumentException("data is null");
+        if (length < 0)
+            throw new IllegalArgumentException("length < 0");
 
-        String storageKey = toStorageKey(bucket, key);
+        String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -203,8 +209,7 @@ public final class StorageWorker {
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
                             .build();
-                    HttpResponse<String> response =
-                            httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
                         logger.trace("PUT shard {} → node {} succeeded", index, node);
                         return true;
@@ -220,8 +225,9 @@ public final class StorageWorker {
         long uploaded;
         try {
             uploaded = executor.invokeAll(tasks).stream().filter(f -> {
-                try { return f.get(); }
-                catch (InterruptedException | ExecutionException e) {
+                try {
+                    return f.get();
+                } catch (InterruptedException | ExecutionException e) {
                     logger.warn("Shard upload task error: {}", e.getMessage());
                     return false;
                 }
@@ -231,13 +237,18 @@ public final class StorageWorker {
             return false;
         }
 
+        if (uploaded < CommitCoordinator.QUORUM) {
+            logger.error("Phase 1 failed: only {}/{} shards uploaded. Aborting commit.", uploaded, TOTAL);
+            return false;
+        }
+
         logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, TOTAL, requestID);
 
         // Phase 2 – commit.
         //
         // Publish the commit message to the partition's Kafka topic. Every SN will:
-        //   - add the op to its op-log + write metadata, if it received the shard; or
-        //   - reconstruct the shard from peers and then commit, if it didn't.
+        // - add the op to its op-log + write metadata, if it received the shard; or
+        // - reconstruct the shard from peers and then commit, if it didn't.
         // SNs POST an ACK back to this QP's server. We block until QUORUM ACKs arrive.
         boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key);
         if (!committed) {
@@ -247,11 +258,14 @@ public final class StorageWorker {
     }
 
     public InputStream get(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
-        String storageKey = toStorageKey(bucket, key);
+        String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -271,7 +285,11 @@ public final class StorageWorker {
             try (pos) {
                 streamReconstruct(resolvedPartition, storageKey, resolvedNodes, pos);
             } catch (Exception e) {
-                try { pos.close(); } catch (IOException ignored) {}
+                logger.error("Failed to reconstruct stream for key {}", storageKey, e);
+                try {
+                    pos.close();
+                } catch (IOException ignored) {
+                }
             }
         });
 
@@ -279,11 +297,14 @@ public final class StorageWorker {
     }
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
-        String storageKey = toStorageKey(bucket, key);
+        String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<List<InetSocketAddress>> nodes = partition.isPresent()
@@ -383,16 +404,14 @@ public final class StorageWorker {
 
     private void registerListeners() {
         this.metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
-            erasureSetConfig.set(current);
             logger.info("ErasureSetConfiguration updated: {} erasure sets",
                     current.getErasureSets() == null ? 0 : current.getErasureSets().size());
-            tryRebuildRouting(partitionSpreadConfig.get(), current);
+            tryRebuildRouting();
         });
         this.metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
-            partitionSpreadConfig.set(current);
             logger.info("PartitionSpreadConfiguration updated: {} spread entries",
                     current.getPartitionSpread() == null ? 0 : current.getPartitionSpread().size());
-            tryRebuildRouting(current, erasureSetConfig.get());
+            tryRebuildRouting();
         });
     }
 
@@ -402,10 +421,16 @@ public final class StorageWorker {
      * if one hasn't arrived yet this is a no-op and the first update of the
      * lagging config will trigger the rebuild instead.
      */
-    private void tryRebuildRouting(PartitionSpreadConfiguration ps, ErasureSetConfiguration es) {
+    private void tryRebuildRouting() {
+        PartitionSpreadConfiguration ps = metadataClient.get(PartitionSpreadConfiguration.class);
+        ErasureSetConfiguration es = metadataClient.get(ErasureSetConfiguration.class);
         if (ps != null && es != null) {
             routing.set(new ErasureRouting(ps, es));
             logger.info("ErasureRouting rebuilt");
+        } else {
+            logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
+                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                    ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }
 
@@ -426,7 +451,7 @@ public final class StorageWorker {
     }
 
     private void streamReconstruct(int partition, String storageKey,
-                                   List<InetSocketAddress> nodes, OutputStream out) throws IOException {
+            List<InetSocketAddress> nodes, OutputStream out) throws IOException {
 
         InputStream[] ins = new InputStream[TOTAL];
         boolean[] present = new boolean[TOTAL];
@@ -452,21 +477,25 @@ public final class StorageWorker {
         }
 
         int count = 0;
-        for (boolean b : present) if (b) count++;
+        for (boolean b : present)
+            if (b)
+                count++;
         if (count < ErasureCoder.K)
             throw new IOException("lost too many shards; need " + ErasureCoder.K + ", got " + count);
 
         try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present)) {
             byte[] buf = new byte[64 * 1024];
             int n;
-            while ((n = reconstructed.read(buf)) != -1) out.write(buf, 0, n);
+            while ((n = reconstructed.read(buf)) != -1)
+                out.write(buf, 0, n);
         }
         out.flush();
     }
 
     /**
      * FOR TESTING ONLY - builds a PartitionSpreadConfiguration with 99 partitions
-     * spread evenly: partitions 0-32 → erasure set 1, 33-65 → erasure set 2, 66-98 → erasure set 3.
+     * spread evenly: partitions 0-32 → erasure set 1, 33-65 → erasure set 2, 66-98
+     * → erasure set 3.
      */
     private static PartitionSpreadConfiguration buildTestPartitionSpread() {
         PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
@@ -475,7 +504,8 @@ public final class StorageWorker {
             PartitionSpread spread = new PartitionSpread();
             spread.setErasureSet(s + 1); // set numbers 1, 2, 3
             List<Integer> partitions = new ArrayList<>();
-            for (int p = s * 33; p < (s + 1) * 33; p++) partitions.add(p);
+            for (int p = s * 33; p < (s + 1) * 33; p++)
+                partitions.add(p);
             spread.setPartitions(partitions);
             spreads.add(spread);
         }
