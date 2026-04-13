@@ -18,17 +18,12 @@ import org.junit.jupiter.api.*;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -62,17 +57,17 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
-        worker = new StorageWorker(set, set, set, coordinator);
-
-        // Build a separate MetadataClient-backed worker for the live-update test,
-        // reusing the same shared bus.
+        // Build a MetadataClient-backed worker
         memoryFetcher = new MemoryFetcher();
         MetadataClient metadataClient = new MetadataClient(memoryFetcher);
-        liveWorker = new StorageWorker(metadataClient,
-                new CommitCoordinator(sharedPubSub, 0));
+        metadataClient.start();
         memoryFetcher.update(buildErasureSetConfiguration(set, set, set));
         memoryFetcher.update(buildPartitionSpreadConfiguration());
+
+        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
+        worker = new StorageWorker(metadataClient, coordinator);
+
+        liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0));
     }
 
     @BeforeEach
@@ -194,13 +189,9 @@ public class StorageWorkerApiTest {
             List<InetSocketAddress> set = prodNodes.stream()
                     .map(AckingFakeStorageNodeServer::address).toList();
 
-            MemoryFetcher fetcher = new MemoryFetcher();
-            MetadataClient client = new MetadataClient(fetcher);
-            client.start();
+            MetadataClient client = createConfiguredClient(set);
             CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker prodWorker = new StorageWorker(client, coordinator);
-            fetcher.update(buildErasureSetConfiguration(set, set, set));
-            fetcher.update(buildPartitionSpreadConfiguration());
 
             byte[] data = randomBytes(DATA_SIZE);
 
@@ -262,8 +253,9 @@ public class StorageWorkerApiTest {
             });
         }
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(spy, 0);
-        StorageWorker spyWorker = new StorageWorker(set, set, set, coordinator);
+        StorageWorker spyWorker = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -323,9 +315,10 @@ public class StorageWorkerApiTest {
         quorumNodes.get(1).setEnabled(false);
         quorumNodes.get(2).setEnabled(false);
 
+        MetadataClient client = createConfiguredClient(set);
         // Use a short-timeout coordinator so the test doesn't wait 30 s.
         CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 3);
-        StorageWorker quorumWorker = new StorageWorker(set, set, set, fastCoordinator);
+        StorageWorker quorumWorker = new StorageWorker(client, fastCoordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -360,8 +353,9 @@ public class StorageWorkerApiTest {
         nodes2.get(7).setUploadEnabled(false);
         nodes2.get(8).setUploadEnabled(false);
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(DATA_SIZE);
@@ -395,8 +389,9 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = ackNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             UUID id = UUID.randomUUID();
@@ -457,6 +452,15 @@ public class StorageWorkerApiTest {
         byte[] b = new byte[size];
         new SecureRandom().nextBytes(b);
         return b;
+    }
+
+    private static MetadataClient createConfiguredClient(List<InetSocketAddress> set) {
+        MemoryFetcher fetcher = new MemoryFetcher();
+        MetadataClient client = new MetadataClient(fetcher);
+        client.start();
+        fetcher.update(buildErasureSetConfiguration(set, set, set));
+        fetcher.update(buildPartitionSpreadConfiguration());
+        return client;
     }
 
     private static ErasureSetConfiguration buildErasureSetConfiguration(

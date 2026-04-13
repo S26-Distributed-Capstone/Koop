@@ -4,6 +4,9 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.UUID;
 
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.pubsub.PubSubClient;
+import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadManager;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
@@ -39,19 +42,6 @@ public class StorageWorkerService implements StorageService {
     public StorageWorkerService(StorageWorker storageWorker, CacheClient cache) {
         this.storageWorker = storageWorker;
         this.multipartManager = new MultipartUploadManager(storageWorker, cache);
-    }
-    
-    /**
-     * No-arg constructor for backwards compatibility.
-     * WARNING: This will create a StorageWorker with null sets - needs proper initialization!
-     * 
-     * TODO: Remove this once Main.java is updated to pass StorageWorker instance
-     */
-    public StorageWorkerService() {
-        // Temporary: Create StorageWorker with null sets
-        // This will need to be properly initialized with node addresses
-        this.storageWorker = new StorageWorker(null, null, null);
-        this.multipartManager = new MultipartUploadManager(this.storageWorker, new MemoryCacheClient());
     }
 
     @Override
