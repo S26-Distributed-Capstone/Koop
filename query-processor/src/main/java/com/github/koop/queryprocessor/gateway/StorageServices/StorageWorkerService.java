@@ -40,19 +40,6 @@ public class StorageWorkerService implements StorageService {
         this.storageWorker = storageWorker;
         this.multipartManager = new MultipartUploadManager(storageWorker, cache);
     }
-    
-    /**
-     * No-arg constructor for backwards compatibility.
-     * WARNING: This will create a StorageWorker with null sets - needs proper initialization!
-     * 
-     * TODO: Remove this once Main.java is updated to pass StorageWorker instance
-     */
-    public StorageWorkerService() {
-        // Temporary: Create StorageWorker with null sets
-        // This will need to be properly initialized with node addresses
-        this.storageWorker = new StorageWorker(null, null, null);
-        this.multipartManager = new MultipartUploadManager(this.storageWorker, new MemoryCacheClient());
-    }
 
     @Override
     public void putObject(String bucket, String key, InputStream data, long length) throws Exception {

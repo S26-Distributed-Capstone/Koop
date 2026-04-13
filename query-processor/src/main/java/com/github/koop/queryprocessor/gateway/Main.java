@@ -6,13 +6,21 @@ import io.javalin.http.Context;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.github.koop.common.metadata.ErasureSetConfiguration;
+import com.github.koop.common.metadata.EtcdFetcher;
+import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.pubsub.MemoryPubSub;
+import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.CompletedPart;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
+import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
@@ -404,7 +412,16 @@ public class Main {
     // ─── Entry Point ─────────────────────────────────────────────────────────
 
     public static void main(String[] args) {
-        StorageWorker storageWorker = new StorageWorker();
+        var pubSubClient = new PubSubClient(new MemoryPubSub());//TODO: Replace with real PubSubClient implementation
+        pubSubClient.start();
+        var metadataFetcherMap =Map.of(
+            ErasureSetConfiguration.class, "erasure_set_configurations",
+            PartitionSpreadConfiguration.class, "partition_spread_configurations"
+        );
+        var metadataClient = new MetadataClient(new EtcdFetcher(metadataFetcherMap));
+        metadataClient.start();
+        var commitCoordinator = new CommitCoordinator(pubSubClient,0);
+        StorageWorker storageWorker = new StorageWorker(metadataClient, commitCoordinator);
         StorageService storage = new StorageWorkerService(storageWorker);
         createApp(storage).start(8080);
     }
