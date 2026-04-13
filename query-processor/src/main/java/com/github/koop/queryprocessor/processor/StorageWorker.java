@@ -447,7 +447,7 @@ public final class StorageWorker {
     }
 
     private static String toStorageKey(String bucket, String key) {
-        return bucket + "-" + key;
+        return bucket + "/" + key;
     }
 
     private void streamReconstruct(int partition, String storageKey,
