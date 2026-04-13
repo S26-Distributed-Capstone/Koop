@@ -14,7 +14,8 @@ public class MetadataClient implements AutoCloseable {
     private final Map<Class<?>, List<ChangeListener<?>>> listeners = new ConcurrentHashMap<>();
 
     private final static Logger logger = LogManager.getLogger(MetadataClient.class);
-
+    private boolean started = false;
+    private boolean closed = false;
     public MetadataClient(Fetcher fetcher) {
         this.fetcher = fetcher;
     }
@@ -31,6 +32,12 @@ public class MetadataClient implements AutoCloseable {
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public void start() {
+        if(started) {
+            throw new IllegalStateException("MetadataClient has already been started");
+        }
+        if(closed) {
+            throw new IllegalStateException("MetadataClient has already been closed");
+        }
         this.fetcher.start(newObj->{
             var clazz = newObj.getClass();
             var prev = cache.put(clazz, newObj);
@@ -46,11 +53,27 @@ public class MetadataClient implements AutoCloseable {
             }
             
         });
+        started = true;
+    }
+
+    public <T> T get(Class<T> clazz) {
+        return clazz.cast(cache.get(clazz));
     }
 
     @Override
     public void close() throws Exception {
+        if(closed) {
+            throw new IllegalStateException("MetadataClient has already been closed");
+        }
+        closed = true;
         fetcher.close();
+    }
+
+    public boolean isStarted() {
+        return started;
+    }
+    public boolean isClosed() {
+        return closed;
     }
     
 }

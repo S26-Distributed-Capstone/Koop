@@ -54,8 +54,7 @@ public class StorageNodeV2Test {
         long seqNumber = 100L;
 
         // 1. Store data
-        storageNode.store(partition, key, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)),
-                requestData.length);
+        storageNode.store(partition, key, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)));
 
         // 2. Commit metadata
         storageNode.commit(partition, key, requestID, seqNumber);
@@ -101,7 +100,7 @@ public class StorageNodeV2Test {
         String requestID = "req-del";
 
         // Setup existing object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
         storageNode.commit(1, key, requestID, 10L);
 
         // Ensure it's there
@@ -125,14 +124,14 @@ public class StorageNodeV2Test {
         String requestID = "req-recreate";
 
         // Setup existing object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())), 4);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
         storageNode.commit(1, key, requestID, 10L);
 
         // Delete object
         storageNode.delete(1, key, 11L);
 
         // Recreate object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())), 7);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())));
         storageNode.commit(1, key, requestID, 12L);
 
         // Retrieve should get new data
@@ -193,13 +192,13 @@ public class StorageNodeV2Test {
     @Test
     public void testListItemsInBucket() throws Exception {
         String prefix = "test-bucket/";
-        storageNode.store(1,prefix+"file1", "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())), 1);
+        storageNode.store(1,prefix+"file1", "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())));
         storageNode.commit(1, prefix + "file1", "req-1", 100L);
 
-        storageNode.store(1, prefix+"file2","req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())), 1);
+        storageNode.store(1, prefix+"file2","req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())));
         storageNode.commit(1, prefix + "file2", "req-2", 101L);
 
-        storageNode.store(1,"other-bucket/file3", "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())), 1);
+        storageNode.store(1,"other-bucket/file3", "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())));
         storageNode.commit(1, "other-bucket/file3", "req-3", 102L);
 
         List<Metadata> items = storageNode.listItemsInBucket(prefix).toList();

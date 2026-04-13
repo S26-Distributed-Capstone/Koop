@@ -20,7 +20,6 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MetadataClient;
@@ -31,11 +30,6 @@ import com.github.koop.storagenode.db.Database;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 
-/**
- * Storage Node HTTP server powered by Javalin + virtual threads.
- * Integrates MetadataClient and PubSubClient for dynamic partition assignment
- * and sequencer log tailing.
- */
 public class StorageNodeServerV2 {
 
     private final int port;
@@ -48,11 +42,9 @@ public class StorageNodeServerV2 {
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
 
-    // Tracks active partition subscriptions and their dedicated executors
     private final Set<Integer> subscribedPartitions = new HashSet<>();
     private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
 
-    // HTTP Client for sending asynchronous acknowledgments
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -86,7 +78,6 @@ public class StorageNodeServerV2 {
             System.exit(1);
         }
 
-        // Injected dependencies
         Database db = null;
         MetadataClient metadataClient = null;
         PubSubClient pubSubClient = null;
@@ -100,8 +91,6 @@ public class StorageNodeServerV2 {
 
         server.start();
     }
-
-    // --- Dynamic Configuration & Subscriptions ---
 
     private synchronized void updateSubscriptions() {
         if (currentEsConfig == null || currentPsConfig == null) {
@@ -143,7 +132,6 @@ public class StorageNodeServerV2 {
             pubSubClient.drop(topic);
             subscribedPartitions.remove(partition);
 
-            // Shutdown the dedicated executor for this partition
             ExecutorService executor = partitionExecutors.remove(partition);
             if (executor != null) {
                 executor.shutdown();
@@ -165,7 +153,6 @@ public class StorageNodeServerV2 {
             String topic = "partition-" + partition;
             logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
 
-            // Create a single-threaded executor backed by a virtual thread for sequential processing
             ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
                     Thread.ofVirtual().name("partition-" + partition + "-").factory());
             partitionExecutors.put(partition, partitionExecutor);
@@ -186,24 +173,26 @@ public class StorageNodeServerV2 {
         }
     }
 
-    // --- HTTP Handlers ---
-
    private void handlePut(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
+            String fullKey = bucket + "/" + key;
             String requestId = ctx.queryParam("requestId");
-            long length = ctx.req().getContentLengthLong();
+
+            logger.debug("Received PUT request: partition={} fullKey={} requestId={}", partition, fullKey,
+                    requestId);
 
             if (requestId == null || requestId.isBlank()) {
                 ctx.status(400).result("Missing requestId parameter");
                 return;
             }
 
-            storageNode.store(partition, key, requestId, Channels.newChannel(ctx.bodyInputStream()), length);
+            storageNode.store(partition, fullKey, requestId, Channels.newChannel(ctx.bodyInputStream()));
 
             ctx.status(200).result("OK");
-            logger.debug("PUT (Uncommitted) partition={} key={} requestId={}", partition, key, requestId);
+            logger.debug("PUT (Uncommitted) partition={} fullKey={} requestId={}", partition, fullKey, requestId);
         } catch (Exception e) {
             logger.error("Error handling PUT", e);
             ctx.status(500).result("ERROR");
@@ -214,7 +203,9 @@ public class StorageNodeServerV2 {
         try {
             logger.debug("Received GET request: {}", ctx.req().getRequestURI());
             int partition = Integer.parseInt(ctx.pathParam("partition"));
+            String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
+            String fullKey = bucket + "/" + key;
 
             String versionParam = ctx.queryParam("version");
             long targetVersion = -1;
@@ -227,9 +218,9 @@ public class StorageNodeServerV2 {
                     return;
                 }
             }
-            logger.debug("GET partition={} key={} targetVersion={}", partition, key, targetVersion);
+            logger.debug("GET partition={} fullKey={} targetVersion={}", partition, fullKey, targetVersion);
 
-            Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(key, targetVersion);
+            Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(fullKey, targetVersion);
 
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
@@ -255,39 +246,37 @@ public class StorageNodeServerV2 {
                         long transferred = fc.transferTo(position, size - position, outputChannel);
                         if (transferred <= 0) {
                             logger.warn(
-                                    "Zero-byte transfer when streaming file for partition={} key={} at position={} of {} bytes",
-                                    partition, key, position, size);
+                                    "Zero-byte transfer when streaming file for partition={} fullKey={} at position={} of {} bytes",
+                                    partition, fullKey, position, size);
                             break;
                         }
                         position += transferred;
                     }
                     fo.close();
-                    logger.debug("GET partition={} key={} version={} streamed {} bytes", partition, key,
+                    logger.debug("GET partition={} fullKey={} version={} streamed {} bytes", partition, fullKey,
                             responseSequenceNumber, size);
 
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.status(200)
                             .header("Content-Type", "application/json")
                             .json(md.version().chunks());
-                    logger.debug("GET partition={} key={} version={} returned multipart chunk list", partition, key,
+                    logger.debug("GET partition={} fullKey={} version={} returned multipart chunk list", partition, fullKey,
                             responseSequenceNumber);
 
                 } else if (response instanceof StorageNodeV2.Tombstone) {
                     ctx.status(404).result("NOT_FOUND (Tombstone)");
-                    logger.debug("GET partition={} key={} version={} hit tombstone", partition, key,
+                    logger.debug("GET partition={} fullKey={} version={} hit tombstone", partition, fullKey,
                             responseSequenceNumber);
                 }
             } else {
                 ctx.status(404).result("NOT_FOUND");
-                logger.debug("GET partition={} key={} targetVersion={} not found", partition, key, targetVersion);
+                logger.debug("GET partition={} fullKey={} targetVersion={} not found", partition, fullKey, targetVersion);
             }
         } catch (Exception e) {
             logger.error("Error handling GET", e);
             ctx.status(500).result("ERROR");
         }
     }
-
-    // --- Pub/Sub Mutator Flow ---
 
     public void processSequencerMessage(int partition, Message message, long seqNumber) {
         try {
@@ -327,7 +316,6 @@ public class StorageNodeServerV2 {
                 }
             }
 
-            // Fire and forget acknowledgment
             sendAck(callbackAddress, requestId);
 
         } catch (Exception e) {
@@ -341,13 +329,13 @@ public class StorageNodeServerV2 {
         }
 
         try {
-            String url = callbackAddress.endsWith("/") ? callbackAddress + "ack" : callbackAddress + "/ack";
-            String jsonPayload = String.format("{\"requestId\":\"%s\"}", requestId);
+            String baseUrl = callbackAddress.endsWith("/") ? 
+                    callbackAddress.substring(0, callbackAddress.length() - 1) : callbackAddress;
+            String url = baseUrl + "/ack/" + requestId;
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .POST(HttpRequest.BodyPublishers.noBody())
                     .build();
 
             httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
@@ -374,10 +362,12 @@ public class StorageNodeServerV2 {
         return bucket + "/" + key;
     }
 
-    // --- Server Lifecycle ---
-
     public void start() {
         if (metadataClient != null) {
+            this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
+            this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
+            updateSubscriptions();
+
             metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
                 this.currentEsConfig = current;
                 updateSubscriptions();
@@ -387,20 +377,14 @@ public class StorageNodeServerV2 {
                 this.currentPsConfig = current;
                 updateSubscriptions();
             });
-
-            metadataClient.start();
-        }
-
-        if (pubSubClient != null) {
-            pubSubClient.start();
         }
 
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L;
-            config.routes.put("/store/{partition}/{key}", this::handlePut);
-            config.routes.get("/store/{partition}/{key}", this::handleGet);
+            config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
+            config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
         });
 
         app.start(port);
@@ -412,18 +396,6 @@ public class StorageNodeServerV2 {
             app.stop();
         }
 
-        try {
-            if (metadataClient != null) {
-                metadataClient.close();
-            }
-            if (pubSubClient != null) {
-                pubSubClient.close();
-            }
-        } catch (Exception e) {
-            logger.error("Error shutting down clients", e);
-        }
-
-        // Clean up the partition executors
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
 
