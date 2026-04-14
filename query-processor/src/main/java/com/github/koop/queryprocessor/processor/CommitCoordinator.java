@@ -128,16 +128,16 @@ public final class CommitCoordinator implements AutoCloseable {
     // -----------------------------------------------------------------------
 
     /**
-     * Publishes a single-part commit command and blocks until a quorum of Storage
-     * Nodes ACK the commit (or the timeout expires).
+     * Publishes a single-part commit command and blocks until the requested write quorum of
+     * Storage Nodes ACK the commit (or the timeout expires).
      *
      * @param requestId the UUID that was used for the preceding shard uploads.
      * @param partition the partition number — used as the Kafka topic via
      *                  {@link CommitTopics#forPartition}.
      * @param bucket    object bucket.
      * @param key       object key.
-     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the
-     *         timeout.
+     * @param writeQuorum number of ACKs required before the commit is considered successful.
+     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
     public boolean beginCommit(UUID requestId, int partition, String bucket, String key, int writeQuorum) {
         return runCommit(requestId, writeQuorum, () -> {
@@ -149,7 +149,7 @@ public final class CommitCoordinator implements AutoCloseable {
     }
 
     /**
-     * Publishes a multipart commit command and blocks until quorum.
+         * Publishes a multipart commit command and blocks until the requested write quorum is reached.
      *
      * @param requestId the UUID for the upload.
      * @param partition the partition number — used as the Kafka topic via
@@ -157,8 +157,8 @@ public final class CommitCoordinator implements AutoCloseable {
      * @param bucket    object bucket.
      * @param key       object key.
      * @param chunks    ordered list of part/chunk identifiers.
-     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the
-     *         timeout.
+         * @param writeQuorum number of ACKs required before the commit is considered successful.
+         * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
     public boolean beginMultipartCommit(UUID requestId, int partition, String bucket, String key, List<String> chunks,
             int writeQuorum) {
@@ -208,12 +208,18 @@ public final class CommitCoordinator implements AutoCloseable {
      * {@link #beginMultipartCommit}.
      *
      * <ol>
-     * <li>Registers the pending commit <em>before</em> publishing, so no ACK can
-     * arrive before the entry exists in {@link #inFlight}.</li>
-     * <li>Runs {@code publishAction} to send the Kafka/pubsub message.</li>
-     * <li>Waits up to {@link #ackTimeoutSeconds}s for {@value #QUORUM} ACKs.</li>
+        * <li>Registers the pending commit <em>before</em> publishing, so no ACK can arrive before
+        * the entry exists in {@link #inFlight}.</li>
+        * <li>Runs {@code publishAction} to send the Kafka/pubsub message.</li>
+        * <li>Waits up to {@link #ackTimeoutSeconds}s for {@code writeQuorum} ACKs.</li>
      * <li>Cleans up the in-flight entry regardless of outcome.</li>
      * </ol>
+        *
+        * @param requestId unique identifier for the commit operation.
+        * @param writeQuorum number of ACKs required before the commit is considered successful.
+        * @param publishAction logic that publishes the commit message to pub/sub.
+        * @return {@code true} if the requested quorum is reached before the timeout, otherwise
+        *         {@code false}.
      */
     private boolean runCommit(UUID requestId, int writeQuorum, ThrowingRunnable publishAction) {
         String id = requestId.toString();

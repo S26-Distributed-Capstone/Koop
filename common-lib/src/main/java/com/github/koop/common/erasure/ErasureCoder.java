@@ -6,26 +6,26 @@ import java.io.*;
 import java.util.Arrays;
 
 /**
- * Stateless erasure coding utility using Reed-Solomon (6-of-9).
+ * Stateless erasure coding utility using Reed-Solomon with configurable {@code k}-of-{@code n}
+ * shard layouts.
  *
  * Sharding:
- *   {@link #shard(InputStream, long)} splits a data stream into K+M shard streams.
- *   The first K shards are data shards; the remaining M are parity shards.
- *   Each returned InputStream begins with an 8-byte original-length prefix so the
- *   receiver can trim padding on reconstruction.
+ * {@link #shard(InputStream, long, int, int)} splits a data stream into {@code n} shard streams.
+ * The first {@code k} shards are data shards; the remaining {@code n - k} shards are parity shards.
+ * Each returned {@link InputStream} begins with an 8-byte original-length prefix so the receiver
+ * can trim padding on reconstruction.
  *
  * Reconstruction:
- *   {@link #reconstruct(InputStream[], boolean[])} accepts up to K+M shard streams
- *   (false entries for missing shards) and returns the original data stream.
- *   At least K shards must be present.
+ * {@link #reconstruct(InputStream[], boolean[], int, int)} accepts up to {@code n} shard streams
+ * ({@code false} entries for missing shards) and returns the original data stream.
+ * At least {@code k} shards must be present.
  *
  * Concurrency note:
- *   The encoder runs in a single virtual thread and writes directly to each shard's
- *   PipedOutputStream. The pipe buffers are sized generously (4 * SHARD_SIZE each)
- *   so the encoder can run several stripes ahead of the consumers without blocking.
- *   The caller MUST drain all returned streams concurrently (e.g. one goroutine/thread
- *   per stream, or non-blocking I/O) — reading them sequentially will still deadlock
- *   once the pipe buffers fill up.
+ * The encoder runs in a single virtual thread and writes directly to each shard's
+ * {@link PipedOutputStream}. The pipe buffers are sized generously ({@code 4 * SHARD_SIZE} each)
+ * so the encoder can run several stripes ahead of the consumers without blocking.
+ * The caller MUST drain all returned streams concurrently (e.g. one thread per stream, or
+ * non-blocking I/O) — reading them sequentially will still deadlock once the pipe buffers fill up.
  */
 public final class ErasureCoder {
 
@@ -38,21 +38,27 @@ public final class ErasureCoder {
     // -------------------------------------------------------------------------
 
     /**
-     * Encodes {@code length} bytes from {@code data} into {@value TOTAL} shard streams.
+     * Encodes {@code length} bytes from {@code data} into {@code n} shard streams.
      *
      * <p>The returned streams MUST be consumed concurrently. The encoder runs in a
-     * background virtual thread; if the caller reads shard[0] to completion before
-     * touching shard[1], the encoder will block on a full shard[1] pipe — deadlock.
-     * In StorageWorker.put() the streams are forwarded to 9 independent socket writes
-     * which already run concurrently, so this is safe there.
+     * background virtual thread; if the caller reads {@code shard[0]} to completion before
+     * touching {@code shard[1]}, the encoder will block on a full pipe and deadlock.
+     * In {@code StorageWorker.put()} the streams are forwarded to {@code n} independent socket
+     * writes which already run concurrently, so this is safe there.
      *
-     * @param data   source data; must supply exactly {@code length} bytes
+     * @param data source data; must supply exactly {@code length} bytes
      * @param length number of bytes to read from {@code data}
-     * @return array of {@value TOTAL} InputStreams, index 0..K-1 = data, K..TOTAL-1 = parity
+     * @param k number of data shards to generate
+     * @param n total number of shards to generate, including parity shards
+     * @return array of {@code n} {@link InputStream}s, where indices {@code 0..k-1} are data
+     *         shards and {@code k..n-1} are parity shards
      */
-public static InputStream[] shard(InputStream data, long length, int k, int n) throws IOException {
+    public static InputStream[] shard(InputStream data, long length, int k, int n) throws IOException {
         if (data == null) throw new IllegalArgumentException("data is null");
         if (length < 0) throw new IllegalArgumentException("length < 0");
+        if(k==0) throw new IllegalArgumentException("k must be > 0");
+        if(n==0) throw new IllegalArgumentException("n must be > 0");
+        if(k>n) throw new IllegalArgumentException("k must be <= n");
 
         int m = n - k;
         long numStripes = (length + (long) k * SHARD_SIZE - 1) / ((long) k * SHARD_SIZE);
@@ -109,14 +115,16 @@ public static InputStream[] shard(InputStream data, long length, int k, int n) t
     // Reconstruction
     // -------------------------------------------------------------------------
 
-    /**
-     * Reconstructs the original data stream from at least {@value K} shard streams.
-     *
-     * @param shards  array of {@value TOTAL} shard InputStreams
-     * @param present boolean mask; {@code false} = shard unavailable
-     * @return InputStream yielding exactly the original bytes
-     */
-   public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
+        /**
+         * Reconstructs the original data stream from at least {@code k} shard streams.
+         *
+         * @param shards array of {@code n} shard {@link InputStream}s
+         * @param present boolean mask; {@code false} means the corresponding shard is unavailable
+         * @param k number of data shards required for reconstruction
+         * @param n total number of shards in the erasure set
+         * @return {@link InputStream} yielding exactly the original bytes
+         */
+        public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
         if (shards == null || shards.length != n) throw new IllegalArgumentException("shards must have length " + n);
         if (present == null || present.length != n) throw new IllegalArgumentException("present must have length " + n);
 

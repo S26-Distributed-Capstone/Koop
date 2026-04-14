@@ -19,6 +19,7 @@ public class ErasureSetConfiguration {
         private int number;
         private int n;
         private int k;
+        @JsonProperty("write_quorum")
         private int writeQuorum;
         private List<Machine> machines;
 
