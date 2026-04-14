@@ -57,20 +57,17 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
-        worker = new StorageWorker(set, set, set, coordinator);
-
-        // Build a separate MetadataClient-backed worker for the live-update test,
-        // reusing the same shared bus.
+        // Build a MetadataClient-backed worker
         memoryFetcher = new MemoryFetcher();
         MetadataClient metadataClient = new MetadataClient(memoryFetcher);
-        liveWorker = new StorageWorker(metadataClient,
-                new CommitCoordinator(sharedPubSub, 0));
-        // start() before update() so the worker's listeners are registered
-        // before MemoryFetcher fires them synchronously.
         metadataClient.start();
         memoryFetcher.update(buildErasureSetConfiguration(set, set, set));
         memoryFetcher.update(buildPartitionSpreadConfiguration());
+
+        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
+        worker = new StorageWorker(metadataClient, coordinator);
+
+        liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0));
     }
 
     @BeforeEach
@@ -195,15 +192,9 @@ public class StorageWorkerApiTest {
             List<InetSocketAddress> set = prodNodes.stream()
                     .map(AckingFakeStorageNodeServer::address).toList();
 
-            MemoryFetcher fetcher = new MemoryFetcher();
-            MetadataClient client = new MetadataClient(fetcher);
+            MetadataClient client = createConfiguredClient(set);
             CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker prodWorker = new StorageWorker(client, coordinator);
-            // start() before update() so listeners are wired before MemoryFetcher
-            // fires them synchronously.
-            client.start();
-            fetcher.update(buildErasureSetConfiguration(set, set, set));
-            fetcher.update(buildPartitionSpreadConfiguration());
 
             byte[] data = randomBytes(DATA_SIZE);
 
@@ -237,13 +228,6 @@ public class StorageWorkerApiTest {
     // New: commit-protocol tests
     // -------------------------------------------------------------------------
 
-    /**
-     * Verifies that the commit message is published to the partition-specific
-     * topic (e.g. "partition-5"), not a fixed topic like "storage-commits".
-     *
-     * We subscribe to the topic we expect, do a PUT, and assert we received
-     * a well-formed FileCommitMessage on exactly that topic.
-     */
     @Test
     void commitPublishedToPartitionTopic() throws Exception {
         PubSubClient spy = new PubSubClient(new MemoryPubSub());
@@ -255,11 +239,9 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = spyNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Capture every message received on every partition topic.
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
 
-        // Subscribe to all 99 partition topics.
         for (int p = 0; p < 99; p++) {
             String topic = CommitTopics.forPartition(p);
             spy.sub(topic, (t, offset, bytes) -> {
@@ -268,8 +250,9 @@ public class StorageWorkerApiTest {
             });
         }
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(spy, 0);
-        StorageWorker spyWorker = new StorageWorker(set, set, set, coordinator);
+        StorageWorker spyWorker = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -278,24 +261,19 @@ public class StorageWorkerApiTest {
                     data.length, new ByteArrayInputStream(data));
             assertTrue(ok, "put should succeed");
 
-            // Exactly one commit message must have been published.
             assertEquals(1, receivedMessages.size(),
                     "expected exactly one commit message");
 
-            // It must be a FileCommitMessage with matching fields.
             assertInstanceOf(FileCommitMessage.class, receivedMessages.get(0));
             FileCommitMessage msg = (FileCommitMessage) receivedMessages.get(0);
             assertEquals("bucket", msg.bucket());
             assertEquals("topicTest", msg.key());
             assertEquals(requestId.toString(), msg.requestID());
 
-            // The topic must be "partition-N" for the actual partition used.
             String publishedTopic = receivedTopics.get(0);
             assertTrue(publishedTopic.startsWith("partition-"),
                     "topic should be partition-based, got: " + publishedTopic);
 
-            // Cross-check: the topic the coordinator published on matches what
-            // topicFor() would produce for the resolved partition number.
             int partitionNum = Integer.parseInt(publishedTopic.substring("partition-".length()));
             assertEquals(CommitTopics.forPartition(partitionNum), publishedTopic);
         } finally {
@@ -304,11 +282,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that put() returns false if fewer than QUORUM SNs ACK the commit.
-     * Three nodes have upload enabled but ACKs disabled, so phase 1 succeeds
-     * (7+ shards uploaded) but only 6 ACKs arrive — one below quorum.
-     */
     @Test
     void commitPhase_failsWhenBelowQuorum() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -320,11 +293,6 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = quorumNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Disable only ACK sending on 3 nodes — uploads still succeed so phase 1
-        // clears the threshold, but only 6 ACKs arrive during the commit phase.
-        // setUploadEnabled(true) + setEnabled(false) achieves this: the parent
-        // FakeStorageNodeServer stays open for PUTs, but the AckingFakeStorageNodeServer
-        // won't fire sendAck() because enabled == false.
         quorumNodes.get(0).setEnabled(false);
         quorumNodes.get(1).setEnabled(false);
         quorumNodes.get(2).setEnabled(false);
@@ -333,9 +301,9 @@ public class StorageWorkerApiTest {
         quorumNodes.get(1).setUploadEnabled(true);
         quorumNodes.get(2).setUploadEnabled(true);
 
-        // Use a short-timeout coordinator so the test doesn't wait 30 s.
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 3);
-        StorageWorker quorumWorker = new StorageWorker(set, set, set, fastCoordinator);
+        StorageWorker quorumWorker = new StorageWorker(client, fastCoordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -349,12 +317,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that put() succeeds even when a node rejects the shard upload
-     * but still ACKs the commit (simulating reconstruction from peers).
-     * Only one node has upload disabled to guarantee we always clear the
-     * phase-1 quorum threshold (≥7 of 9), keeping the test deterministic.
-     */
     @Test
     void commitPhase_succeedsWithUploadFailureThatLaterAcks() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -366,13 +328,12 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes2.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Node 8 rejects the shard upload but will still ACK the commit
-        // (it reconstructs its shard from peers after seeing the Kafka message).
-        // Disabling only 1 guarantees 8/9 uploads succeed — well above QUORUM=7.
+        nodes2.get(7).setUploadEnabled(false);
         nodes2.get(8).setUploadEnabled(false);
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(DATA_SIZE);
@@ -381,7 +342,6 @@ public class StorageWorkerApiTest {
             assertTrue(ok,
                     "put should succeed: 8 shards uploaded, all 9 nodes ACK after commit");
 
-            // Data must still be fully recoverable (8 shards is more than enough).
             try (InputStream in = w.get(UUID.randomUUID(), "b", "partialUpload")) {
                 assertArrayEquals(data, in.readAllBytes());
             }
@@ -391,10 +351,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies the ACK counter: after a successful put, every node that was
-     * enabled must have sent exactly one ACK back to the coordinator.
-     */
     @Test
     void commitPhase_eachEnabledNodeAcksExactlyOnce() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -406,8 +362,9 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = ackNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             UUID id = UUID.randomUUID();
@@ -424,272 +381,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that createBucket() publishes a CreateBucketMessage to the global
-     * "buckets" topic and returns true once quorum ACKs are received.
-     */
-    @Test
-    void createBucket_succeedsAndPublishesToBucketTopic() throws Exception {
-        PubSubClient bus = new PubSubClient(new MemoryPubSub());
-        bus.start();
-
-        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
-        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
-
-        List<InetSocketAddress> set = bucketNodes.stream()
-                .map(AckingFakeStorageNodeServer::address).toList();
-
-        CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
-        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
-        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) -> {
-            receivedTopics.add(t);
-            receivedMessages.add(Message.deserializeMessage(bytes));
-        });
-
-        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
-
-        try {
-            UUID requestId = UUID.randomUUID();
-            boolean ok = w.createBucket(requestId, "my-bucket");
-            assertTrue(ok, "createBucket should succeed");
-
-            assertEquals(1, receivedMessages.size(),
-                    "exactly one CreateBucketMessage should be published");
-            assertInstanceOf(Message.CreateBucketMessage.class, receivedMessages.get(0));
-
-            Message.CreateBucketMessage msg = (Message.CreateBucketMessage) receivedMessages.get(0);
-            assertEquals("my-bucket", msg.bucket());
-            assertEquals(requestId.toString(), msg.requestID());
-            assertEquals(CommitTopics.forBucket(), receivedTopics.get(0));
-        } finally {
-            w.shutdown();
-            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
-        }
-    }
-
-    /**
-     * Verifies that deleteBucket() publishes a DeleteBucketMessage to the global
-     * "buckets" topic and returns true once quorum ACKs are received.
-     */
-    @Test
-    void deleteBucket_succeedsAndPublishesToBucketTopic() throws Exception {
-        PubSubClient bus = new PubSubClient(new MemoryPubSub());
-        bus.start();
-
-        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
-        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
-
-        List<InetSocketAddress> set = bucketNodes.stream()
-                .map(AckingFakeStorageNodeServer::address).toList();
-
-        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
-        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) ->
-                receivedMessages.add(Message.deserializeMessage(bytes)));
-
-        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
-
-        try {
-            UUID requestId = UUID.randomUUID();
-            boolean ok = w.deleteBucket(requestId, "my-bucket");
-            assertTrue(ok, "deleteBucket should succeed");
-
-            assertEquals(1, receivedMessages.size(),
-                    "exactly one DeleteBucketMessage should be published");
-            assertInstanceOf(Message.DeleteBucketMessage.class, receivedMessages.get(0));
-
-            Message.DeleteBucketMessage msg = (Message.DeleteBucketMessage) receivedMessages.get(0);
-            assertEquals("my-bucket", msg.bucket());
-            assertEquals(requestId.toString(), msg.requestID());
-        } finally {
-            w.shutdown();
-            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
-        }
-    }
-
-    /**
-     * Verifies that createBucket() fails (returns false) when fewer than QUORUM
-     * nodes ACK — same quorum enforcement that applies to object commits.
-     */
-    @Test
-    void createBucket_failsWhenBelowQuorum() throws Exception {
-        PubSubClient bus = new PubSubClient(new MemoryPubSub());
-        bus.start();
-
-        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
-        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
-
-        // Disable 3 nodes — they will not ACK the bucket creation.
-        bucketNodes.get(0).setEnabled(false);
-        bucketNodes.get(1).setEnabled(false);
-        bucketNodes.get(2).setEnabled(false);
-
-        List<InetSocketAddress> set = bucketNodes.stream()
-                .map(AckingFakeStorageNodeServer::address).toList();
-
-        CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 3);
-        StorageWorker w = new StorageWorker(set, set, set, fastCoordinator);
-
-        try {
-            assertFalse(w.createBucket(UUID.randomUUID(), "no-quorum-bucket"),
-                    "createBucket should fail when only 6/9 nodes ACK");
-        } finally {
-            w.shutdown();
-            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
-        }
-    }
-
-    /**
-     * Verifies the full bucket lifecycle: create → put object → delete object →
-     * delete bucket. Each step goes through pub/sub and waits for quorum ACKs.
-     */
-    @Test
-    void bucketLifecycle_createPutDeleteObjectDeleteBucket() throws Exception {
-        PubSubClient bus = new PubSubClient(new MemoryPubSub());
-        bus.start();
-
-        List<AckingFakeStorageNodeServer> lifecycleNodes = new ArrayList<>();
-        for (int i = 0; i < 9; i++) lifecycleNodes.add(new AckingFakeStorageNodeServer(bus));
-
-        List<InetSocketAddress> set = lifecycleNodes.stream()
-                .map(AckingFakeStorageNodeServer::address).toList();
-
-        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
-
-        try {
-            // Create bucket
-            assertTrue(w.createBucket(UUID.randomUUID(), "lifecycle-bucket"),
-                    "createBucket should succeed");
-
-            // Put object into bucket
-            byte[] data = randomBytes(DATA_SIZE);
-            assertTrue(w.put(UUID.randomUUID(), "lifecycle-bucket", "obj1",
-                            data.length, new ByteArrayInputStream(data)),
-                    "put should succeed");
-
-            // Verify round-trip
-            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
-                assertArrayEquals(data, in.readAllBytes(), "get should return original data");
-            }
-
-            // Delete — SNs remove shard data and tombstone metadata on Kafka message.
-            assertTrue(w.delete(UUID.randomUUID(), "lifecycle-bucket", "obj1"),
-                    "delete should succeed");
-
-            // Shards gone — reconstruction should fail.
-            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
-                assertNotEquals(data.length, in.readAllBytes().length,
-                        "data should not be retrievable after delete");
-            }
-
-            // Delete bucket
-            assertTrue(w.deleteBucket(UUID.randomUUID(), "lifecycle-bucket"),
-                    "deleteBucket should succeed");
-        } finally {
-            w.shutdown();
-            for (AckingFakeStorageNodeServer n : lifecycleNodes) n.close();
-        }
-    }
-
-    /**
-     * Verifies that delete() publishes a DeleteMessage to the correct
-     * partition topic (not a hardcoded topic) and returns true on quorum ACKs.
-     * This test confirms delete now follows the same pub/sub path as put().
-     */
-    @Test
-    void delete_publishesToPartitionTopicAndAwaitsQuorum() throws Exception {
-        PubSubClient bus = new PubSubClient(new MemoryPubSub());
-        bus.start();
-
-        List<AckingFakeStorageNodeServer> deleteNodes = new ArrayList<>();
-        for (int i = 0; i < 9; i++) deleteNodes.add(new AckingFakeStorageNodeServer(bus));
-
-        List<InetSocketAddress> set = deleteNodes.stream()
-                .map(AckingFakeStorageNodeServer::address).toList();
-
-        CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
-        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
-
-        // Spy on all partition topics to capture the delete message.
-        for (int p = 0; p < 99; p++) {
-            String topic = CommitTopics.forPartition(p);
-            bus.sub(topic, (t, offset, bytes) -> {
-                Message msg = Message.deserializeMessage(bytes);
-                if (msg instanceof Message.DeleteMessage) {
-                    receivedTopics.add(t);
-                    receivedMessages.add(msg);
-                }
-            });
-        }
-
-        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
-
-        try {
-            // First put an object so there is something to delete.
-            byte[] data = randomBytes(1024);
-            assertTrue(w.put(UUID.randomUUID(), "b", "toDelete",
-                    data.length, new ByteArrayInputStream(data)));
-
-            // Now delete it via pub/sub.
-            UUID deleteId = UUID.randomUUID();
-            boolean ok = w.delete(deleteId, "b", "toDelete");
-            assertTrue(ok, "delete should succeed");
-
-            // Exactly one DeleteMessage must have been published.
-            assertEquals(1, receivedMessages.size(),
-                    "exactly one DeleteMessage should be published");
-            assertInstanceOf(Message.DeleteMessage.class, receivedMessages.get(0));
-
-            Message.DeleteMessage msg = (Message.DeleteMessage) receivedMessages.get(0);
-            assertEquals("b", msg.bucket());
-            assertEquals("toDelete", msg.key());
-            assertEquals(deleteId.toString(), msg.requestID());
-
-            // Must be on a partition topic, not the bucket topic.
-            assertTrue(receivedTopics.get(0).startsWith("partition-"),
-                    "delete should publish to a partition topic, got: " + receivedTopics.get(0));
-        } finally {
-            w.shutdown();
-            for (AckingFakeStorageNodeServer n : deleteNodes) n.close();
-        }
-    }
-
-    /**
-     * Verifies that multiple concurrent bucket operations (create + delete) do not
-     * cross-contaminate each other's quorum ACKs via requestId routing.
-     */
-    @Test
-    void concurrentBucketOps_allSucceed() throws Exception {
-        int concurrency = 4;
-        List<Thread> threads = new ArrayList<>();
-        List<Throwable> errors = new CopyOnWriteArrayList<>();
-
-        for (int i = 0; i < concurrency; i++) {
-            final String bucket = "concurrent-bucket-" + i;
-            threads.add(Thread.ofVirtual().start(() -> {
-                try {
-                    assertTrue(worker.createBucket(UUID.randomUUID(), bucket),
-                            "createBucket failed for " + bucket);
-                    assertTrue(worker.deleteBucket(UUID.randomUUID(), bucket),
-                            "deleteBucket failed for " + bucket);
-                } catch (Exception e) {
-                    errors.add(e);
-                }
-            }));
-        }
-
-        for (Thread t : threads) t.join(60_000);
-        assertTrue(errors.isEmpty(), "concurrent bucket ops produced errors: " + errors);
-    }
-
-    /**
-     * Verifies that multiple concurrent puts on different keys all complete
-     * successfully and their commit ACKs are correctly routed by requestId
-     * without cross-contamination.
-     */
     @Test
     void concurrentPuts_allSucceed() throws Exception {
         int concurrency = 5;
@@ -722,6 +413,221 @@ public class StorageWorkerApiTest {
     }
 
     // -------------------------------------------------------------------------
+    // Bucket operation tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    void createBucket_succeedsAndPublishesToBucketTopic() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
+
+        List<InetSocketAddress> set = bucketNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
+        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
+        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) -> {
+            receivedTopics.add(t);
+            receivedMessages.add(Message.deserializeMessage(bytes));
+        });
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
+        StorageWorker w = new StorageWorker(client, coordinator);
+
+        try {
+            UUID requestId = UUID.randomUUID();
+            assertTrue(w.createBucket(requestId, "my-bucket"), "createBucket should succeed");
+
+            assertEquals(1, receivedMessages.size(), "exactly one CreateBucketMessage should be published");
+            assertInstanceOf(Message.CreateBucketMessage.class, receivedMessages.get(0));
+            Message.CreateBucketMessage msg = (Message.CreateBucketMessage) receivedMessages.get(0);
+            assertEquals("my-bucket", msg.bucket());
+            assertEquals(requestId.toString(), msg.requestID());
+            assertEquals(CommitTopics.forBucket(), receivedTopics.get(0));
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
+        }
+    }
+
+    @Test
+    void deleteBucket_succeedsAndPublishesToBucketTopic() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
+
+        List<InetSocketAddress> set = bucketNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
+        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) ->
+                receivedMessages.add(Message.deserializeMessage(bytes)));
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
+        StorageWorker w = new StorageWorker(client, coordinator);
+
+        try {
+            UUID requestId = UUID.randomUUID();
+            assertTrue(w.deleteBucket(requestId, "my-bucket"), "deleteBucket should succeed");
+
+            assertEquals(1, receivedMessages.size(), "exactly one DeleteBucketMessage should be published");
+            assertInstanceOf(Message.DeleteBucketMessage.class, receivedMessages.get(0));
+            Message.DeleteBucketMessage msg = (Message.DeleteBucketMessage) receivedMessages.get(0);
+            assertEquals("my-bucket", msg.bucket());
+            assertEquals(requestId.toString(), msg.requestID());
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
+        }
+    }
+
+    @Test
+    void createBucket_failsWhenBelowQuorum() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
+
+        bucketNodes.get(0).setEnabled(false);
+        bucketNodes.get(1).setEnabled(false);
+        bucketNodes.get(2).setEnabled(false);
+
+        List<InetSocketAddress> set = bucketNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 3);
+        StorageWorker w = new StorageWorker(client, fastCoordinator);
+
+        try {
+            assertFalse(w.createBucket(UUID.randomUUID(), "no-quorum-bucket"),
+                    "createBucket should fail when only 6/9 nodes ACK");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
+        }
+    }
+
+    @Test
+    void bucketLifecycle_createPutDeleteObjectDeleteBucket() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> lifecycleNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) lifecycleNodes.add(new AckingFakeStorageNodeServer(bus));
+
+        List<InetSocketAddress> set = lifecycleNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
+        StorageWorker w = new StorageWorker(client, coordinator);
+
+        try {
+            assertTrue(w.createBucket(UUID.randomUUID(), "lifecycle-bucket"), "createBucket should succeed");
+
+            byte[] data = randomBytes(DATA_SIZE);
+            assertTrue(w.put(UUID.randomUUID(), "lifecycle-bucket", "obj1",
+                    data.length, new ByteArrayInputStream(data)), "put should succeed");
+
+            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
+                assertArrayEquals(data, in.readAllBytes(), "get should return original data");
+            }
+
+            assertTrue(w.delete(UUID.randomUUID(), "lifecycle-bucket", "obj1"), "delete should succeed");
+
+            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
+                assertNotEquals(data.length, in.readAllBytes().length,
+                        "data should not be retrievable after delete");
+            }
+
+            assertTrue(w.deleteBucket(UUID.randomUUID(), "lifecycle-bucket"), "deleteBucket should succeed");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : lifecycleNodes) n.close();
+        }
+    }
+
+    @Test
+    void delete_publishesToPartitionTopicAndAwaitsQuorum() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> deleteNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) deleteNodes.add(new AckingFakeStorageNodeServer(bus));
+
+        List<InetSocketAddress> set = deleteNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
+        CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
+        for (int p = 0; p < 99; p++) {
+            bus.sub(CommitTopics.forPartition(p), (t, offset, bytes) -> {
+                Message msg = Message.deserializeMessage(bytes);
+                if (msg instanceof Message.DeleteMessage) {
+                    receivedTopics.add(t);
+                    receivedMessages.add(msg);
+                }
+            });
+        }
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
+        StorageWorker w = new StorageWorker(client, coordinator);
+
+        try {
+            byte[] data = randomBytes(1024);
+            assertTrue(w.put(UUID.randomUUID(), "b", "toDelete", data.length, new ByteArrayInputStream(data)));
+
+            UUID deleteId = UUID.randomUUID();
+            assertTrue(w.delete(deleteId, "b", "toDelete"), "delete should succeed");
+
+            assertEquals(1, receivedMessages.size(), "exactly one DeleteMessage should be published");
+            Message.DeleteMessage msg = (Message.DeleteMessage) receivedMessages.get(0);
+            assertEquals("b", msg.bucket());
+            assertEquals("toDelete", msg.key());
+            assertEquals(deleteId.toString(), msg.requestID());
+            assertTrue(receivedTopics.get(0).startsWith("partition-"),
+                    "delete should publish to a partition topic, got: " + receivedTopics.get(0));
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : deleteNodes) n.close();
+        }
+    }
+
+    @Test
+    void concurrentBucketOps_allSucceed() throws Exception {
+        int concurrency = 4;
+        List<Thread> threads = new ArrayList<>();
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+
+        for (int i = 0; i < concurrency; i++) {
+            final String bucket = "concurrent-bucket-" + i;
+            threads.add(Thread.ofVirtual().start(() -> {
+                try {
+                    assertTrue(worker.createBucket(UUID.randomUUID(), bucket),
+                            "createBucket failed for " + bucket);
+                    assertTrue(worker.deleteBucket(UUID.randomUUID(), bucket),
+                            "deleteBucket failed for " + bucket);
+                } catch (Exception e) {
+                    errors.add(e);
+                }
+            }));
+        }
+
+        for (Thread t : threads) t.join(60_000);
+        assertTrue(errors.isEmpty(), "concurrent bucket ops produced errors: " + errors);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -729,6 +635,15 @@ public class StorageWorkerApiTest {
         byte[] b = new byte[size];
         new SecureRandom().nextBytes(b);
         return b;
+    }
+
+    private static MetadataClient createConfiguredClient(List<InetSocketAddress> set) {
+        MemoryFetcher fetcher = new MemoryFetcher();
+        MetadataClient client = new MetadataClient(fetcher);
+        client.start();
+        fetcher.update(buildErasureSetConfiguration(set, set, set));
+        fetcher.update(buildPartitionSpreadConfiguration());
+        return client;
     }
 
     private static ErasureSetConfiguration buildErasureSetConfiguration(
@@ -761,6 +676,9 @@ public class StorageWorkerApiTest {
     private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
         ErasureSet es = new ErasureSet();
         es.setNumber(number);
+        es.setN(9);
+        es.setK(6);
+        es.setWriteQuorum(7);
         es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();
             m.setIp(addr.getHostString());
