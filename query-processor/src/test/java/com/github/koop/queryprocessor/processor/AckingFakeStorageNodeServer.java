@@ -3,7 +3,6 @@ package com.github.koop.queryprocessor.processor;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
-import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.FakeStorageNodeServer;
 
 import java.net.InetSocketAddress;
@@ -13,18 +12,13 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.concurrent.atomic.AtomicInteger;
 
-
-// -------------------------------------------------------------------------
-// AckingFakeStorageNodeServer
-// -------------------------------------------------------------------------
-
 /**
  * Extends {@link FakeStorageNodeServer} with commit-protocol awareness.
  *
  * <p>On receiving a Kafka commit message for any partition topic, this node
  * simulates the SN behaviour by POSTing an ACK to the address embedded in
- * the {@link Message.FileCommitMessage}. This closes the loop of the two-phase
- * protocol in tests without needing a real Storage Node implementation.
+ * the commit message. This closes the loop of the two-phase protocol in tests
+ * without needing a real Storage Node implementation.
  *
  * <p>Two independent enable flags are exposed:
  * <ul>
@@ -45,20 +39,38 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
     AckingFakeStorageNodeServer(PubSubClient pubSubClient) {
         super();
         // Subscribe to all 99 partition topics so this node receives every
-        // commit message regardless of which partition the key maps to.
+        // object-level commit message regardless of which partition it maps to.
         for (int p = 0; p < 99; p++) {
+            final int partition = p;
             String topic = CommitTopics.forPartition(p);
             pubSubClient.sub(topic, (t, offset, bytes) -> {
                 if (!enabled) return;
                 Message msg = Message.deserializeMessage(bytes);
-                if (msg instanceof Message.FileCommitMessage fcm) {
-                    sendAck(fcm.requestID(), fcm.sender());
+                switch (msg) {
+                    case Message.FileCommitMessage m      -> sendAck(m.requestID(), m.sender());
+                    case Message.MultipartCommitMessage m -> sendAck(m.requestID(), m.sender());
+                    case Message.DeleteMessage m          -> {
+                        // Mirror real SN behaviour: remove shard data after tombstone,
+                        // then ACK so the QP knows this node processed the delete.
+                        deleteData(partition, m.bucket() + "/" + m.key());
+                        sendAck(m.requestID(), m.sender());
+                    }
+                    default -> {} // CreateBucket / DeleteBucket arrive on the bucket topic
                 }
             });
         }
+        // Subscribe to the global bucket topic for create/delete bucket messages.
+        pubSubClient.sub(CommitTopics.forBucket(), (t, offset, bytes) -> {
+            if (!enabled) return;
+            Message msg = Message.deserializeMessage(bytes);
+            switch (msg) {
+                case Message.CreateBucketMessage m -> sendAck(m.requestID(), m.sender());
+                case Message.DeleteBucketMessage m -> sendAck(m.requestID(), m.sender());
+                default -> {}
+            }
+        });
     }
 
-    // Override setEnabled so that disabling a node also prevents ACKs.
     @Override
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
@@ -68,10 +80,6 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
     /** Disables only the shard-upload endpoint; ACKs are still sent. */
     void setUploadEnabled(boolean uploadEnabled) {
         this.uploadEnabled = uploadEnabled;
-        // Reflect upload-only disabling on the parent's flag as well, since
-        // FakeStorageNodeServer uses a single flag for all endpoints.
-        // We override handlePut behaviour by controlling the parent flag here
-        // and restoring the overall enabled state.
         super.setEnabled(uploadEnabled);
     }
 
@@ -97,8 +105,6 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
             http.send(req, HttpResponse.BodyHandlers.discarding());
             acksSent.incrementAndGet();
         } catch (Exception e) {
-            // In tests a coordinator may have shut down before the last ACK;
-            // log and swallow so test teardown doesn't mask real failures.
             System.err.println("AckingFakeStorageNodeServer: ACK failed for "
                     + requestId + ": " + e.getMessage());
         }

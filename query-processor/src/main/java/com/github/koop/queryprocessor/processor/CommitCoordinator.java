@@ -163,6 +163,61 @@ public final class CommitCoordinator implements AutoCloseable {
         });
     }
 
+    /**
+     * Publishes a delete command and blocks until quorum.
+     *
+     * @param requestId the UUID for this delete operation.
+     * @param partition the partition number — used as the Kafka topic.
+     * @param bucket    object bucket.
+     * @param key       object key.
+     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     */
+    public boolean beginDelete(UUID requestId, int partition, String bucket, String key) {
+        return runCommit(requestId, () -> {
+            Message.DeleteMessage msg = new Message.DeleteMessage(
+                    bucket, key, requestId.toString(), ackAddress);
+            String topic = CommitTopics.forPartition(partition);
+            pubSubClient.pub(topic, Message.serializeMessage(msg));
+            logger.debug("Published DeleteMessage for requestId {} on topic {}", requestId, topic);
+        });
+    }
+
+    /**
+     * Publishes a create-bucket command to the global bucket topic and blocks until
+     * quorum. Because buckets span all erasure sets every node must acknowledge.
+     *
+     * @param requestId  the UUID for this operation.
+     * @param bucket     the bucket name to create.
+     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     */
+    public boolean beginCreateBucket(UUID requestId, String bucket) {
+        return runCommit(requestId, () -> {
+            Message.CreateBucketMessage msg = new Message.CreateBucketMessage(
+                    bucket, requestId.toString(), ackAddress);
+            String topic = CommitTopics.forBucket();
+            pubSubClient.pub(topic, Message.serializeMessage(msg));
+            logger.debug("Published CreateBucketMessage for requestId {} on topic {}", requestId, topic);
+        });
+    }
+
+    /**
+     * Publishes a delete-bucket command to the global bucket topic and blocks until
+     * quorum.
+     *
+     * @param requestId the UUID for this operation.
+     * @param bucket    the bucket name to delete.
+     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     */
+    public boolean beginDeleteBucket(UUID requestId, String bucket) {
+        return runCommit(requestId, () -> {
+            Message.DeleteBucketMessage msg = new Message.DeleteBucketMessage(
+                    bucket, requestId.toString(), ackAddress);
+            String topic = CommitTopics.forBucket();
+            pubSubClient.pub(topic, Message.serializeMessage(msg));
+            logger.debug("Published DeleteBucketMessage for requestId {} on topic {}", requestId, topic);
+        });
+    }
+
     @Override
     public void close() {
         ackServer.stop();

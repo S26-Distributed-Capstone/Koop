@@ -19,7 +19,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -70,7 +69,7 @@ public final class StorageWorker {
     // Overload that accepts a pre-built CommitCoordinator — used in tests that
     // share a PubSubClient bus between the coordinator and the fake SNs.
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2,
-            List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
+                         List<InetSocketAddress> set3, CommitCoordinator commitCoordinator) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -90,7 +89,7 @@ public final class StorageWorker {
     }
 
     public StorageWorker(List<InetSocketAddress> set1, List<InetSocketAddress> set2, List<InetSocketAddress> set3,
-            int ackPort) {
+                         int ackPort) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -296,71 +295,72 @@ public final class StorageWorker {
         return pis;
     }
 
-    public boolean delete(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null)
-            throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)
-            throw new IllegalArgumentException("bucket is null");
-        if (key == null)
-            throw new IllegalArgumentException("key is null");
+    /**
+     * Publishes a delete command via pub/sub and waits for a write quorum of SNs
+     * to acknowledge the tombstone before returning. The actual file on disk is
+     * cleaned up asynchronously by the SNs.
+     */
+    public boolean delete(UUID requestID, String bucket, String key) {
+        if (requestID == null) throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
+        if (key == null)       throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "/" + key;
+        String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
-        Optional<List<InetSocketAddress>> nodes = partition.isPresent()
-                ? r.getNodes(partition.getAsInt())
-                : Optional.empty();
-        if (partition.isEmpty() || nodes.isEmpty()) {
+        if (partition.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
-        int resolvedPartition = partition.getAsInt();
-        List<InetSocketAddress> resolvedNodes = nodes.get();
 
-        List<Callable<Boolean>> tasks = new LinkedList<>();
-        for (int i = 0; i < TOTAL; i++) {
-            final int index = i;
-            tasks.add(() -> {
-                try {
-                    InetSocketAddress node = resolvedNodes.get(index);
-                    URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
-                            node.getHostString(), node.getPort(), resolvedPartition, storageKey));
-
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(uri)
-                            .DELETE()
-                            .build();
-
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                    if (response.statusCode() != 200) {
-                        logger.trace("DELETE failed for node {}: HTTP {}", node, response.statusCode());
-                        return false;
-                    }
-                    return true;
-                } catch (Exception e) {
-                    logger.warn("Exception in delete task for node {}: {}", resolvedNodes.get(index), e.getMessage());
-                    return false;
-                }
-            });
+        boolean deleted = commitCoordinator.beginDelete(requestID, partition.getAsInt(), bucket, key);
+        if (!deleted) {
+            logger.error("Delete commit failed for requestId {} (quorum ACKs not received)", requestID);
         }
+        return deleted;
+    }
 
-        boolean success;
-        try {
-            success = executor.invokeAll(tasks).stream().allMatch(future -> {
-                try {
-                    return future.get();
-                } catch (Exception e) {
-                    logger.warn("Exception in delete task: {}", e.getMessage());
-                    return false;
-                }
-            });
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.warn("Delete operation interrupted");
-            return false;
+    /**
+     * Creates a bucket by publishing a {@link Message.CreateBucketMessage} to the
+     * global bucket topic and waiting for a write quorum of SNs to acknowledge.
+     *
+     * <p>Bucket creation is sequenced through Kafka so all nodes see it in order
+     * and record it in their RocksDB bucket table.
+     *
+     * @return {@code true} iff quorum of SNs ACKed within the timeout.
+     */
+    public boolean createBucket(UUID requestID, String bucket) {
+        if (requestID == null) throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
+
+        boolean created = commitCoordinator.beginCreateBucket(requestID, bucket);
+        if (!created) {
+            logger.error("CreateBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
+                    requestID, bucket);
         }
-        return success;
+        return created;
+    }
+
+    /**
+     * Deletes a bucket by publishing a {@link Message.DeleteBucketMessage} to the
+     * global bucket topic and waiting for a write quorum of SNs to acknowledge.
+     *
+     * <p>The bucket record is logically deleted (tombstoned in RocksDB). Objects
+     * inside the bucket are not immediately purged; they are cleaned up
+     * asynchronously by background compaction on each SN.
+     *
+     * @return {@code true} iff quorum of SNs ACKed within the timeout.
+     */
+    public boolean deleteBucket(UUID requestID, String bucket) {
+        if (requestID == null) throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
+
+        boolean deleted = commitCoordinator.beginDeleteBucket(requestID, bucket);
+        if (!deleted) {
+            logger.error("DeleteBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
+                    requestID, bucket);
+        }
+        return deleted;
     }
 
     /**
@@ -429,7 +429,7 @@ public final class StorageWorker {
             logger.info("ErasureRouting rebuilt");
         } else {
             logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
-                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                            + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
                     ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }
@@ -451,7 +451,7 @@ public final class StorageWorker {
     }
 
     private void streamReconstruct(int partition, String storageKey,
-            List<InetSocketAddress> nodes, OutputStream out) throws IOException {
+                                   List<InetSocketAddress> nodes, OutputStream out) throws IOException {
 
         InputStream[] ins = new InputStream[TOTAL];
         boolean[] present = new boolean[TOTAL];
