@@ -111,7 +111,6 @@ public class RealStorageNodesIT {
         es.setNumber(1);
         es.setN(9);
         es.setK(6);
-        es.setReadQuorum(6);
         es.setWriteQuorum(7);
         
         List<Machine> machines = new ArrayList<>();
