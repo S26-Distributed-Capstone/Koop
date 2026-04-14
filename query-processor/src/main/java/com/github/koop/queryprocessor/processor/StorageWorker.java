@@ -214,9 +214,10 @@ public final class StorageWorker {
     }
 
     /**
-     * Publishes a delete command via pub/sub and waits for a write quorum of SNs
-     * to acknowledge the tombstone before returning. The actual file on disk is
-     * cleaned up asynchronously by the SNs.
+     * Publishes a delete command via pub/sub and waits for a write quorum of
+     * {@code k + 1} SNs to acknowledge the tombstone. {@code k + 1} is the
+     * minimum number of nodes that guarantees the data can always be reconstructed
+     * from the remaining shards even if one node that acknowledged goes offline.
      */
     public boolean delete(UUID requestID, String bucket, String key) {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
@@ -226,12 +227,17 @@ public final class StorageWorker {
         String storageKey = toStorageKey(bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
-        if (partition.isEmpty()) {
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
 
-        boolean deleted = commitCoordinator.beginDelete(requestID, partition.getAsInt(), bucket, key);
+        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        boolean deleted = commitCoordinator.beginDelete(
+                requestID, partition.getAsInt(), bucket, key, writeQuorum);
         if (!deleted) {
             logger.error("Delete commit failed for requestId {} (quorum ACKs not received)", requestID);
         }
@@ -239,19 +245,29 @@ public final class StorageWorker {
     }
 
     /**
-     * Creates a bucket by publishing a {@link Message.CreateBucketMessage} to the
-     * global bucket topic and waiting for a write quorum of SNs to acknowledge.
+     * Creates a bucket by hashing the bucket name to a partition, then publishing
+     * a {@link Message.CreateBucketMessage} to that partition's Kafka topic and
+     * waiting for {@code k + 1} SNs to acknowledge.
      *
-     * <p>Bucket creation is sequenced through Kafka so all nodes see it in order
-     * and record it in their RocksDB bucket table.
-     *
-     * @return {@code true} iff quorum of SNs ACKed within the timeout.
+     * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
      */
     public boolean createBucket(UUID requestID, String bucket) {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
 
-        boolean created = commitCoordinator.beginCreateBucket(requestID, bucket);
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(bucket);
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting createBucket", bucket);
+            return false;
+        }
+
+        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        boolean created = commitCoordinator.beginCreateBucket(
+                requestID, partition.getAsInt(), bucket, writeQuorum);
         if (!created) {
             logger.error("CreateBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
                     requestID, bucket);
@@ -260,20 +276,33 @@ public final class StorageWorker {
     }
 
     /**
-     * Deletes a bucket by publishing a {@link Message.DeleteBucketMessage} to the
-     * global bucket topic and waiting for a write quorum of SNs to acknowledge.
+     * Deletes a bucket by hashing the bucket name to a partition, then publishing
+     * a {@link Message.DeleteBucketMessage} to that partition's Kafka topic and
+     * waiting for {@code k + 1} SNs to acknowledge.
      *
      * <p>The bucket record is logically deleted (tombstoned in RocksDB). Objects
      * inside the bucket are not immediately purged; they are cleaned up
      * asynchronously by background compaction on each SN.
      *
-     * @return {@code true} iff quorum of SNs ACKed within the timeout.
+     * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
      */
     public boolean deleteBucket(UUID requestID, String bucket) {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
 
-        boolean deleted = commitCoordinator.beginDeleteBucket(requestID, bucket);
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(bucket);
+        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
+                : Optional.empty();
+        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting deleteBucket", bucket);
+            return false;
+        }
+
+        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        boolean deleted = commitCoordinator.beginDeleteBucket(
+                requestID, partition.getAsInt(), bucket, writeQuorum);
         if (!deleted) {
             logger.error("DeleteBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
                     requestID, bucket);

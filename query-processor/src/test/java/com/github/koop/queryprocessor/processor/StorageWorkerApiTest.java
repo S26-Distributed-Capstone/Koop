@@ -310,7 +310,7 @@ public class StorageWorkerApiTest {
             boolean ok = quorumWorker.put(UUID.randomUUID(), "b", "quorumFail",
                     data.length, new ByteArrayInputStream(data));
             assertFalse(ok,
-                    "put should fail when only 6/9 nodes ACK the commit (quorum=7)");
+                    "put should fail when only 6/9 nodes ACK the commit (writeQuorum=k+1=7)");
         } finally {
             quorumWorker.shutdown();
             for (AckingFakeStorageNodeServer n : quorumNodes) n.close();
@@ -429,10 +429,16 @@ public class StorageWorkerApiTest {
 
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
-        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) -> {
-            receivedTopics.add(t);
-            receivedMessages.add(Message.deserializeMessage(bytes));
-        });
+        // Bucket messages now arrive on the partition topic derived from the bucket name.
+        for (int p = 0; p < 99; p++) {
+            bus.sub(CommitTopics.forPartition(p), (t, offset, bytes) -> {
+                Message msg = Message.deserializeMessage(bytes);
+                if (msg instanceof Message.CreateBucketMessage) {
+                    receivedTopics.add(t);
+                    receivedMessages.add(msg);
+                }
+            });
+        }
 
         MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
@@ -447,7 +453,9 @@ public class StorageWorkerApiTest {
             Message.CreateBucketMessage msg = (Message.CreateBucketMessage) receivedMessages.get(0);
             assertEquals("my-bucket", msg.bucket());
             assertEquals(requestId.toString(), msg.requestID());
-            assertEquals(CommitTopics.forBucket(), receivedTopics.get(0));
+            assertEquals(CommitTopics.forPartition(
+                            Integer.parseInt(receivedTopics.get(0).substring("partition-".length()))),
+                    receivedTopics.get(0));
         } finally {
             w.shutdown();
             for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
@@ -466,8 +474,14 @@ public class StorageWorkerApiTest {
                 .map(AckingFakeStorageNodeServer::address).toList();
 
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
-        bus.sub(CommitTopics.forBucket(), (t, offset, bytes) ->
-                receivedMessages.add(Message.deserializeMessage(bytes)));
+        for (int p = 0; p < 99; p++) {
+            bus.sub(CommitTopics.forPartition(p), (t, offset, bytes) -> {
+                Message msg = Message.deserializeMessage(bytes);
+                if (msg instanceof Message.DeleteBucketMessage) {
+                    receivedMessages.add(msg);
+                }
+            });
+        }
 
         MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);

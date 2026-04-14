@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </li>
  * <li>Each SN that successfully commits POSTs to {@code /ack/{requestId}} on
  * the Javalin HTTP server embedded in this coordinator.</li>
- * <li>{@link #beginCommit} blocks until {@value #QUORUM} ACKs arrive or the
+ * <li>{@link #beginCommit} blocks until the requested write quorum of ACKs arrive or the
  * timeout elapses, then returns {@code true}/{@code false}.</li>
  * </ol>
  *
@@ -53,12 +53,6 @@ public final class CommitCoordinator implements AutoCloseable {
     // -----------------------------------------------------------------------
     // Constants
     // -----------------------------------------------------------------------
-
-    /** Number of SN ACKs required before reporting success to the caller. */
-    public static final int QUORUM = 7;
-
-    /** Total number of storage nodes in one erasure set. */
-    public static final int TOTAL_NODES = 9;
 
     /**
      * How long (in seconds) to wait for quorum before declaring failure.
@@ -172,16 +166,17 @@ public final class CommitCoordinator implements AutoCloseable {
     }
 
     /**
-     * Publishes a delete command and blocks until quorum.
+     * Publishes a delete command and blocks until the requested write quorum is reached.
      *
-     * @param requestId the UUID for this delete operation.
-     * @param partition the partition number — used as the Kafka topic.
-     * @param bucket    object bucket.
-     * @param key       object key.
-     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     * @param requestId   the UUID for this delete operation.
+     * @param partition   the partition number — used as the Kafka topic.
+     * @param bucket      object bucket.
+     * @param key         object key.
+     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginDelete(UUID requestId, int partition, String bucket, String key) {
-        return runCommit(requestId, () -> {
+    public boolean beginDelete(UUID requestId, int partition, String bucket, String key, int writeQuorum) {
+        return runCommit(requestId, writeQuorum, () -> {
             Message.DeleteMessage msg = new Message.DeleteMessage(
                     bucket, key, requestId.toString(), ackAddress);
             String topic = CommitTopics.forPartition(partition);
@@ -191,36 +186,41 @@ public final class CommitCoordinator implements AutoCloseable {
     }
 
     /**
-     * Publishes a create-bucket command to the global bucket topic and blocks until
-     * quorum. Because buckets span all erasure sets every node must acknowledge.
+     * Publishes a create-bucket command to the partition's Kafka topic and blocks
+     * until the requested write quorum is reached. The partition is derived by
+     * hashing the bucket name, consistent with how object keys are routed.
      *
-     * @param requestId  the UUID for this operation.
-     * @param bucket     the bucket name to create.
-     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     * @param requestId   the UUID for this operation.
+     * @param partition   the partition number derived from the bucket name.
+     * @param bucket      the bucket name to create.
+     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginCreateBucket(UUID requestId, String bucket) {
-        return runCommit(requestId, () -> {
+    public boolean beginCreateBucket(UUID requestId, int partition, String bucket, int writeQuorum) {
+        return runCommit(requestId, writeQuorum, () -> {
             Message.CreateBucketMessage msg = new Message.CreateBucketMessage(
                     bucket, requestId.toString(), ackAddress);
-            String topic = CommitTopics.forBucket();
+            String topic = CommitTopics.forPartition(partition);
             pubSubClient.pub(topic, Message.serializeMessage(msg));
             logger.debug("Published CreateBucketMessage for requestId {} on topic {}", requestId, topic);
         });
     }
 
     /**
-     * Publishes a delete-bucket command to the global bucket topic and blocks until
-     * quorum.
+     * Publishes a delete-bucket command to the partition's Kafka topic and blocks
+     * until the requested write quorum is reached.
      *
-     * @param requestId the UUID for this operation.
-     * @param bucket    the bucket name to delete.
-     * @return {@code true} iff at least {@value #QUORUM} SNs ACKed within the timeout.
+     * @param requestId   the UUID for this operation.
+     * @param partition   the partition number derived from the bucket name.
+     * @param bucket      the bucket name to delete.
+     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginDeleteBucket(UUID requestId, String bucket) {
-        return runCommit(requestId, () -> {
+    public boolean beginDeleteBucket(UUID requestId, int partition, String bucket, int writeQuorum) {
+        return runCommit(requestId, writeQuorum, () -> {
             Message.DeleteBucketMessage msg = new Message.DeleteBucketMessage(
                     bucket, requestId.toString(), ackAddress);
-            String topic = CommitTopics.forBucket();
+            String topic = CommitTopics.forPartition(partition);
             pubSubClient.pub(topic, Message.serializeMessage(msg));
             logger.debug("Published DeleteBucketMessage for requestId {} on topic {}", requestId, topic);
         });
@@ -256,11 +256,6 @@ public final class CommitCoordinator implements AutoCloseable {
         logger.trace("ACK {} received for requestId {}", acks, requestId);
         commit.latch.countDown();
         ctx.status(200);
-    }
-
-    /** Convenience overload that uses {@value #QUORUM} as the write quorum. */
-    private boolean runCommit(UUID requestId, ThrowingRunnable publishAction) {
-        return runCommit(requestId, QUORUM, publishAction);
     }
 
     /**
@@ -329,7 +324,7 @@ public final class CommitCoordinator implements AutoCloseable {
     /** Mutable state for one in-flight commit operation. */
     private static final class PendingCommit {
         final CountDownLatch latch;
-        /** Total ACKs received so far — may exceed QUORUM (informational only). */
+        /** Total ACKs received so far — may exceed writeQuorum (informational only). */
         final AtomicInteger ackCount = new AtomicInteger(0);
 
         PendingCommit(int quorum) {

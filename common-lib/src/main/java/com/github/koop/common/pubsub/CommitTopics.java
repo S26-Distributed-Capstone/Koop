@@ -30,18 +30,4 @@ public final class CommitTopics {
     public static String forPartition(int partition) {
         return "partition-" + partition;
     }
-
-    /**
-     * Returns the Kafka topic name for bucket-level operations
-     * (create bucket, delete bucket).
-     *
-     * <p>Bucket operations are not tied to a single partition — a bucket spans
-     * all erasure sets — so they are published to a dedicated global topic that
-     * every storage node subscribes to regardless of which partitions it owns.
-     *
-     * @return the shared bucket-operations topic name {@code "buckets"}
-     */
-    public static String forBucket() {
-        return "buckets";
-    }
 }

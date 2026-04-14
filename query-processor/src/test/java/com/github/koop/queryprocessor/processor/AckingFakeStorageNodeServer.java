@@ -55,20 +55,12 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
                         deleteData(partition, m.bucket() + "/" + m.key());
                         sendAck(m.requestID(), m.sender());
                     }
-                    default -> {} // CreateBucket / DeleteBucket arrive on the bucket topic
+                    case Message.CreateBucketMessage m -> sendAck(m.requestID(), m.sender());
+                    case Message.DeleteBucketMessage m -> sendAck(m.requestID(), m.sender());
+                    default -> {}
                 }
             });
         }
-        // Subscribe to the global bucket topic for create/delete bucket messages.
-        pubSubClient.sub(CommitTopics.forBucket(), (t, offset, bytes) -> {
-            if (!enabled) return;
-            Message msg = Message.deserializeMessage(bytes);
-            switch (msg) {
-                case Message.CreateBucketMessage m -> sendAck(m.requestID(), m.sender());
-                case Message.DeleteBucketMessage m -> sendAck(m.requestID(), m.sender());
-                default -> {}
-            }
-        });
     }
 
     @Override
