@@ -11,6 +11,7 @@ import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
+import com.google.protobuf.ByteString.Output;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -19,10 +20,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -176,13 +179,10 @@ public final class StorageWorker {
         return committed;
     }
 
-    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null)
-            throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)
-            throw new IllegalArgumentException("bucket is null");
-        if (key == null)
-            throw new IllegalArgumentException("key is null");
+public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+        if (requestID == null) throw new IllegalArgumentException("requestID is null");
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (key == null) throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
@@ -198,7 +198,7 @@ public final class StorageWorker {
 
         int resolvedPartition = partition.getAsInt();
         ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
-        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
+        var resolvedNodes = es.getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         PipedOutputStream pos = new PipedOutputStream();
@@ -206,18 +206,148 @@ public final class StorageWorker {
 
         executor.execute(() -> {
             try (pos) {
-                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
+                processGetConsensus(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
             } catch (Exception e) {
                 logger.error("Failed to reconstruct stream for key {}", storageKey, e);
-                try {
-                    pos.close();
-                } catch (IOException ignored) {
-                }
             }
         });
 
         return pis;
     }
+
+    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
+        // Initial fetch: gets data + metadata in one pass without specifying a version
+        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
+
+        if (responses.isEmpty()) {
+            throw new IOException("No reachable nodes for key " + storageKey);
+        }
+
+        // Determine highest version reported
+        long maxVersion = responses.stream().mapToLong(ShardResponse::version).max().orElse(-1);
+        List<ShardResponse> maxVersionResponses = responses.stream().filter(r -> r.version() == maxVersion).toList();
+        ShardResponse representative = maxVersionResponses.get(0);
+
+        if ("TOMBSTONE".equalsIgnoreCase(representative.type())) {
+            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
+            return; // Returns empty stream
+        }
+
+        if ("MULTIPART".equalsIgnoreCase(representative.type())) {
+            logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion, storageKey);
+            handleMultipartGet(representative.chunks(), k, out);
+            return;
+        }
+
+        // Type is BLOB
+        if (maxVersionResponses.size() >= k) {
+            reconstructFromResponses(maxVersionResponses, nodes, k, n, out);
+            return;
+        } else {
+            logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.", maxVersion, storageKey, maxVersionResponses.size(), k);
+            
+            List<Long> availableVersions = responses.stream()
+                    .map(ShardResponse::version)
+                    .distinct()
+                    .sorted(Comparator.reverseOrder())
+                    .toList();
+            long oldVersion = availableVersions.get(1); // second-highest version
+            List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
+            List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
+            if (validOldResponses.size() >= k) {
+                logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion, validOldResponses.size(), k);
+                reconstructFromResponses(validOldResponses, nodes, k, n, out);
+                return;
+            }
+            throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
+
+        }
+    }
+
+    private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
+        for (String chunkId : chunks) {
+            var partition = getRouting().getPartition(chunkId).orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
+            List<InetSocketAddress> nodes = getNodesForPartition(partition);
+            processGetConsensus(partition, chunkId, nodes, k, nodes.size(), out);
+        }
+    }
+    
+
+    private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes, OptionalLong targetVersion) {
+        List<Callable<ShardResponse>> tasks = new ArrayList<>();
+        
+        for (int i = 0; i < nodes.size(); i++) {
+            final int index = i;
+            tasks.add(() -> {
+                InetSocketAddress node = nodes.get(index);
+                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(), partition, storageKey);
+                if (targetVersion.isPresent()) {
+                    uriStr += "?version=" + targetVersion.getAsLong();
+                }
+
+                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+                HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+                if (response.statusCode() == 200) {
+                    long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
+                    String type = response.headers().firstValue("X-Koop-Type").orElse("BLOB");
+                    List<String> chunks = new ArrayList<>();
+                    if ("MULTIPART".equalsIgnoreCase(type)) {
+                        byte[] payload = response.body().readAllBytes();
+                        String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
+                        // Parse simple JSON array: ["chunk1","chunk2"]
+                        if (json.startsWith("[") && json.endsWith("]")) {
+                            String content = json.substring(1, json.length() - 1);
+                            if (!content.isEmpty()) {
+                                for (String token : content.split(",")) {
+                                    chunks.add(token.trim().replace("\"", ""));
+                                }
+                            }
+                        }
+                    }
+                    
+                    return new ShardResponse(index, version, type, chunks, response.body());
+                }
+                return null;
+            });
+        }
+
+        try {
+            return executor.invokeAll(tasks).stream()
+                    .map(future -> {
+                        try { return future.get(); } 
+                        catch (Exception e) { return null; }
+                    })
+                    .filter(res -> res != null)
+                    .toList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        }
+    }
+
+    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
+        InputStream[] ins = new InputStream[n];
+        boolean[] present = new boolean[n];
+
+        for (ShardResponse res : payloadResponses) {
+            if (res.nodeIndex() < n) {
+                ins[res.nodeIndex()] = res.payload();
+                present[res.nodeIndex()] = true;
+            }
+        }
+
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
+            byte[] buf = new byte[64 * 1024];
+            int bytesRead;
+            while ((bytesRead = reconstructed.read(buf)) != -1) {
+                out.write(buf, 0, bytesRead);
+            }
+            out.flush();
+        }
+    }
+
+    private record ShardResponse(int nodeIndex, long version, String type, List<String> chunks, InputStream payload) {}
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null)
@@ -366,6 +496,18 @@ public final class StorageWorker {
 
     private static String toStorageKey(String bucket, String key) {
         return bucket + "/" + key;
+    }
+
+    private List<InetSocketAddress> getNodesForPartition(int partition) {
+        ErasureRouting r = getRouting();
+        Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
+        if (esOpt.isEmpty()) {
+            logger.error("No erasure set found for partition {}", partition);
+            return List.of();
+        }
+        return esOpt.get().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort()))
+                .toList();
     }
 
     private void streamReconstruct(int partition, String storageKey,
