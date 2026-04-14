@@ -453,7 +453,6 @@ public class StorageWorkerApiTest {
         es.setNumber(number);
         es.setN(9);
         es.setK(6);
-        es.setReadQuorum(6);
         es.setWriteQuorum(7);
         es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();

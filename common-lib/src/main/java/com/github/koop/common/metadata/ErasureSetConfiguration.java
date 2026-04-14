@@ -19,7 +19,6 @@ public class ErasureSetConfiguration {
         private int number;
         private int n;
         private int k;
-        private int readQuorum;
         private int writeQuorum;
         private List<Machine> machines;
 
@@ -45,14 +44,6 @@ public class ErasureSetConfiguration {
 
         public void setK(int k) {
             this.k = k;
-        }
-
-        public int getReadQuorum() {
-            return readQuorum;
-        }
-
-        public void setReadQuorum(int readQuorum) {
-            this.readQuorum = readQuorum;
         }
 
         public int getWriteQuorum() {

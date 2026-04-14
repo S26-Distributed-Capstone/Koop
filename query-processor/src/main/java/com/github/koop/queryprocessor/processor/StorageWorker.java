@@ -206,7 +206,7 @@ public final class StorageWorker {
 
         executor.execute(() -> {
             try (pos) {
-                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), es.getReadQuorum(), pos);
+                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
             } catch (Exception e) {
                 logger.error("Failed to reconstruct stream for key {}", storageKey, e);
                 try {
@@ -369,7 +369,7 @@ public final class StorageWorker {
     }
 
     private void streamReconstruct(int partition, String storageKey,
-            List<InetSocketAddress> nodes, int k, int n, int readQuorum, OutputStream out) throws IOException {
+            List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
 
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
@@ -398,8 +398,8 @@ public final class StorageWorker {
         for (boolean b : present)
             if (b)
                 count++;
-        if (count < readQuorum)
-            throw new IOException("lost too many shards; need " + readQuorum + ", got " + count);
+        if (count < k)
+            throw new IOException("lost too many shards; need " + k + ", got " + count);
 
         try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
             byte[] buf = new byte[64 * 1024];
