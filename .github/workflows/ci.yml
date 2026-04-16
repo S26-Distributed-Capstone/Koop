@@ -25,25 +25,6 @@ jobs:
           distribution: 'temurin' # Adoptium's Temurin is a solid standard
           cache: maven # Automatically caches ~/.m2 dependencies to speed up future runs
 
-      # Step 3: Check the system's file descriptor and resource limits before we start
-      - name: Check System Limits
-        run: ulimit -a
-
-      # Step 4: Run the tests and capture the exact exit code manually
+      # 3. Compile, package, and run ALL tests (Unit + Integration)
       - name: Run Maven Verify
-        run: |
-          set +e # Prevent the shell from exiting immediately if the JVM crashes
-          mvn clean verify -DargLine="-Xmx1g"
-          EXIT_CODE=$?
-          echo "=========================================="
-          echo "MAVEN EXITED WITH CODE: $EXIT_CODE"
-          echo "=========================================="
-          if [ $EXIT_CODE -ne 0 ]; then exit $EXIT_CODE; fi
-
-      # Step 5: Upload the fatal crash logs if RocksDB causes a Segmentation Fault
-      - name: Upload Native JVM Crash Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jvm-fatal-crash-logs
-          path: hs_err_pid*.log
+        run: mvn clean verify
