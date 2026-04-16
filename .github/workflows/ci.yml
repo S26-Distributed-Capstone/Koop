@@ -10,7 +10,7 @@ on:
 jobs:
   build-and-test:
     name: Build and Run Unit Tests
-    runs-on: ubuntu-latest # The type of runner that the job will execute on (7GB RAM limit)
+    runs-on: ubuntu-latest # The type of runner that the job will execute on
 
     steps:
       # Step 1: Check out the repository code onto the runner
@@ -25,20 +25,25 @@ jobs:
           distribution: 'temurin' # Adoptium's Temurin is a solid standard
           cache: maven # Automatically caches ~/.m2 dependencies to speed up future runs
 
-      # 3. Compile, package, and run ALL tests (Unit + Integration)
-      # Added -DargLine="-Xmx1g" to force the test runner's JVM to garbage collect more frequently
+      # Step 3: Check the system's file descriptor and resource limits before we start
+      - name: Check System Limits
+        run: ulimit -a
+
+      # Step 4: Run the tests and capture the exact exit code manually
       - name: Run Maven Verify
-        run: mvn clean verify -DargLine="-Xmx1g"
+        run: |
+          set +e # Prevent the shell from exiting immediately if the JVM crashes
+          mvn clean verify -DargLine="-Xmx1g"
+          EXIT_CODE=$?
+          echo "=========================================="
+          echo "MAVEN EXITED WITH CODE: $EXIT_CODE"
+          echo "=========================================="
+          if [ $EXIT_CODE -ne 0 ]; then exit $EXIT_CODE; fi
 
-      # 4. Diagnostic: Check the kernel logs for the exact moment the process is killed
-      - name: Check OS logs for OOMKiller
-        if: always() # Runs even if the Maven step crashes
-        run: sudo dmesg -T | grep -i -E "oom|out of memory|killed process"
-
-      # 5. Diagnostic: Upload crash dumps if the Failsafe plugin detects a killed JVM
-      - name: Upload Maven Crash Dumps
+      # Step 5: Upload the fatal crash logs if RocksDB causes a Segmentation Fault
+      - name: Upload Native JVM Crash Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: failsafe-crash-dumps
-          path: target/failsafe-reports/*.dump*
+          name: jvm-fatal-crash-logs
+          path: hs_err_pid*.log
