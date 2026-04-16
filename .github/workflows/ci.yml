@@ -10,7 +10,7 @@ on:
 jobs:
   build-and-test:
     name: Build and Run Unit Tests
-    runs-on: ubuntu-latest # The type of runner that the job will execute on
+    runs-on: ubuntu-latest # The type of runner that the job will execute on (7GB RAM limit)
 
     steps:
       # Step 1: Check out the repository code onto the runner
@@ -26,5 +26,19 @@ jobs:
           cache: maven # Automatically caches ~/.m2 dependencies to speed up future runs
 
       # 3. Compile, package, and run ALL tests (Unit + Integration)
+      # Added -DargLine="-Xmx1g" to force the test runner's JVM to garbage collect more frequently
       - name: Run Maven Verify
-        run: mvn clean verify
+        run: mvn clean verify -DargLine="-Xmx1g"
+
+      # 4. Diagnostic: Check the kernel logs for the exact moment the process is killed
+      - name: Check OS logs for OOMKiller
+        if: always() # Runs even if the Maven step crashes
+        run: sudo dmesg -T | grep -i -E "oom|out of memory|killed process"
+
+      # 5. Diagnostic: Upload crash dumps if the Failsafe plugin detects a killed JVM
+      - name: Upload Maven Crash Dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failsafe-crash-dumps
+          path: target/failsafe-reports/*.dump*
