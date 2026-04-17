@@ -64,7 +64,7 @@ public final class CommitCoordinator implements AutoCloseable {
      * How long (in seconds) to wait for quorum before declaring failure.
      * SNs that missed the data stream need time to reconstruct from peers.
      */
-    private static final int ACK_TIMEOUT_SECONDS = 30;
+    private static final int ACK_TIMEOUT_SECONDS = 60;
 
     private static final Logger logger = LogManager.getLogger(CommitCoordinator.class);
 
