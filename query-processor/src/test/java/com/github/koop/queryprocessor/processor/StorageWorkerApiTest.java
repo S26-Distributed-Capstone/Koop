@@ -18,17 +18,12 @@ import org.junit.jupiter.api.*;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -62,17 +57,17 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
-        worker = new StorageWorker(set, set, set, coordinator);
-
-        // Build a separate MetadataClient-backed worker for the live-update test,
-        // reusing the same shared bus.
+        // Build a MetadataClient-backed worker
         memoryFetcher = new MemoryFetcher();
         MetadataClient metadataClient = new MetadataClient(memoryFetcher);
-        liveWorker = new StorageWorker(metadataClient,
-                new CommitCoordinator(sharedPubSub, 0));
+        metadataClient.start();
         memoryFetcher.update(buildErasureSetConfiguration(set, set, set));
         memoryFetcher.update(buildPartitionSpreadConfiguration());
+
+        CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
+        worker = new StorageWorker(metadataClient, coordinator);
+
+        liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0));
     }
 
     @BeforeEach
@@ -194,13 +189,9 @@ public class StorageWorkerApiTest {
             List<InetSocketAddress> set = prodNodes.stream()
                     .map(AckingFakeStorageNodeServer::address).toList();
 
-            MemoryFetcher fetcher = new MemoryFetcher();
-            MetadataClient client = new MetadataClient(fetcher);
-            client.start();
+            MetadataClient client = createConfiguredClient(set);
             CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker prodWorker = new StorageWorker(client, coordinator);
-            fetcher.update(buildErasureSetConfiguration(set, set, set));
-            fetcher.update(buildPartitionSpreadConfiguration());
 
             byte[] data = randomBytes(DATA_SIZE);
 
@@ -231,13 +222,6 @@ public class StorageWorkerApiTest {
     // New: commit-protocol tests
     // -------------------------------------------------------------------------
 
-    /**
-     * Verifies that the commit message is published to the partition-specific
-     * topic (e.g. "partition-5"), not a fixed topic like "storage-commits".
-     *
-     * We subscribe to the topic we expect, do a PUT, and assert we received
-     * a well-formed FileCommitMessage on exactly that topic.
-     */
     @Test
     void commitPublishedToPartitionTopic() throws Exception {
         PubSubClient spy = new PubSubClient(new MemoryPubSub());
@@ -249,11 +233,9 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = spyNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Capture every message received on every partition topic.
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
 
-        // Subscribe to all 99 partition topics.
         for (int p = 0; p < 99; p++) {
             String topic = CommitTopics.forPartition(p);
             spy.sub(topic, (t, offset, bytes) -> {
@@ -262,8 +244,9 @@ public class StorageWorkerApiTest {
             });
         }
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(spy, 0);
-        StorageWorker spyWorker = new StorageWorker(set, set, set, coordinator);
+        StorageWorker spyWorker = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -272,24 +255,19 @@ public class StorageWorkerApiTest {
                     data.length, new ByteArrayInputStream(data));
             assertTrue(ok, "put should succeed");
 
-            // Exactly one commit message must have been published.
             assertEquals(1, receivedMessages.size(),
                     "expected exactly one commit message");
 
-            // It must be a FileCommitMessage with matching fields.
             assertInstanceOf(FileCommitMessage.class, receivedMessages.get(0));
             FileCommitMessage msg = (FileCommitMessage) receivedMessages.get(0);
             assertEquals("bucket", msg.bucket());
             assertEquals("topicTest", msg.key());
             assertEquals(requestId.toString(), msg.requestID());
 
-            // The topic must be "partition-N" for the actual partition used.
             String publishedTopic = receivedTopics.get(0);
             assertTrue(publishedTopic.startsWith("partition-"),
                     "topic should be partition-based, got: " + publishedTopic);
 
-            // Cross-check: the topic the coordinator published on matches what
-            // topicFor() would produce for the resolved partition number.
             int partitionNum = Integer.parseInt(publishedTopic.substring("partition-".length()));
             assertEquals(CommitTopics.forPartition(partitionNum), publishedTopic);
         } finally {
@@ -298,14 +276,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that put() returns false if fewer than QUORUM SNs ACK the commit
-     * (simulated by disabling 3 nodes so they never POST their ACKs, leaving
-     * only 6 ACKs — one below the quorum of 7).
-     *
-     * Because the real ACK timeout is long, we use a custom coordinator with a
-     * short timeout to keep the test fast.
-     */
     @Test
     void commitPhase_failsWhenBelowQuorum() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -317,15 +287,13 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = quorumNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Disable 3 nodes — they receive the shard upload but will not ACK
-        // the commit (their ACK logic is also disabled).
         quorumNodes.get(0).setEnabled(false);
         quorumNodes.get(1).setEnabled(false);
         quorumNodes.get(2).setEnabled(false);
 
-        // Use a short-timeout coordinator so the test doesn't wait 30 s.
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 3);
-        StorageWorker quorumWorker = new StorageWorker(set, set, set, fastCoordinator);
+        StorageWorker quorumWorker = new StorageWorker(client, fastCoordinator);
 
         try {
             byte[] data = randomBytes(1024);
@@ -339,11 +307,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that put() succeeds even when 2 nodes are down during the upload
-     * phase (7 shards uploaded successfully, meeting QUORUM), and those 2 missing
-     * nodes still ACK via the commit path (simulating reconstruction from peers).
-     */
     @Test
     void commitPhase_succeedsWithTwoUploadFailuresThatLaterAck() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -355,13 +318,12 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes2.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // 2 nodes reject the shard upload but will still ACK the commit
-        // (they reconstruct from peers after seeing the Kafka message).
         nodes2.get(7).setUploadEnabled(false);
         nodes2.get(8).setUploadEnabled(false);
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             byte[] data = randomBytes(DATA_SIZE);
@@ -370,7 +332,6 @@ public class StorageWorkerApiTest {
             assertTrue(ok,
                     "put should succeed: 7 shards uploaded, all 9 nodes ACK after commit");
 
-            // Data must still be fully recoverable (7 shards is enough).
             try (InputStream in = w.get(UUID.randomUUID(), "b", "partialUpload")) {
                 assertArrayEquals(data, in.readAllBytes());
             }
@@ -380,10 +341,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies the ACK counter: after a successful put, every node that was
-     * enabled must have sent exactly one ACK back to the coordinator.
-     */
     @Test
     void commitPhase_eachEnabledNodeAcksExactlyOnce() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -395,8 +352,9 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = ackNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
+        MetadataClient client = createConfiguredClient(set);
         CommitCoordinator coordinator = new CommitCoordinator(bus, 0);
-        StorageWorker w = new StorageWorker(set, set, set, coordinator);
+        StorageWorker w = new StorageWorker(client, coordinator);
 
         try {
             UUID id = UUID.randomUUID();
@@ -413,11 +371,6 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Verifies that multiple concurrent puts on different keys all complete
-     * successfully and their commit ACKs are correctly routed by requestId
-     * without cross-contamination.
-     */
     @Test
     void concurrentPuts_allSucceed() throws Exception {
         int concurrency = 5;
@@ -459,6 +412,15 @@ public class StorageWorkerApiTest {
         return b;
     }
 
+    private static MetadataClient createConfiguredClient(List<InetSocketAddress> set) {
+        MemoryFetcher fetcher = new MemoryFetcher();
+        MetadataClient client = new MetadataClient(fetcher);
+        client.start();
+        fetcher.update(buildErasureSetConfiguration(set, set, set));
+        fetcher.update(buildPartitionSpreadConfiguration());
+        return client;
+    }
+
     private static ErasureSetConfiguration buildErasureSetConfiguration(
             List<InetSocketAddress> set1,
             List<InetSocketAddress> set2,
@@ -489,6 +451,9 @@ public class StorageWorkerApiTest {
     private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
         ErasureSet es = new ErasureSet();
         es.setNumber(number);
+        es.setN(9);
+        es.setK(6);
+        es.setWriteQuorum(7);
         es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();
             m.setIp(addr.getHostString());

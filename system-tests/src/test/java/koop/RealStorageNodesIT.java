@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealStorageNodesIT {
 
     private static final int TOTAL_NODES = 9;
-    private static final int DATA_SIZE = 5 * 1024 * 1024; // 15MB
+    private static final int DATA_SIZE = 2 * 1024 * 1024; // 2MB
 
     private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
@@ -109,6 +109,10 @@ public class RealStorageNodesIT {
         ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
         ErasureSet es = new ErasureSet();
         es.setNumber(1);
+        es.setN(9);
+        es.setK(6);
+        es.setWriteQuorum(7);
+        
         List<Machine> machines = new ArrayList<>();
         for (InetSocketAddress addr : addrs) {
             Machine m = new Machine();
@@ -123,7 +127,7 @@ public class RealStorageNodesIT {
         PartitionSpread ps = new PartitionSpread();
         ps.setErasureSet(1);
         List<Integer> parts = new ArrayList<>();
-        for(int i = 0; i < 99; i++) parts.add(i); // Assign all partitions to this set
+        for(int i = 0; i < 3; i++) parts.add(i); // Assign all partitions to this set
         ps.setPartitions(parts);
         psConfig.setPartitionSpread(List.of(ps));
 
