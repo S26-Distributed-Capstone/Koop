@@ -69,6 +69,8 @@ public final class ErasureCoder {
             public int read(byte[] b, int off, int len) throws IOException {
                 if (broken)
                     throw new IOException("Pipe broken");
+                if (len == 0)
+                    return 0;
                 if (eof)
                     return -1;
 
