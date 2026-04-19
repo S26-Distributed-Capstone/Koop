@@ -136,7 +136,10 @@ public final class ErasureCoder {
                 if (!closed) {
                     closed = true;
                     try {
-                        queue.offer(new byte[0], 10, java.util.concurrent.TimeUnit.SECONDS);
+                        if (!queue.offer(new byte[0], 10, java.util.concurrent.TimeUnit.SECONDS)) {
+                            queue.clear();
+                            queue.offer(new byte[0]);
+                        }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new InterruptedIOException();
