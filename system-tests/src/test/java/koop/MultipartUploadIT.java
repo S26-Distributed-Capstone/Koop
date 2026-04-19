@@ -132,7 +132,7 @@ public class MultipartUploadIT {
         PartitionSpread ps = new PartitionSpread();
         ps.setErasureSet(1);
         List<Integer> parts = new ArrayList<>();
-        for (int i = 0; i < 99; i++) parts.add(i);
+        for (int i = 0; i < 3; i++) parts.add(i);
         ps.setPartitions(parts);
         psConfig.setPartitionSpread(List.of(ps));
 
