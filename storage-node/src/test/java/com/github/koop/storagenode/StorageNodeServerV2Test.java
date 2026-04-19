@@ -178,7 +178,7 @@ class StorageNodeServerV2Test {
 
         assertEquals(200, getResp.statusCode());
         assertEquals(dataStr, getResp.body());
-        assertEquals("100", getResp.headers().firstValue("X-Object-Version").orElse(""));
+        assertEquals("100", getResp.headers().firstValue("X-Koop-Version").orElse(""));
     }
 
     @Test
@@ -242,8 +242,8 @@ class StorageNodeServerV2Test {
                 .GET()
                 .build();
         HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
-        assertEquals(404, getResp.statusCode());
-        assertTrue(getResp.body().contains("Tombstone"));
+        assertEquals(200, getResp.statusCode());
+        assertEquals("TOMBSTONE", getResp.headers().firstValue("X-Koop-Type").orElse(""));
     }
 
     @Test
@@ -399,7 +399,7 @@ class StorageNodeServerV2Test {
         
         assertEquals(200, getResp2.statusCode(), "GET should return 200 after the file is materialized");
         assertEquals(dataStr, getResp2.body(), "GET should return the correctly materialized data");
-        assertEquals("500", getResp2.headers().firstValue("X-Object-Version").orElse(""), 
+        assertEquals("500", getResp2.headers().firstValue("X-Koop-Version").orElse(""), 
             "The version headers should match the initial sequencer commit");
     }
 }
