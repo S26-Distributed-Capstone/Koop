@@ -199,7 +199,7 @@ public class StorageNodeServerV2 {
         }
     }
 
-private void handleGet(Context ctx) {
+    private void handleGet(Context ctx) {
         try {
             logger.debug("Received GET request: {}", ctx.req().getRequestURI());
             int partition = Integer.parseInt(ctx.pathParam("partition"));
@@ -222,7 +222,7 @@ private void handleGet(Context ctx) {
 
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(fullKey, targetVersion);
 
-           if (dataOpt.isPresent()) {
+            if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
 
                 long responseSequenceNumber = switch (response) {

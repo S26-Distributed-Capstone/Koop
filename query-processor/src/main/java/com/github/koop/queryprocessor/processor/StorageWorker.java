@@ -230,7 +230,7 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
 
         if ("TOMBSTONE".equalsIgnoreCase(representative.type())) {
             logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
-            return; // Returns empty stream
+            throw new IOException("Object not found (deleted)");
         }
 
         if ("MULTIPART".equalsIgnoreCase(representative.type())) {
@@ -251,6 +251,11 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                     .distinct()
                     .sorted(Comparator.reverseOrder())
                     .toList();
+
+            if (availableVersions.size() < 2) {
+                throw new IOException("Only one version available for key " + storageKey + " and it has insufficient shards (" + maxVersionResponses.size() + "/" + k + ")");
+            }
+
             long oldVersion = availableVersions.get(1); // second-highest version
             List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
             List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
@@ -260,7 +265,6 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                 return;
             }
             throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
-
         }
     }
 
@@ -304,9 +308,10 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                                 }
                             }
                         }
+                        return new ShardResponse(index, version, type, chunks, InputStream.nullInputStream());
                     }
                     
-                    return new ShardResponse(index, version, type, chunks, response.body());
+                    return new ShardResponse(index, version, type, List.of(), response.body());
                 }
                 return null;
             });
@@ -510,47 +515,7 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                 .toList();
     }
 
-    private void streamReconstruct(int partition, String storageKey,
-            List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
 
-        InputStream[] ins = new InputStream[n];
-        boolean[] present = new boolean[n];
-
-        for (int i = 0; i < n; i++) {
-            try {
-                InetSocketAddress node = nodes.get(i);
-                URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
-                        node.getHostString(), node.getPort(), partition, storageKey));
-
-                HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
-                HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-
-                if (response.statusCode() == 200) {
-                    ins[i] = new ByteArrayInputStream(response.body());
-                    present[i] = true;
-                } else {
-                    present[i] = false;
-                }
-            } catch (Exception e) {
-                present[i] = false;
-            }
-        }
-
-        int count = 0;
-        for (boolean b : present)
-            if (b)
-                count++;
-        if (count < k)
-            throw new IOException("lost too many shards; need " + k + ", got " + count);
-
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
-            byte[] buf = new byte[64 * 1024];
-            int bytesRead;
-            while ((bytesRead = reconstructed.read(buf)) != -1)
-                out.write(buf, 0, bytesRead);
-        }
-        out.flush();
-    }
 
     private static PartitionSpreadConfiguration buildTestPartitionSpread() {
         PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
