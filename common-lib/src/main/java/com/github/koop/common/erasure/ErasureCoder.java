@@ -113,6 +113,8 @@ public final class ErasureCoder {
             public void write(byte[] b, int off, int len) throws IOException {
                 if (broken)
                     throw new IOException("Pipe broken by reader");
+                if (len == 0)
+                    return;
                 byte[] chunk = new byte[len];
                 System.arraycopy(b, off, chunk, 0, len);
                 try {
