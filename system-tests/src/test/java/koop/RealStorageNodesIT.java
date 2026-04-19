@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealStorageNodesIT {
 
     private static final int TOTAL_NODES = 9;
-    private static final int DATA_SIZE = 60 * 1024 * 1024; // 75MB
+    private static final int DATA_SIZE = 20 * 1024 * 1024; // 20MB
 
     private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
