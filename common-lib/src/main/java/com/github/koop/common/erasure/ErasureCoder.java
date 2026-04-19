@@ -4,83 +4,232 @@ import com.backblaze.erasure.ReedSolomon;
 
 import java.io.*;
 import java.util.Arrays;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
- * Stateless erasure coding utility using Reed-Solomon with configurable {@code k}-of-{@code n}
+ * Stateless erasure coding utility using Reed-Solomon with configurable
+ * {@code k}-of-{@code n}
  * shard layouts.
  *
  * Sharding:
- * {@link #shard(InputStream, long, int, int)} splits a data stream into {@code n} shard streams.
- * The first {@code k} shards are data shards; the remaining {@code n - k} shards are parity shards.
- * Each returned {@link InputStream} begins with an 8-byte original-length prefix so the receiver
+ * {@link #shard(InputStream, long, int, int)} splits a data stream into
+ * {@code n} shard streams.
+ * The first {@code k} shards are data shards; the remaining {@code n - k}
+ * shards are parity shards.
+ * Each returned {@link InputStream} begins with an 8-byte original-length
+ * prefix so the receiver
  * can trim padding on reconstruction.
  *
  * Reconstruction:
- * {@link #reconstruct(InputStream[], boolean[], int, int)} accepts up to {@code n} shard streams
- * ({@code false} entries for missing shards) and returns the original data stream.
+ * {@link #reconstruct(InputStream[], boolean[], int, int)} accepts up to
+ * {@code n} shard streams
+ * ({@code false} entries for missing shards) and returns the original data
+ * stream.
  * At least {@code k} shards must be present.
- *
- * Concurrency note:
- * The encoder runs in a single virtual thread and writes directly to each shard's
- * {@link PipedOutputStream}. The pipe buffers are sized generously ({@code 4 * SHARD_SIZE} each)
- * so the encoder can run several stripes ahead of the consumers without blocking.
- * The caller MUST drain all returned streams concurrently (e.g. one thread per stream, or
- * non-blocking I/O) — reading them sequentially will still deadlock once the pipe buffers fill up.
  */
 public final class ErasureCoder {
 
     public static final int SHARD_SIZE = 1 << 20; // 1 MB per shard per stripe
+    private static final Logger logger = LogManager.getLogger(ErasureCoder.class);
 
-    private ErasureCoder() {}
+    private ErasureCoder() {
+    }
+
+    /**
+     * A thread-pool-safe alternative to PipedInputStream/PipedOutputStream that
+     * does not couple pipe validity to the thread identity of the reader.
+     */
+    private static class ThreadSafePipe {
+        private final BlockingQueue<byte[]> queue;
+        private volatile boolean closed = false;
+        private volatile boolean broken = false;
+        private volatile Throwable error = null;
+
+        public ThreadSafePipe(int capacityChunks) {
+            queue = new LinkedBlockingQueue<>(Math.max(1, capacityChunks));
+        }
+
+        /**
+         * Signals an unrecoverable producer-side error. Subsequent reads on
+         * {@link #in} will throw the supplied exception rather than returning
+         * stale or partial data.
+         */
+        void fail(Throwable t) {
+            error = t;
+            queue.clear();
+            queue.offer(new byte[0]); // wake any reader blocked on take()
+        }
+
+        /**
+         * Enqueues {@code chunk} directly — the array is transferred by reference
+         * with no copy. The caller must not modify {@code chunk} after this call.
+         */
+        void enqueue(byte[] chunk) throws IOException {
+            if (broken)
+                throw new IOException("Pipe broken by reader");
+            if (chunk.length == 0)
+                return;
+            try {
+                if (!queue.offer(chunk, 10, TimeUnit.SECONDS)) {
+                    broken = true;
+                    throw new IOException("Pipe write timed out - consumer is too slow");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException();
+            }
+        }
+
+        final InputStream in = new InputStream() {
+            private byte[] current = null;
+            private int pos = 0;
+            private boolean eof = false;
+
+            private void checkError() throws IOException {
+                Throwable t = error;
+                if (t != null)
+                    throw t instanceof IOException ? (IOException) t : new IOException("Pipe error", t);
+            }
+
+            @Override
+            public int read() throws IOException {
+                byte[] b = new byte[1];
+                int n = read(b, 0, 1);
+                return n == -1 ? -1 : (b[0] & 0xFF);
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                checkError();
+                if (len == 0)
+                    return 0;
+                if (eof)
+                    return -1;
+
+                if (current == null || pos >= current.length) {
+                    try {
+                        current = queue.take();
+                        pos = 0;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new InterruptedIOException();
+                    }
+                    checkError(); // re-check after waking; may have been unblocked by fail()
+                }
+
+                if (current.length == 0) { // empty array is the EOF marker
+                    eof = true;
+                    current = null;
+                    return -1;
+                }
+
+                int toCopy = Math.min(len, current.length - pos);
+                System.arraycopy(current, pos, b, off, toCopy);
+                pos += toCopy;
+                return toCopy;
+            }
+
+            @Override
+            public void close() {
+                broken = true;
+                queue.clear();
+                queue.offer(new byte[0]); // wake any reader blocked on take()
+            }
+        };
+
+        final OutputStream out = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                write(new byte[] { (byte) b }, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                if (broken)
+                    throw new IOException("Pipe broken by reader");
+                if (len == 0)
+                    return;
+                byte[] chunk = new byte[len];
+                System.arraycopy(b, off, chunk, 0, len);
+                enqueue(chunk);
+            }
+
+            @Override
+            public void flush() {
+                // No-op. Chunks are immediately enqueued.
+            }
+
+            @Override
+            public void close() throws IOException {
+                if (!closed) {
+                    closed = true;
+                    if (error != null)
+                        return; // fail() already signalled the consumer; skip EOF marker
+                    try {
+                        if (!queue.offer(new byte[0], 10, TimeUnit.SECONDS)) {
+                            IOException e = new IOException(
+                                    "Pipe close timed out - consumer did not drain within timeout");
+                            fail(e); // unblock any reader blocked on take() before throwing
+                            throw e;
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new InterruptedIOException();
+                    }
+                }
+            }
+        };
+    }
 
     // -------------------------------------------------------------------------
     // Sharding
     // -------------------------------------------------------------------------
 
-    /**
-     * Encodes {@code length} bytes from {@code data} into {@code n} shard streams.
-     *
-     * <p>The returned streams MUST be consumed concurrently. The encoder runs in a
-     * background virtual thread; if the caller reads {@code shard[0]} to completion before
-     * touching {@code shard[1]}, the encoder will block on a full pipe and deadlock.
-     * In {@code StorageWorker.put()} the streams are forwarded to {@code n} independent socket
-     * writes which already run concurrently, so this is safe there.
-     *
-     * @param data source data; must supply exactly {@code length} bytes
-     * @param length number of bytes to read from {@code data}
-     * @param k number of data shards to generate
-     * @param n total number of shards to generate, including parity shards
-     * @return array of {@code n} {@link InputStream}s, where indices {@code 0..k-1} are data
-     *         shards and {@code k..n-1} are parity shards
-     */
     public static InputStream[] shard(InputStream data, long length, int k, int n) throws IOException {
-        if (data == null) throw new IllegalArgumentException("data is null");
-        if (length < 0) throw new IllegalArgumentException("length < 0");
-        if(k==0) throw new IllegalArgumentException("k must be > 0");
-        if(n==0) throw new IllegalArgumentException("n must be > 0");
-        if(k>n) throw new IllegalArgumentException("k must be <= n");
+        if (data == null)
+            throw new IllegalArgumentException("data is null");
+        if (length < 0)
+            throw new IllegalArgumentException("length < 0");
+        if (k == 0)
+            throw new IllegalArgumentException("k must be > 0");
+        if (n == 0)
+            throw new IllegalArgumentException("n must be > 0");
+        if (k > n)
+            throw new IllegalArgumentException("k must be <= n");
 
         int m = n - k;
         long numStripes = (length + (long) k * SHARD_SIZE - 1) / ((long) k * SHARD_SIZE);
-        int pipeBuffer = (int) Math.min(8L * SHARD_SIZE, numStripes * SHARD_SIZE + 8);
+        // +2 accounts for the length-prefix chunk and the EOF marker so both fit
+        // in the queue even before the consumer starts reading (avoids close() timeout
+        // on zero- or single-stripe inputs).
+        int capacityChunks = (int) Math.min(8L, numStripes + 2);
 
-        PipedOutputStream[] pos = new PipedOutputStream[n];
-        PipedInputStream[] pis = new PipedInputStream[n];
+        ThreadSafePipe[] pipes = new ThreadSafePipe[n];
+        InputStream[] pis = new InputStream[n];
+        OutputStream[] pos = new OutputStream[n];
+
         for (int i = 0; i < n; i++) {
-            pos[i] = new PipedOutputStream();
-            pis[i] = new PipedInputStream(pos[i], pipeBuffer);
+            pipes[i] = new ThreadSafePipe(capacityChunks);
+            pos[i] = pipes[i].out;
+            pis[i] = pipes[i].in;
         }
 
         Thread.startVirtualThread(() -> {
             try {
                 byte[] lenBytes = new byte[8];
                 writeLong(lenBytes, length);
-                for (int i = 0; i < n; i++) pos[i].write(lenBytes);
+                for (int i = 0; i < n; i++)
+                    pos[i].write(lenBytes);
 
                 ReedSolomon rs = ReedSolomon.create(k, m);
                 byte[] stripeBuf = new byte[k * SHARD_SIZE];
-                byte[][] shards    = new byte[n][SHARD_SIZE];
                 long remaining = length;
+                boolean[] dead = new boolean[n];
 
                 while (remaining > 0) {
                     int want = (int) Math.min((long) stripeBuf.length, remaining);
@@ -91,21 +240,39 @@ public final class ErasureCoder {
                         Arrays.fill(stripeBuf, want, stripeBuf.length, (byte) 0);
                     }
 
+                    // Allocate fresh arrays per stripe so each array can be enqueued
+                    // directly without an extra copy inside the pipe.
+                    byte[][] shards = new byte[n][SHARD_SIZE];
                     for (int i = 0; i < k; i++) {
                         System.arraycopy(stripeBuf, i * SHARD_SIZE, shards[i], 0, SHARD_SIZE);
                     }
-                    for (int i = k; i < n; i++) {
-                        Arrays.fill(shards[i], (byte) 0);
-                    }
-
                     rs.encodeParity(shards, 0, SHARD_SIZE);
 
-                    for (int i = 0; i < n; i++) pos[i].write(shards[i], 0, SHARD_SIZE);
+                    // Write sequentially — the pipes are async blocking queues so this
+                    // does not stall the producer beyond normal backpressure.
+                    for (int i = 0; i < n; i++) {
+                        if (!dead[i]) {
+                            try {
+                                pipes[i].enqueue(shards[i]); // zero-copy hand-off
+                            } catch (IOException e) {
+                                dead[i] = true;
+                                logger.warn("Pipe for shard " + i + " died. Halting writes.");
+                            }
+                        }
+                    }
                 }
-                for (int i = 0; i < n; i++) pos[i].flush();
+                for (int i = 0; i < n; i++)
+                    pos[i].flush();
             } catch (IOException e) {
+                logger.error("Error in erasure coding thread", e);
+                for (int i = 0; i < n; i++)
+                    pipes[i].fail(e); // propagate to all consumers
             } finally {
-                for (PipedOutputStream p : pos) try { p.close(); } catch (IOException ignored) {}
+                for (OutputStream p : pos)
+                    try {
+                        p.close();
+                    } catch (IOException ignored) {
+                    }
             }
         });
         return pis;
@@ -115,41 +282,45 @@ public final class ErasureCoder {
     // Reconstruction
     // -------------------------------------------------------------------------
 
-        /**
-         * Reconstructs the original data stream from at least {@code k} shard streams.
-         *
-         * @param shards array of {@code n} shard {@link InputStream}s
-         * @param present boolean mask; {@code false} means the corresponding shard is unavailable
-         * @param k number of data shards required for reconstruction
-         * @param n total number of shards in the erasure set
-         * @return {@link InputStream} yielding exactly the original bytes
-         */
-        public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
-        if (shards == null || shards.length != n) throw new IllegalArgumentException("shards must have length " + n);
-        if (present == null || present.length != n) throw new IllegalArgumentException("present must have length " + n);
+    public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
+        if (shards == null || shards.length != n)
+            throw new IllegalArgumentException("shards must have length " + n);
+        if (present == null || present.length != n)
+            throw new IllegalArgumentException("present must have length " + n);
 
         int count = 0;
-        for (boolean b : present) if (b) count++;
-        if (count < k) throw new IllegalArgumentException("need at least " + k + " shards, got " + count);
+        for (boolean b : present)
+            if (b)
+                count++;
+        if (count < k)
+            throw new IllegalArgumentException("need at least " + k + " shards, got " + count);
 
         int m = n - k;
         DataInputStream[] dis = new DataInputStream[n];
         for (int i = 0; i < n; i++) {
-            if (present[i]) dis[i] = new DataInputStream(new BufferedInputStream(shards[i]));
+            if (present[i])
+                dis[i] = new DataInputStream(new BufferedInputStream(shards[i]));
         }
 
-        PipedOutputStream pos = new PipedOutputStream();
-        PipedInputStream pis = new PipedInputStream(pos, 4 * k * SHARD_SIZE);
+        ThreadSafePipe pipe = new ThreadSafePipe(4 * k);
+        InputStream pis = pipe.in;
+        OutputStream pos = pipe.out;
+
         final boolean[] pres = Arrays.copyOf(present, n);
 
         Thread.startVirtualThread(() -> {
-            try (pos) {
+            try {
                 int first = -1;
-                for (int i = 0; i < n; i++) if (pres[i]) { first = i; break; }
+                for (int i = 0; i < n; i++)
+                    if (pres[i]) {
+                        first = i;
+                        break;
+                    }
 
                 long originalLength = dis[first].readLong();
                 for (int i = 0; i < n; i++) {
-                    if (pres[i] && i != first) dis[i].readLong();
+                    if (pres[i] && i != first)
+                        dis[i].readLong();
                 }
 
                 ReedSolomon rs = ReedSolomon.create(k, m);
@@ -158,7 +329,8 @@ public final class ErasureCoder {
 
                 while (remaining > 0) {
                     for (int i = 0; i < n; i++) {
-                        if (pres[i]) readFully(dis[i], stripe[i], 0, SHARD_SIZE);
+                        if (pres[i])
+                            readFully(dis[i], stripe[i], 0, SHARD_SIZE);
                     }
 
                     rs.decodeMissing(stripe, pres, 0, SHARD_SIZE);
@@ -174,14 +346,25 @@ public final class ErasureCoder {
                 }
                 pos.flush();
             } catch (IOException e) {
+                logger.error("Error in erasure reconstruction thread", e);
+                pipe.fail(e); // propagate to consumer before closing
             } finally {
+                try {
+                    pos.close();
+                } catch (IOException ignored) {
+                }
                 for (int i = 0; i < n; i++) {
-                    if (dis[i] != null) try { dis[i].close(); } catch (IOException ignored) {}
+                    if (dis[i] != null)
+                        try {
+                            dis[i].close();
+                        } catch (IOException ignored) {
+                        }
                 }
             }
         });
         return pis;
     }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
@@ -197,7 +380,8 @@ public final class ErasureCoder {
         int n = 0;
         while (n < len) {
             int r = in.read(buf, off + n, len - n);
-            if (r < 0) throw new EOFException("Unexpected EOF");
+            if (r < 0)
+                throw new EOFException("Unexpected EOF");
             n += r;
         }
     }
