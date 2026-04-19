@@ -390,6 +390,7 @@ public final class StorageWorker {
                     present[i] = false;
                 }
             } catch (Exception e) {
+                logger.warn("Failed to fetch shard {} from node {}", i, nodes.get(i), e);
                 present[i] = false;
             }
         }
