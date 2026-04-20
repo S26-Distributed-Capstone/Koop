@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -228,12 +229,12 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         List<ShardResponse> maxVersionResponses = responses.stream().filter(r -> r.version() == maxVersion).toList();
         ShardResponse representative = maxVersionResponses.get(0);
 
-        if ("TOMBSTONE".equalsIgnoreCase(representative.type())) {
+        if (representative.type() == ShardType.TOMBSTONE) {
             logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
             throw new IOException("Object not found (deleted)");
         }
 
-        if ("MULTIPART".equalsIgnoreCase(representative.type())) {
+        if (representative.type() == ShardType.MULTIPART) {
             logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion, storageKey);
             handleMultipartGet(representative.chunks(), k, out);
             return;
@@ -243,29 +244,38 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         if (maxVersionResponses.size() >= k) {
             reconstructFromResponses(maxVersionResponses, nodes, k, n, out);
             return;
-        } else {
-            logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.", maxVersion, storageKey, maxVersionResponses.size(), k);
-            
-            List<Long> availableVersions = responses.stream()
-                    .map(ShardResponse::version)
-                    .distinct()
-                    .sorted(Comparator.reverseOrder())
-                    .toList();
-
-            if (availableVersions.size() < 2) {
-                throw new IOException("Only one version available for key " + storageKey + " and it has insufficient shards (" + maxVersionResponses.size() + "/" + k + ")");
-            }
-
-            long oldVersion = availableVersions.get(1); // second-highest version
-            List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
-            List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
-            if (validOldResponses.size() >= k) {
-                logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion, validOldResponses.size(), k);
-                reconstructFromResponses(validOldResponses, nodes, k, n, out);
-                return;
-            }
-            throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
         }
+
+        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(), responses);
+    }
+
+    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
+            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses) throws IOException {
+        logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
+                maxVersion, storageKey, maxVersionShardCount, k);
+
+        List<Long> availableVersions = responses.stream()
+                .map(ShardResponse::version)
+                .distinct()
+                .sorted(Comparator.reverseOrder())
+                .toList();
+
+        if (availableVersions.size() < 2) {
+            throw new IOException("Only one version available for key " + storageKey
+                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + k + ")");
+        }
+
+        long oldVersion = availableVersions.get(1); // second-highest version
+        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
+        List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
+        if (validOldResponses.size() >= k) {
+            logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
+                    validOldResponses.size(), k);
+            reconstructFromResponses(validOldResponses, nodes, k, n, out);
+            return;
+        }
+
+        throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
     }
 
     private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
@@ -294,9 +304,9 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
 
                 if (response.statusCode() == 200) {
                     long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
-                    String type = response.headers().firstValue("X-Koop-Type").orElse("BLOB");
+                    ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
                     List<String> chunks = new ArrayList<>();
-                    if ("MULTIPART".equalsIgnoreCase(type)) {
+                    if (type == ShardType.MULTIPART) {
                         byte[] payload = response.body().readAllBytes();
                         String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
                         // Parse simple JSON array: ["chunk1","chunk2"]
@@ -352,7 +362,24 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         }
     }
 
-    private record ShardResponse(int nodeIndex, long version, String type, List<String> chunks, InputStream payload) {}
+    private enum ShardType {
+        BLOB,
+        MULTIPART,
+        TOMBSTONE;
+
+        static ShardType fromHeader(String value) {
+            if (value == null) {
+                return BLOB;
+            }
+            try {
+                return ShardType.valueOf(value.trim().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                return BLOB;
+            }
+        }
+    }
+
+    private record ShardResponse(int nodeIndex, long version, ShardType type, List<String> chunks, InputStream payload) {}
 
     public boolean delete(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null)
