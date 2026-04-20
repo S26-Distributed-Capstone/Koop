@@ -201,7 +201,6 @@ public class StorageNodeServerV2 {
 
     private void handleGet(Context ctx) {
         try {
-            logger.debug("Received GET request: {}", ctx.req().getRequestURI());
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
@@ -242,6 +241,8 @@ public class StorageNodeServerV2 {
 
                     var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
                     long size = fc.size();
+                    logger.debug("GET partition={} fullKey={} version={} streaming {} bytes", partition, fullKey,
+                            responseSequenceNumber, size);
                     long position = 0L;
                     while (position < size) {
                         long transferred = fc.transferTo(position, size - position, outputChannel);

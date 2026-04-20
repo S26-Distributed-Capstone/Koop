@@ -536,6 +536,31 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         if (esOpt.isEmpty()) {
             logger.error("No erasure set found for partition {}", partition);
             return List.of();
+    private void streamReconstruct(int partition, String storageKey,
+            List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
+
+        InputStream[] ins = new InputStream[n];
+        boolean[] present = new boolean[n];
+
+        for (int i = 0; i < n; i++) {
+            try {
+                InetSocketAddress node = nodes.get(i);
+                URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
+                        node.getHostString(), node.getPort(), partition, storageKey));
+
+                HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
+                HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+                if (response.statusCode() == 200) {
+                    ins[i] = new ByteArrayInputStream(response.body());
+                    present[i] = true;
+                } else {
+                    present[i] = false;
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to fetch shard {} from node {}", i, nodes.get(i), e);
+                present[i] = false;
+            }
         }
         return esOpt.get().getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort()))
