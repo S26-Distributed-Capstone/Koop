@@ -127,7 +127,7 @@ public class RealStorageNodesIT {
         PartitionSpread ps = new PartitionSpread();
         ps.setErasureSet(1);
         List<Integer> parts = new ArrayList<>();
-        for(int i = 0; i < 99; i++) parts.add(i); // Assign all partitions to this set
+        for(int i = 0; i < 2; i++) parts.add(i); // 2 partitions is enough for routing // Assign all partitions to this set
         ps.setPartitions(parts);
         psConfig.setPartitionSpread(List.of(ps));
 
@@ -282,6 +282,10 @@ public class RealStorageNodesIT {
 
         log("Erasure failure test (4 failures) completed.");
     }
+
+    // -------------------------------------------------------
+    // BUCKET AND DELETE TESTS (real servers)
+    // -------------------------------------------------------
 
     /**
      * Creates a bucket via pub/sub and verifies that the SN writes the bucket

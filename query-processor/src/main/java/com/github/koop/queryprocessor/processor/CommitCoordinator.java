@@ -168,15 +168,15 @@ public final class CommitCoordinator implements AutoCloseable {
     /**
      * Publishes a delete command and blocks until the requested write quorum is reached.
      *
-     * @param requestId   the UUID for this delete operation.
-     * @param partition   the partition number — used as the Kafka topic.
-     * @param bucket      object bucket.
-     * @param key         object key.
-     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
-     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
+     * @param requestId    the UUID for this delete operation.
+     * @param partition    the partition number — used as the Kafka topic.
+     * @param bucket       object bucket.
+     * @param key          object key.
+     * @param deleteQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code deleteQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginDelete(UUID requestId, int partition, String bucket, String key, int writeQuorum) {
-        return runCommit(requestId, writeQuorum, () -> {
+    public boolean beginDelete(UUID requestId, int partition, String bucket, String key, int deleteQuorum) {
+        return runCommit(requestId, deleteQuorum, () -> {
             Message.DeleteMessage msg = new Message.DeleteMessage(
                     bucket, key, requestId.toString(), ackAddress);
             String topic = CommitTopics.forPartition(partition);
@@ -190,14 +190,14 @@ public final class CommitCoordinator implements AutoCloseable {
      * until the requested write quorum is reached. The partition is derived by
      * hashing the bucket name, consistent with how object keys are routed.
      *
-     * @param requestId   the UUID for this operation.
-     * @param partition   the partition number derived from the bucket name.
-     * @param bucket      the bucket name to create.
-     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
-     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
+     * @param requestId    the UUID for this operation.
+     * @param partition    the partition number derived from the bucket name.
+     * @param bucket       the bucket name to create.
+     * @param deleteQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code deleteQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginCreateBucket(UUID requestId, int partition, String bucket, int writeQuorum) {
-        return runCommit(requestId, writeQuorum, () -> {
+    public boolean beginCreateBucket(UUID requestId, int partition, String bucket, int deleteQuorum) {
+        return runCommit(requestId, deleteQuorum, () -> {
             Message.CreateBucketMessage msg = new Message.CreateBucketMessage(
                     bucket, requestId.toString(), ackAddress);
             String topic = CommitTopics.forPartition(partition);
@@ -213,11 +213,11 @@ public final class CommitCoordinator implements AutoCloseable {
      * @param requestId   the UUID for this operation.
      * @param partition   the partition number derived from the bucket name.
      * @param bucket      the bucket name to delete.
-     * @param writeQuorum number of ACKs required (typically {@code k + 1}).
-     * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
+     * @param deleteQuorum number of ACKs required (typically {@code k + 1}).
+     * @return {@code true} iff at least {@code deleteQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginDeleteBucket(UUID requestId, int partition, String bucket, int writeQuorum) {
-        return runCommit(requestId, writeQuorum, () -> {
+    public boolean beginDeleteBucket(UUID requestId, int partition, String bucket, int deleteQuorum) {
+        return runCommit(requestId, deleteQuorum, () -> {
             Message.DeleteBucketMessage msg = new Message.DeleteBucketMessage(
                     bucket, requestId.toString(), ackAddress);
             String topic = CommitTopics.forPartition(partition);

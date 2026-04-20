@@ -214,10 +214,8 @@ public final class StorageWorker {
     }
 
     /**
-     * Publishes a delete command via pub/sub and waits for a write quorum of
-     * {@code k + 1} SNs to acknowledge the tombstone. {@code k + 1} is the
-     * minimum number of nodes that guarantees the data can always be reconstructed
-     * from the remaining shards even if one node that acknowledged goes offline.
+     * Publishes a delete command via pub/sub and waits for {@code k + 1} SNs
+     * (the delete quorum) to acknowledge the tombstone.
      */
     public boolean delete(UUID requestID, String bucket, String key) {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
@@ -225,19 +223,15 @@ public final class StorageWorker {
         if (key == null)       throw new IllegalArgumentException("key is null");
 
         String storageKey = toStorageKey(bucket, key);
-        ErasureRouting r = getRouting();
-        OptionalInt partition = r.getPartition(storageKey);
-        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
-                ? r.getErasureSet(partition.getAsInt())
-                : Optional.empty();
-        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+        Optional<PartitionAndSet> resolved = resolveErasureSet(storageKey);
+        if (resolved.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
 
-        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
         boolean deleted = commitCoordinator.beginDelete(
-                requestID, partition.getAsInt(), bucket, key, writeQuorum);
+                requestID, resolved.get().partition(), bucket, key, deleteQuorum);
         if (!deleted) {
             logger.error("Delete commit failed for requestId {} (quorum ACKs not received)", requestID);
         }
@@ -247,7 +241,7 @@ public final class StorageWorker {
     /**
      * Creates a bucket by hashing the bucket name to a partition, then publishing
      * a {@link Message.CreateBucketMessage} to that partition's Kafka topic and
-     * waiting for {@code k + 1} SNs to acknowledge.
+     * waiting for {@code k + 1} SNs (the delete quorum) to acknowledge.
      *
      * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
      */
@@ -255,19 +249,15 @@ public final class StorageWorker {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
 
-        ErasureRouting r = getRouting();
-        OptionalInt partition = r.getPartition(bucket);
-        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
-                ? r.getErasureSet(partition.getAsInt())
-                : Optional.empty();
-        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
             logger.error("Routing failed for bucket {}, aborting createBucket", bucket);
             return false;
         }
 
-        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
         boolean created = commitCoordinator.beginCreateBucket(
-                requestID, partition.getAsInt(), bucket, writeQuorum);
+                requestID, resolved.get().partition(), bucket, deleteQuorum);
         if (!created) {
             logger.error("CreateBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
                     requestID, bucket);
@@ -278,7 +268,7 @@ public final class StorageWorker {
     /**
      * Deletes a bucket by hashing the bucket name to a partition, then publishing
      * a {@link Message.DeleteBucketMessage} to that partition's Kafka topic and
-     * waiting for {@code k + 1} SNs to acknowledge.
+     * waiting for {@code k + 1} SNs (the delete quorum) to acknowledge.
      *
      * <p>The bucket record is logically deleted (tombstoned in RocksDB). Objects
      * inside the bucket are not immediately purged; they are cleaned up
@@ -290,19 +280,15 @@ public final class StorageWorker {
         if (requestID == null) throw new IllegalArgumentException("requestID is null");
         if (bucket == null)    throw new IllegalArgumentException("bucket is null");
 
-        ErasureRouting r = getRouting();
-        OptionalInt partition = r.getPartition(bucket);
-        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
-                ? r.getErasureSet(partition.getAsInt())
-                : Optional.empty();
-        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
             logger.error("Routing failed for bucket {}, aborting deleteBucket", bucket);
             return false;
         }
 
-        int writeQuorum = erasureSetOpt.get().getK() + 1;
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
         boolean deleted = commitCoordinator.beginDeleteBucket(
-                requestID, partition.getAsInt(), bucket, writeQuorum);
+                requestID, resolved.get().partition(), bucket, deleteQuorum);
         if (!deleted) {
             logger.error("DeleteBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
                     requestID, bucket);
@@ -349,6 +335,21 @@ public final class StorageWorker {
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Resolves the partition and {@link ErasureSetConfiguration.ErasureSet} for
+     * the given routing key, returning an empty Optional if routing fails.
+     * Used by delete/bucket operations to avoid repeating the same lookup logic.
+     */
+    private record PartitionAndSet(int partition, ErasureSetConfiguration.ErasureSet erasureSet) {}
+
+    private Optional<PartitionAndSet> resolveErasureSet(String routingKey) {
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(routingKey);
+        if (partition.isEmpty()) return Optional.empty();
+        return r.getErasureSet(partition.getAsInt())
+                .map(es -> new PartitionAndSet(partition.getAsInt(), es));
+    }
 
     private void registerListeners() {
         this.metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
