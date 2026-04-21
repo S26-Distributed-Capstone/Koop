@@ -186,15 +186,18 @@ public class MultipartUploadManager {
                 "Upload " + uploadId + " was aborted");
         }
 
-        // Send multipart commit to storage nodes via partition-keyed pub/sub flow.
-        List<String> partNumberStrings = new ArrayList<>();
+        // Build the chunk list using actual storage keys for each part.
+        // handleMultipartGet() uses these as routing keys to fetch individual
+        // part shards, so they MUST be the same keys used in uploadPart().
+        List<String> chunkKeys = new ArrayList<>();
         for (int partNum : sortedPartNumbers) {
-            partNumberStrings.add(String.valueOf(partNum));
+            chunkKeys.add(sessionBucket + "/" + MultipartUploadSession.partStorageKey(
+                    sessionBucket, sessionKey, uploadId, partNum));
         }
 
         boolean published;
         try {
-            published = storageWorker.beginMultipartCommit(sessionBucket, sessionKey, uploadId, partNumberStrings);
+            published = storageWorker.beginMultipartCommit(sessionBucket, sessionKey, uploadId, chunkKeys);
         } catch (Exception e) {
             restoreSessionToActiveIfStillCompleting(uploadId, sessionBucket, sessionKey);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,

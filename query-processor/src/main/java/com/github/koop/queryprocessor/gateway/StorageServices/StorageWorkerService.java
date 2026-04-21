@@ -59,7 +59,9 @@ public class StorageWorkerService implements StorageService {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
         
-        // Execute directly in the calling thread (Javalin's virtual thread)
+        // Execute directly in the calling thread (Javalin's virtual thread).
+        // Tombstone/missing-object handling must be surfaced explicitly by StorageWorker;
+        // do not rely on exception-message parsing here.
         return storageWorker.get(requestId, bucket, key);
     }
 

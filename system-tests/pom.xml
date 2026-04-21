@@ -41,6 +41,14 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- AWS SDK S3 client for E2E gateway tests -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>2.41.34</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
