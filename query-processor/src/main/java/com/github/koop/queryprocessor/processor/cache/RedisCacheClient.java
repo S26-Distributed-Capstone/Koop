@@ -152,42 +152,57 @@ public class RedisCacheClient implements CacheClient {
     }
 
     /**
-     * Adds {@code member} to the set at {@code key} only if the set exists
-     * (i.e. was previously created via {@link #setCreate}) and the member is
-     * not already present.
+     * Atomically adds {@code member} to the set at {@code key} only if the set
+     * exists (marker present) and the member is not already in the set.
+     *
+     * <p>Implemented as a Lua script to guarantee atomicity — the marker check
+     * and SADD execute as a single Redis operation with no race window.
      *
      * @return {@code true} if the set existed and the member was newly added;
      *         {@code false} if the set did not exist or the member was already present.
      */
     @Override
     public boolean setAddIfAbsent(String key, String member) {
+        // KEYS[1] = marker key, KEYS[2] = set key, ARGV[1] = member
+        // Returns 1 if added, 0 if set doesn't exist or member already present
+        String script = """
+                if redis.call('EXISTS', KEYS[1]) == 0 then
+                    return 0
+                end
+                return redis.call('SADD', KEYS[2], ARGV[1])
+                """;
         try (Jedis jedis = pool.getResource()) {
-            if (!jedis.exists(setExistsKey(key))) {
-                return false;
-            }
-            // SADD returns 1 if member was added, 0 if already present
-            return jedis.sadd(key, member) == 1L;
+            Object result = jedis.eval(script, 2, setExistsKey(key), key, member);
+            return Long.valueOf(1L).equals(result);
         } catch (Exception e) {
             throw new RuntimeException("Redis setAddIfAbsent failed for key: " + key, e);
         }
     }
 
     /**
-     * Adds {@code member} to the set at {@code key} only if the set exists
-     * (i.e. was previously created via {@link #setCreate}).
-     * The member is added unconditionally if the set exists.
+     * Atomically adds {@code member} to the set at {@code key} only if the set
+     * exists (marker present). The member is added unconditionally if the set exists.
+     *
+     * <p>Implemented as a Lua script to guarantee atomicity — the marker check
+     * and SADD execute as a single Redis operation with no race window.
      *
      * @return {@code true} if the set existed (member was added);
      *         {@code false} if the set did not exist.
      */
     @Override
     public boolean setAddIfPresent(String key, String member) {
+        // KEYS[1] = marker key, KEYS[2] = set key, ARGV[1] = member
+        // Returns 1 if set existed (and member was added), 0 if set doesn't exist
+        String script = """
+                if redis.call('EXISTS', KEYS[1]) == 0 then
+                    return 0
+                end
+                redis.call('SADD', KEYS[2], ARGV[1])
+                return 1
+                """;
         try (Jedis jedis = pool.getResource()) {
-            if (!jedis.exists(setExistsKey(key))) {
-                return false;
-            }
-            jedis.sadd(key, member);
-            return true;
+            Object result = jedis.eval(script, 2, setExistsKey(key), key, member);
+            return Long.valueOf(1L).equals(result);
         } catch (Exception e) {
             throw new RuntimeException("Redis setAddIfPresent failed for key: " + key, e);
         }
