@@ -32,6 +32,26 @@ public class PubSubClient {
         });
     }
 
+    /**
+     * Subscribe to a topic using a consumer group ID. When a consumer with the
+     * same {@code consumerGroupId} reconnects, consumption resumes from the
+     * offset where it previously left off.
+     *
+     * @param topic           the topic to subscribe to
+     * @param consumerGroupId identifier for the consumer group
+     * @param listener        the listener to receive messages
+     */
+    public void sub(String topic, String consumerGroupId, PubSubListener listener) {
+        this.listeners.compute(topic, (k, lst) -> {
+            if (lst == null) {
+                lst = new CopyOnWriteArrayList<>();
+                this.pubSub.sub(topic, consumerGroupId);
+            }
+            lst.add(listener);
+            return lst;
+        });
+    }
+
     public void drop(String topic) {
         this.listeners.remove(topic);
         this.pubSub.drop(topic);
@@ -39,6 +59,17 @@ public class PubSubClient {
 
     public void pub(String topic, byte[] message) {
         this.pubSub.pub(topic, message);
+    }
+
+    /**
+     * Synchronously drain all pending messages for the given topic from the
+     * consumer's current offset to the head of the topic log.
+     *
+     * @param topic the topic to poll
+     * @return an ordered list of raw message payloads; empty if no backlog
+     */
+    public List<byte[]> pollBacklog(String topic) {
+        return this.pubSub.pollBacklog(topic);
     }
 
     public void start() {

@@ -9,6 +9,8 @@ import java.nio.channels.Channels;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -24,6 +26,7 @@ import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
 
@@ -37,6 +40,10 @@ public class StorageNodeServerV2 {
     private final StorageNodeV2 storageNode;
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
+    private final RepairWorkerPool repairWorkerPool;
+
+    /** Current lifecycle state of this node. */
+    private volatile NodeState state = NodeState.INITIALIZING;
 
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
@@ -53,9 +60,15 @@ public class StorageNodeServerV2 {
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
             PubSubClient pubSubClient) {
+        this(port, ip, db, dir, metadataClient, pubSubClient, RepairWorkerPool.DEFAULT_CONCURRENCY);
+    }
+
+    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
+            PubSubClient pubSubClient, int repairConcurrency) {
         this.port = port;
         this.ip = ip;
-        this.storageNode = new StorageNodeV2(db, dir);
+        this.repairWorkerPool = new RepairWorkerPool(repairConcurrency);
+        this.storageNode = new StorageNodeV2(db, dir, this.repairWorkerPool);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
     }
@@ -149,15 +162,18 @@ public class StorageNodeServerV2 {
         Set<Integer> toAdd = new HashSet<>(targetPartitions);
         toAdd.removeAll(subscribedPartitions);
 
+        String consumerGroupId = this.ip + ":" + this.port;
+
         for (Integer partition : toAdd) {
-            String topic = "partition-" + partition;
-            logger.info("Node assigned to partition {}. Subscribing to topic: {}", partition, topic);
+            String topic = CommitTopics.forPartition(partition);
+            logger.info("Node assigned to partition {}. Subscribing to topic: {} with consumerGroupId: {}",
+                    partition, topic, consumerGroupId);
 
             ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
                     Thread.ofVirtual().name("partition-" + partition + "-").factory());
             partitionExecutors.put(partition, partitionExecutor);
 
-            pubSubClient.sub(topic, (incomingTopic, offset, messageBytes) -> {
+            pubSubClient.sub(topic, consumerGroupId, (incomingTopic, offset, messageBytes) -> {
                 partitionExecutor.submit(() -> {
                     try {
                         Message message = Message.deserializeMessage(messageBytes);
@@ -364,10 +380,19 @@ public class StorageNodeServerV2 {
     }
 
     public void start() {
+        state = NodeState.REPAIRING;
+        logger.info("Node entering REPAIRING state");
+
+        // Start the repair worker pool
+        repairWorkerPool.start();
+
         if (metadataClient != null) {
             this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
             this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
             updateSubscriptions();
+
+            // Perform startup repair: consume and compact backlog for all subscribed partitions
+            performStartupRepair();
 
             metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
                 this.currentEsConfig = current;
@@ -384,12 +409,93 @@ public class StorageNodeServerV2 {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L;
+            config.routes.before(this::gateTraffic);
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
         });
 
         app.start(port);
-        logger.info("StorageNodeServerV2 started on port {}", app.port());
+
+        // Transition to ACTIVE — node is ready to serve traffic
+        state = NodeState.ACTIVE;
+        logger.info("StorageNodeServerV2 started on port {} — state: ACTIVE", app.port());
+    }
+
+    /**
+     * Blocks HTTP traffic while the node is not in ACTIVE state.
+     * Returns 503 Service Unavailable with the current node state.
+     */
+    private void gateTraffic(Context ctx) {
+        if (state != NodeState.ACTIVE) {
+            ctx.status(503).result("Node is not ready: " + state);
+            ctx.skipRemainingHandlers();
+        }
+    }
+
+    /**
+     * Consumes all backlog messages for subscribed partitions, compacts them
+     * (retaining only the latest operation per key), and enqueues repair
+     * operations for keys that need data reconstruction.
+     */
+    private void performStartupRepair() {
+        int totalBacklog = 0;
+        int totalRepairs = 0;
+
+        for (Integer partition : subscribedPartitions) {
+            String topic = CommitTopics.forPartition(partition);
+            List<byte[]> backlog = pubSubClient.pollBacklog(topic);
+
+            if (backlog.isEmpty()) {
+                logger.debug("No backlog for partition {} (topic: {})", partition, topic);
+                continue;
+            }
+
+            totalBacklog += backlog.size();
+            logger.info("Partition {} has {} backlog messages to compact", partition, backlog.size());
+
+            // Compact: retain only the latest message per unique key (last-writer-wins)
+            Map<String, Message> compacted = new LinkedHashMap<>();
+            for (byte[] msgBytes : backlog) {
+                try {
+                    Message message = Message.deserializeMessage(msgBytes);
+                    String key = extractKeyFromMessage(message);
+                    if (key != null) {
+                        compacted.put(key, message);
+                    }
+                } catch (Exception e) {
+                    logger.error("Failed to deserialize backlog message during compaction", e);
+                }
+            }
+
+            // Enqueue repair operations for keys whose final state requires data
+            for (Map.Entry<String, Message> entry : compacted.entrySet()) {
+                Message finalMessage = entry.getValue();
+                // Skip deletes and bucket operations — only data writes need repair
+                if (finalMessage instanceof Message.FileCommitMessage
+                        || finalMessage instanceof Message.MultipartCommitMessage) {
+                    repairWorkerPool.enqueue(
+                            new RepairOperation(entry.getKey(), RepairOperation.RepairReason.STARTUP_CATCHUP));
+                    totalRepairs++;
+                }
+            }
+        }
+
+        logger.info("Startup repair complete: processed {} backlog messages, enqueued {} repair operations",
+                totalBacklog, totalRepairs);
+    }
+
+    /**
+     * Extracts the full object key from a message for compaction purposes.
+     * Returns null for messages that don't map to an object key (e.g. bucket operations).
+     */
+    private String extractKeyFromMessage(Message message) {
+        return switch (message) {
+            case Message.FileCommitMessage m -> buildKey(m.bucket(), m.key());
+            case Message.MultipartCommitMessage m -> buildKey(m.bucket(), m.key());
+            case Message.DeleteMessage m -> buildKey(m.bucket(), m.key());
+            case Message.CreateBucketMessage m -> "bucket:" + m.bucket();
+            case Message.DeleteBucketMessage m -> "bucket:" + m.bucket();
+        };
     }
 
     public void stop() {
@@ -397,10 +503,20 @@ public class StorageNodeServerV2 {
             app.stop();
         }
 
+        repairWorkerPool.shutdown();
+
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
 
+        state = NodeState.INITIALIZING;
         logger.info("StorageNodeServerV2 stopped");
+    }
+
+    /**
+     * Returns the current lifecycle state of this node.
+     */
+    public NodeState getState() {
+        return state;
     }
 
     public int port() {

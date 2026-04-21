@@ -54,11 +54,17 @@ import com.github.koop.storagenode.db.TombstoneFileVersion;
 public class StorageNodeV2 {
     private final Database db;
     private final Path storageDir;
+    private final RepairWorkerPool repairWorkerPool;
     private final static Logger logger = LogManager.getLogger(StorageNodeV2.class);
 
     public StorageNodeV2(Database db, Path dir) {
+        this(db, dir, null);
+    }
+
+    public StorageNodeV2(Database db, Path dir, RepairWorkerPool repairWorkerPool) {
         this.db = db;
         this.storageDir = dir;
+        this.repairWorkerPool = repairWorkerPool;
     }
 
     private Path getObjectPath(String id) {
@@ -213,8 +219,11 @@ public class StorageNodeV2 {
             return Optional.of(new Tombstone(t));
         } else if (latest instanceof RegularFileVersion r) {
             Path path = getObjectPath(r.location());
-            if (!Files.exists(path))
+            if (!Files.exists(path)) {
+                // File metadata exists but physical file is missing — trigger read-repair
+                enqueueReadRepair(key);
                 return Optional.empty();
+            }
             return Optional.of(new FileObject(FileChannel.open(path, StandardOpenOption.READ), latest));
         } else if (latest instanceof MultipartFileVersion m) {
             if (m.chunks().isEmpty())
@@ -223,6 +232,20 @@ public class StorageNodeV2 {
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * Asynchronously enqueues a read-repair operation for the given key.
+     * This is a fire-and-forget operation — the caller still receives a "not found"
+     * response, but a background worker will attempt to fetch the missing blob
+     * from peer nodes.
+     */
+    private void enqueueReadRepair(String key) {
+        if (repairWorkerPool != null) {
+            logger.info("Enqueuing read-repair for missing blob: key={}", key);
+            repairWorkerPool.enqueue(
+                    new RepairOperation(key, RepairOperation.RepairReason.READ_MISS));
+        }
     }
 
     /**
