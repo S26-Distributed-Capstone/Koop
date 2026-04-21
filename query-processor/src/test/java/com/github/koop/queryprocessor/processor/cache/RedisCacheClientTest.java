@@ -220,4 +220,13 @@ class RedisCacheClientTest {
         assertTrue(client.setAddIfPresent("test:set:ifpresent", "a"));
         assertEquals(1, client.setMembers("test:set:ifpresent").size());
     }
+
+    @Test
+    @Order(22)
+    void setAdd_createsExistenceMarker() {
+        // setAdd should make setExists return true even without an explicit setCreate
+        assertFalse(client.setExists("test:set:basic"));
+        client.setAdd("test:set:basic", "a");
+        assertTrue(client.setExists("test:set:basic"));
+    }
 }

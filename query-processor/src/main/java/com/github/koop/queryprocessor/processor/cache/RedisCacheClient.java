@@ -140,12 +140,17 @@ public class RedisCacheClient implements CacheClient {
 
     /**
      * Adds {@code member} to the set at {@code key}, creating it if absent.
-     * Does not require the set to have been created via {@link #setCreate}.
+     * Also writes the existence marker so that {@link #setExists} returns
+     * {@code true} after this call, consistent with the contract that
+     * {@code setAdd} creates the set if it does not yet exist.
      */
     @Override
     public void setAdd(String key, String member) {
         try (Jedis jedis = pool.getResource()) {
             jedis.sadd(key, member);
+            // Write marker NX so repeated setAdd calls don't overwrite a TTL
+            // that may have been set by an explicit setCreate call.
+            jedis.set(setExistsKey(key), "1", SetParams.setParams().nx());
         } catch (Exception e) {
             throw new RuntimeException("Redis SADD failed for key: " + key, e);
         }
