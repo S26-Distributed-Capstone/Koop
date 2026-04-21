@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealStorageNodesIT {
 
     private static final int TOTAL_NODES = 9;
-    private static final int DATA_SIZE = 5 * 1024 * 1024; // 15MB
+    private static final int DATA_SIZE = 2 * 1024 * 1024; // 2MB
 
     private final List<StorageNodeServerV2> servers = new ArrayList<>();
     private final List<Path> dataDirs = new ArrayList<>();
@@ -127,7 +127,7 @@ public class RealStorageNodesIT {
         PartitionSpread ps = new PartitionSpread();
         ps.setErasureSet(1);
         List<Integer> parts = new ArrayList<>();
-        for(int i = 0; i < 2; i++) parts.add(i); // 2 partitions is enough for routing // Assign all partitions to this set
+        for(int i = 0; i < 3; i++) parts.add(i); // Assign all partitions to this set
         ps.setPartitions(parts);
         psConfig.setPartitionSpread(List.of(ps));
 
@@ -281,6 +281,168 @@ public class RealStorageNodesIT {
         }
 
         log("Erasure failure test (4 failures) completed.");
+    }
+
+    // -------------------------------------------------------
+    // GET: TOMBSTONE (DELETE) TEST
+    // -------------------------------------------------------
+
+    @Test
+    void get_after_delete_returns_empty_realServers() throws Exception {
+
+        log("Generating random test data for tombstone test...");
+        byte[] data = new byte[DATA_SIZE];
+        new SecureRandom().nextBytes(data);
+
+        String key = "deleteMe";
+        UUID putReq = UUID.randomUUID();
+
+        log("[WORKER] PUT starting (deleteMe)...");
+        boolean putOk = worker.put(putReq, "b", key, data.length, new ByteArrayInputStream(data));
+        assertTrue(putOk, "PUT should succeed");
+
+        // Verify GET works before delete
+        log("[WORKER] GET starting (before delete)...");
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+            byte[] got = in.readAllBytes();
+            assertArrayEquals(data, got, "GET should return correct data before delete");
+        }
+
+        // Read v1 sequence number and partition from DB
+        var v1Version = databases.get(0).getLatestFileVersion("b/" + key);
+        assertTrue(v1Version.isPresent(), "v1 version should exist in DB");
+        long v1Seq = v1Version.get().sequenceNumber();
+
+        var metadata = databases.get(0).getItem("b/" + key);
+        assertTrue(metadata.isPresent(), "metadata should exist in DB");
+        int partition = metadata.get().partition();
+
+        // Write tombstone to ALL node DBs (simulating a delete commit)
+        long tombstoneSeq = v1Seq + 1;
+        log("Writing tombstone (seq=" + tombstoneSeq + ") to all " + databases.size() + " node DBs...");
+        for (Database db : databases) {
+            db.deleteItem("b/" + key, partition, tombstoneSeq);
+        }
+
+        // GET after delete should return empty (tombstone)
+        log("[WORKER] GET starting (after delete, expect empty)...");
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+            byte[] got = in.readAllBytes();
+            assertEquals(0, got.length, "GET after delete should return empty data (tombstone)");
+        }
+
+        log("Tombstone/delete test completed successfully.");
+    }
+
+    // -------------------------------------------------------
+    // GET: MULTIPART ROUNDTRIP TEST
+    // -------------------------------------------------------
+
+    @Test
+    void get_multipart_roundTrip_realServers() throws Exception {
+
+        log("Generating chunk data for multipart test...");
+        int chunkSize = DATA_SIZE / 2;
+        byte[] chunk1Data = new byte[chunkSize];
+        byte[] chunk2Data = new byte[chunkSize];
+        new SecureRandom().nextBytes(chunk1Data);
+        new SecureRandom().nextBytes(chunk2Data);
+
+        // PUT chunk 1
+        UUID chunk1Req = UUID.randomUUID();
+        log("[WORKER] PUT chunk1 starting...");
+        boolean put1Ok = worker.put(chunk1Req, "b", "part1", chunk1Data.length, new ByteArrayInputStream(chunk1Data));
+        assertTrue(put1Ok, "PUT chunk1 should succeed");
+
+        // PUT chunk 2
+        UUID chunk2Req = UUID.randomUUID();
+        log("[WORKER] PUT chunk2 starting...");
+        boolean put2Ok = worker.put(chunk2Req, "b", "part2", chunk2Data.length, new ByteArrayInputStream(chunk2Data));
+        assertTrue(put2Ok, "PUT chunk2 should succeed");
+
+        // Commit multipart object referencing both chunks
+        String uploadId = UUID.randomUUID().toString();
+        log("[WORKER] beginMultipartCommit starting...");
+        boolean commitOk = worker.beginMultipartCommit("b", "multipartFile", uploadId, List.of("b/part1", "b/part2"));
+        assertTrue(commitOk, "Multipart commit should succeed");
+
+        // GET the multipart object — should stream chunk1 then chunk2
+        log("[WORKER] GET multipart starting...");
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", "multipartFile")) {
+            byte[] got = in.readAllBytes();
+
+            byte[] expected = new byte[chunk1Data.length + chunk2Data.length];
+            System.arraycopy(chunk1Data, 0, expected, 0, chunk1Data.length);
+            System.arraycopy(chunk2Data, 0, expected, chunk1Data.length, chunk2Data.length);
+
+            log("[WORKER] GET multipart received " + got.length + " bytes (expected " + expected.length + ")");
+            assertArrayEquals(expected, got, "Multipart GET should return concatenated chunk data");
+        }
+
+        log("Multipart roundtrip test completed successfully.");
+    }
+
+    // -------------------------------------------------------
+    // GET: VERSION FALLBACK TEST
+    // -------------------------------------------------------
+
+    @Test
+    void get_blob_version_fallback_realServers() throws Exception {
+
+        log("Generating random test data for version fallback test...");
+        byte[] v1Data = new byte[DATA_SIZE];
+        new SecureRandom().nextBytes(v1Data);
+
+        String key = "fallbackKey";
+        UUID v1Req = UUID.randomUUID();
+
+        // PUT v1 normally (all 9 nodes receive shards)
+        log("[WORKER] PUT v1 starting...");
+        boolean putOk = worker.put(v1Req, "b", key, v1Data.length, new ByteArrayInputStream(v1Data));
+        assertTrue(putOk, "PUT v1 should succeed");
+
+        // Verify v1 is readable
+        log("[WORKER] GET v1 starting (sanity check)...");
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+            assertArrayEquals(v1Data, in.readAllBytes(), "v1 should be readable");
+        }
+
+        // Read v1 sequence number and partition from the first node's DB
+        var v1Version = databases.get(0).getLatestFileVersion("b/" + key);
+        assertTrue(v1Version.isPresent(), "v1 version should exist in DB");
+        long v1Seq = v1Version.get().sequenceNumber();
+
+        var metadata = databases.get(0).getItem("b/" + key);
+        assertTrue(metadata.isPresent(), "metadata should exist in DB");
+        int partition = metadata.get().partition();
+
+        // Simulate a partial v2 on only 3 nodes (< k=6)
+        // Write fake blob files and v2 metadata entries to nodes 0, 1, 2 only
+        String fakeV2RequestId = UUID.randomUUID().toString();
+        long v2Seq = v1Seq + 1;
+        log("Writing partial v2 (seq=" + v2Seq + ") to 3 nodes...");
+
+        for (int i = 0; i < 3; i++) {
+            // Write a fake blob file on disk so retrieve() finds it
+            Path blobDir = dataDirs.get(i).resolve("data").resolve("blobs");
+            String prefix = fakeV2RequestId.length() >= 3 ? fakeV2RequestId.substring(0, 3) : "000";
+            Path blobPath = blobDir.resolve(prefix).resolve(fakeV2RequestId);
+            Files.createDirectories(blobPath.getParent());
+            Files.write(blobPath, new byte[]{0, 1, 2, 3}); // dummy shard data
+
+            // Write v2 metadata to this node's DB
+            databases.get(i).putItem("b/" + key, partition, v2Seq, fakeV2RequestId);
+        }
+
+        // GET should: find v2 has only 3 shards (< k=6), fall back to v1 (9 shards), reconstruct v1
+        log("[WORKER] GET starting (expect v2 fallback to v1)...");
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+            byte[] got = in.readAllBytes();
+            log("[WORKER] GET received " + got.length + " bytes after version fallback");
+            assertArrayEquals(v1Data, got, "Should reconstruct v1 data after v2 has insufficient shards");
+        }
+
+        log("Version fallback test completed successfully.");
     }
 
     // -------------------------------------------------------

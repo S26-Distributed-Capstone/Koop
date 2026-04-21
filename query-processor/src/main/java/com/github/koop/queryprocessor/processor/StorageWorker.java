@@ -7,6 +7,7 @@ import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
+import com.google.protobuf.ByteString.Output;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -15,9 +16,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -192,7 +197,7 @@ public final class StorageWorker {
 
         int resolvedPartition = partition.getAsInt();
         ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
-        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
+        var resolvedNodes = es.getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         PipedOutputStream pos = new PipedOutputStream();
@@ -200,17 +205,192 @@ public final class StorageWorker {
 
         executor.execute(() -> {
             try (pos) {
-                streamReconstruct(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
+                processGetConsensus(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
             } catch (Exception e) {
                 logger.error("Failed to reconstruct stream for key {}", storageKey, e);
-                try {
-                    pos.close();
-                } catch (IOException ignored) {
-                }
             }
         });
 
         return pis;
+    }
+
+    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
+            OutputStream out) throws IOException {
+        // Initial fetch: gets data + metadata in one pass without specifying a version
+        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
+
+        if (responses.isEmpty()) {
+            throw new IOException("No reachable nodes for key " + storageKey);
+        }
+
+        // Determine highest version reported
+        long maxVersion = responses.stream().mapToLong(ShardResponse::version).max().orElse(-1);
+        List<ShardResponse> maxVersionResponses = responses.stream().filter(r -> r.version() == maxVersion).toList();
+        ShardResponse representative = maxVersionResponses.get(0);
+
+        if (representative.type() == ShardType.TOMBSTONE) {
+            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
+            throw new IOException("Object not found (deleted)");
+        }
+
+        if (representative.type() == ShardType.MULTIPART) {
+            logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion,
+                    storageKey);
+            handleMultipartGet(representative.chunks(), k, out);
+            return;
+        }
+
+        // Type is BLOB
+        if (maxVersionResponses.size() >= k) {
+            reconstructFromResponses(maxVersionResponses, nodes, k, n, out);
+            return;
+        }
+
+        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(),
+                responses);
+    }
+
+    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k,
+            int n,
+            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
+            throws IOException {
+        logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
+                maxVersion, storageKey, maxVersionShardCount, k);
+
+        List<Long> availableVersions = responses.stream()
+                .map(ShardResponse::version)
+                .distinct()
+                .sorted(Comparator.reverseOrder())
+                .toList();
+
+        if (availableVersions.size() < 2) {
+            throw new IOException("Only one version available for key " + storageKey
+                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + k + ")");
+        }
+
+        long oldVersion = availableVersions.get(1); // second-highest version
+        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
+        List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
+        if (validOldResponses.size() >= k) {
+            logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
+                    validOldResponses.size(), k);
+            reconstructFromResponses(validOldResponses, nodes, k, n, out);
+            return;
+        }
+
+        throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
+    }
+
+    private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
+        for (String chunkId : chunks) {
+            var partition = getRouting().getPartition(chunkId)
+                    .orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
+            List<InetSocketAddress> nodes = getNodesForPartition(partition);
+            processGetConsensus(partition, chunkId, nodes, k, nodes.size(), out);
+        }
+    }
+
+    private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes,
+            OptionalLong targetVersion) {
+        List<Callable<ShardResponse>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < nodes.size(); i++) {
+            final int index = i;
+            tasks.add(() -> {
+                InetSocketAddress node = nodes.get(index);
+                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
+                        partition, storageKey);
+                if (targetVersion.isPresent()) {
+                    uriStr += "?version=" + targetVersion.getAsLong();
+                }
+
+                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+                HttpResponse<InputStream> response = httpClient.send(request,
+                        HttpResponse.BodyHandlers.ofInputStream());
+
+                if (response.statusCode() == 200) {
+                    long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
+                    ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
+                    List<String> chunks = new ArrayList<>();
+                    if (type == ShardType.MULTIPART) {
+                        byte[] payload = response.body().readAllBytes();
+                        String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
+                        // Parse simple JSON array: ["chunk1","chunk2"]
+                        if (json.startsWith("[") && json.endsWith("]")) {
+                            String content = json.substring(1, json.length() - 1);
+                            if (!content.isEmpty()) {
+                                for (String token : content.split(",")) {
+                                    chunks.add(token.trim().replace("\"", ""));
+                                }
+                            }
+                        }
+                        return new ShardResponse(index, version, type, chunks, InputStream.nullInputStream());
+                    }
+
+                    return new ShardResponse(index, version, type, List.of(), response.body());
+                }
+                return null;
+            });
+        }
+
+        try {
+            return executor.invokeAll(tasks).stream()
+                    .map(future -> {
+                        try {
+                            return future.get();
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    })
+                    .filter(res -> res != null)
+                    .toList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        }
+    }
+
+    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k,
+            int n, OutputStream out) throws IOException {
+        InputStream[] ins = new InputStream[n];
+        boolean[] present = new boolean[n];
+
+        for (ShardResponse res : payloadResponses) {
+            if (res.nodeIndex() < n) {
+                ins[res.nodeIndex()] = res.payload();
+                present[res.nodeIndex()] = true;
+            }
+        }
+
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
+            byte[] buf = new byte[64 * 1024];
+            int bytesRead;
+            while ((bytesRead = reconstructed.read(buf)) != -1) {
+                out.write(buf, 0, bytesRead);
+            }
+            out.flush();
+        }
+    }
+
+    private enum ShardType {
+        BLOB,
+        MULTIPART,
+        TOMBSTONE;
+
+        static ShardType fromHeader(String value) {
+            if (value == null) {
+                return BLOB;
+            }
+            try {
+                return ShardType.valueOf(value.trim().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                return BLOB;
+            }
+        }
+    }
+
+    private record ShardResponse(int nodeIndex, long version, ShardType type, List<String> chunks,
+            InputStream payload) {
     }
 
     /**
@@ -218,9 +398,12 @@ public final class StorageWorker {
      * (the delete quorum) to acknowledge the tombstone.
      */
     public boolean delete(UUID requestID, String bucket, String key) {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
-        if (key == null)       throw new IllegalArgumentException("key is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = toStorageKey(bucket, key);
         Optional<PartitionAndSet> resolved = resolveErasureSet(storageKey);
@@ -246,8 +429,10 @@ public final class StorageWorker {
      * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
      */
     public boolean createBucket(UUID requestID, String bucket) {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
 
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
@@ -270,15 +455,18 @@ public final class StorageWorker {
      * a {@link Message.DeleteBucketMessage} to that partition's Kafka topic and
      * waiting for {@code k + 1} SNs (the delete quorum) to acknowledge.
      *
-     * <p>The bucket record is logically deleted (tombstoned in RocksDB). Objects
+     * <p>
+     * The bucket record is logically deleted (tombstoned in RocksDB). Objects
      * inside the bucket are not immediately purged; they are cleaned up
      * asynchronously by background compaction on each SN.
      *
      * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
      */
     public boolean deleteBucket(UUID requestID, String bucket) {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null)    throw new IllegalArgumentException("bucket is null");
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
 
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
@@ -297,10 +485,14 @@ public final class StorageWorker {
     }
 
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
-        if (bucket == null)   throw new IllegalArgumentException("bucket is null");
-        if (key == null)      throw new IllegalArgumentException("key is null");
-        if (uploadId == null) throw new IllegalArgumentException("uploadId is null");
-        if (chunks == null)   throw new IllegalArgumentException("chunks is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (uploadId == null)
+            throw new IllegalArgumentException("uploadId is null");
+        if (chunks == null)
+            throw new IllegalArgumentException("chunks is null");
 
         UUID requestId;
         try {
@@ -324,7 +516,8 @@ public final class StorageWorker {
             return false;
         }
 
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, erasureSetOpt.get().getWriteQuorum());
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
+                erasureSetOpt.get().getWriteQuorum());
     }
 
     public void shutdown() {
@@ -341,12 +534,14 @@ public final class StorageWorker {
      * the given routing key, returning an empty Optional if routing fails.
      * Used by delete/bucket operations to avoid repeating the same lookup logic.
      */
-    private record PartitionAndSet(int partition, ErasureSetConfiguration.ErasureSet erasureSet) {}
+    private record PartitionAndSet(int partition, ErasureSetConfiguration.ErasureSet erasureSet) {
+    }
 
     private Optional<PartitionAndSet> resolveErasureSet(String routingKey) {
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(routingKey);
-        if (partition.isEmpty()) return Optional.empty();
+        if (partition.isEmpty())
+            return Optional.empty();
         return r.getErasureSet(partition.getAsInt())
                 .map(es -> new PartitionAndSet(partition.getAsInt(), es));
     }
@@ -372,7 +567,7 @@ public final class StorageWorker {
             logger.info("ErasureRouting rebuilt");
         } else {
             logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
-                            + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
                     ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }
@@ -389,46 +584,17 @@ public final class StorageWorker {
         return bucket + "/" + key;
     }
 
-    private void streamReconstruct(int partition, String storageKey,
-                                   List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
 
-        InputStream[] ins = new InputStream[n];
-        boolean[] present = new boolean[n];
-
-        for (int i = 0; i < n; i++) {
-            try {
-                InetSocketAddress node = nodes.get(i);
-                URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
-                        node.getHostString(), node.getPort(), partition, storageKey));
-
-                HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
-                HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-
-                if (response.statusCode() == 200) {
-                    ins[i] = new ByteArrayInputStream(response.body());
-                    present[i] = true;
-                } else {
-                    present[i] = false;
-                }
-            } catch (Exception e) {
-                present[i] = false;
-            }
+    private List<InetSocketAddress> getNodesForPartition(int partition) {
+        ErasureRouting r = getRouting();
+        Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
+        if (esOpt.isEmpty()) {
+            logger.error("No erasure set found for partition {}", partition);
+            return List.of();
         }
-
-        int count = 0;
-        for (boolean b : present)
-            if (b)
-                count++;
-        if (count < k)
-            throw new IOException("lost too many shards; need " + k + ", got " + count);
-
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
-            byte[] buf = new byte[64 * 1024];
-            int bytesRead;
-            while ((bytesRead = reconstructed.read(buf)) != -1)
-                out.write(buf, 0, bytesRead);
-        }
-        out.flush();
+        return esOpt.get().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort()))
+                .toList();
     }
 
 }
