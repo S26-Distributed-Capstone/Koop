@@ -190,7 +190,9 @@ class MultipartUploadManagerTest {
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
         verify(storageWorker, times(1)).beginMultipartCommit(
-                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1", "2")));
+                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of(
+                        "bucket/" + MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1),
+                        "bucket/" + MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 2))));
     }
 
     @Test
@@ -281,7 +283,8 @@ class MultipartUploadManagerTest {
 
         assertEquals(MultipartUploadResult.Status.SUCCESS, result.status());
         verify(storageWorker, times(1)).beginMultipartCommit(
-                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1")));
+                eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of(
+                        "bucket/" + MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1))));
         assertEquals(null, cache.get(MultipartUploadSession.partSizeKey(uploadId, 1)));
         assertEquals(String.valueOf(p2.length), cache.get(MultipartUploadSession.partSizeKey(uploadId, 2)));
     }
@@ -297,7 +300,8 @@ class MultipartUploadManagerTest {
         manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
 
         reset(storageWorker);
-        when(storageWorker.beginMultipartCommit(eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of("1"))))
+        when(storageWorker.beginMultipartCommit(eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of(
+                        "bucket/" + MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1)))))
                 .thenReturn(false, true);
 
         List<StorageService.CompletedPart> parts = List.of(new StorageService.CompletedPart(1));
