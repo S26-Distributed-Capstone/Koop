@@ -558,11 +558,12 @@ public class S3GatewayE2EIT {
     private static void deleteRecursive(Path root) throws IOException {
         if (!Files.exists(root)) return;
 
-        Files.walk(root)
-                .sorted(Comparator.reverseOrder())
-                .forEach(p -> {
-                    try { Files.deleteIfExists(p); }
-                    catch (IOException ignored) {}
-                });
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try { Files.deleteIfExists(p); }
+                        catch (IOException ignored) {}
+                    });
+        }
     }
 }
