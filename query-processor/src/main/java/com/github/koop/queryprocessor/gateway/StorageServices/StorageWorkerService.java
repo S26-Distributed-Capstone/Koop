@@ -59,8 +59,17 @@ public class StorageWorkerService implements StorageService {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
         
-        // Execute directly in the calling thread (Javalin's virtual thread)
-        return storageWorker.get(requestId, bucket, key);
+        // Execute directly in the calling thread (Javalin's virtual thread).
+        // StorageWorker.get() throws IOException for tombstoned (deleted) objects.
+        // The gateway expects null to map to a 404 NoSuchKey response.
+        try {
+            return storageWorker.get(requestId, bucket, key);
+        } catch (java.io.IOException e) {
+            if (e.getMessage() != null && e.getMessage().contains("not found")) {
+                return null;
+            }
+            throw e;
+        }
     }
 
     @Override
