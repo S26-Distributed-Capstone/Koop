@@ -12,6 +12,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+/**
+ * Fake storage node HTTP server for testing.
+ * Mimics the real StorageNodeServer Javalin endpoints.
+ */
 public class FakeStorageNodeServer implements Closeable {
 
     private final Javalin app;
@@ -24,14 +28,14 @@ public class FakeStorageNodeServer implements Closeable {
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
-            config.http.maxRequestSize = 100_000_000L;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB — tests use large payloads
 
-            config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
-            config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
-            config.routes.delete("/store/{partition}/{bucket}/<key>", this::handleDelete);
+            config.routes.put("/store/{partition}/<key>", this::handlePut);
+            config.routes.get("/store/{partition}/<key>", this::handleGet);
+            config.routes.delete("/store/{partition}/<key>", this::handleDelete);
         });
 
-        app.start(0);
+        app.start(0); // OS picks a free port
     }
 
     public InetSocketAddress address() {
@@ -49,12 +53,10 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String bucket = ctx.pathParam("bucket");
-            String key    = ctx.pathParam("key"); 
-            String fullKey = bucket + "/" + key;
+            String key    = ctx.pathParam("key");
             byte[] data   = ctx.bodyAsBytes();
 
-            store.put(mapKey(partition, fullKey), data);
+            store.put(mapKey(partition, key), data);
             ctx.status(200).result("OK");
         } catch (Exception e) {
             logger.error("Error in fake PUT", e);
@@ -69,15 +71,13 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String bucket = ctx.pathParam("bucket");
             String key    = ctx.pathParam("key");
-            String fullKey = bucket + "/" + key;
 
-            byte[] data = store.get(mapKey(partition, fullKey));
+            byte[] data = store.get(mapKey(partition, key));
             if (data != null) {
                 ctx.status(200)
-                   .header("Content-Type", "application/octet-stream")
-                   .result(data);
+                        .header("Content-Type", "application/octet-stream")
+                        .result(data);
             } else {
                 ctx.status(404).result("");
             }
@@ -94,11 +94,9 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
-            String bucket = ctx.pathParam("bucket");
             String key    = ctx.pathParam("key");
-            String fullKey = bucket + "/" + key;
 
-            store.remove(mapKey(partition, fullKey));
+            store.remove(mapKey(partition, key));
             ctx.status(200).result("OK");
         } catch (Exception e) {
             logger.error("Error in fake DELETE", e);
@@ -106,8 +104,18 @@ public class FakeStorageNodeServer implements Closeable {
         }
     }
 
-    private static String mapKey(int partition, String fullKey) {
-        return partition + "|" + fullKey;
+    private static String mapKey(int partition, String key) {
+        return partition + "|" + key;
+    }
+
+    /**
+     * Directly removes a stored shard from the in-memory store.
+     * Called by {@link AckingFakeStorageNodeServer} when it receives a
+     * {@link com.github.koop.common.messages.Message.DeleteMessage} from the
+     * pub/sub bus, mirroring what the real SN does after writing its tombstone.
+     */
+    void deleteData(int partition, String storageKey) {
+        store.remove(mapKey(partition, storageKey));
     }
 
     @Override

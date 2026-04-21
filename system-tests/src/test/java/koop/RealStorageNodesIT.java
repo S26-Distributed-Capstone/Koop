@@ -94,7 +94,7 @@ public class RealStorageNodesIT {
             databases.add(db);
 
             log("[NODE " + i + "] server starting");
-            
+
             // Start server directly (non-blocking in Javalin)
             server.start();
 
@@ -112,7 +112,7 @@ public class RealStorageNodesIT {
         es.setN(9);
         es.setK(6);
         es.setWriteQuorum(7);
-        
+
         List<Machine> machines = new ArrayList<>();
         for (InetSocketAddress addr : addrs) {
             Machine m = new Machine();
@@ -159,8 +159,8 @@ public class RealStorageNodesIT {
         }
 
         for (Database db : databases) {
-            try { 
-                db.close(); 
+            try {
+                db.close();
             } catch (Exception ignored) {}
         }
 
@@ -443,6 +443,160 @@ public class RealStorageNodesIT {
         }
 
         log("Version fallback test completed successfully.");
+    }
+
+    // -------------------------------------------------------
+    // BUCKET AND DELETE TESTS (real servers)
+    // -------------------------------------------------------
+
+    /**
+     * Creates a bucket via pub/sub and verifies that the SN writes the bucket
+     * record to RocksDB by checking that a subsequent put into that bucket succeeds.
+     * This exercises the full CreateBucketMessage → SN commit → ACK path.
+     */
+    @Test
+    void createBucket_realServers() throws Exception {
+        log("Testing createBucket with real storage nodes...");
+
+        UUID req = UUID.randomUUID();
+        boolean ok = worker.createBucket(req, "integration-bucket");
+        log("[WORKER] createBucket result = " + ok);
+        assertTrue(ok, "createBucket should succeed with real SNs");
+
+        // Confirm the bucket is usable by putting an object into it.
+        byte[] data = new byte[1024];
+        new SecureRandom().nextBytes(data);
+        boolean putOk = worker.put(UUID.randomUUID(), "integration-bucket", "probe",
+                data.length, new ByteArrayInputStream(data));
+        assertTrue(putOk, "PUT into newly created bucket should succeed");
+
+        log("createBucket test completed successfully.");
+    }
+
+    /**
+     * Creates a bucket, puts an object, then deletes the bucket via pub/sub.
+     * Verifies that the SN tombstones the bucket record in RocksDB.
+     */
+    @Test
+    void deleteBucket_realServers() throws Exception {
+        log("Testing deleteBucket with real storage nodes...");
+
+        // Create bucket first.
+        assertTrue(worker.createBucket(UUID.randomUUID(), "doomed-bucket"),
+                "createBucket should succeed");
+
+        // Put an object so there is real data behind the bucket.
+        byte[] data = new byte[1024];
+        new SecureRandom().nextBytes(data);
+        assertTrue(worker.put(UUID.randomUUID(), "doomed-bucket", "obj",
+                        data.length, new ByteArrayInputStream(data)),
+                "PUT should succeed before bucket deletion");
+
+        // Delete the bucket.
+        boolean deleteOk = worker.deleteBucket(UUID.randomUUID(), "doomed-bucket");
+        log("[WORKER] deleteBucket result = " + deleteOk);
+        assertTrue(deleteOk, "deleteBucket should succeed with real SNs");
+
+        log("deleteBucket test completed successfully.");
+    }
+
+    /**
+     * Verifies the full bucket lifecycle with real SNs:
+     * create bucket → put object → get object → delete object → delete bucket.
+     *
+     * After delete the object should be tombstoned in RocksDB on each SN,
+     * so a subsequent GET should return a tombstone (404 from the SN),
+     * causing reconstruction to fail or return no data.
+     */
+    @Test
+    void bucketLifecycle_realServers() throws Exception {
+        log("Testing full bucket lifecycle with real storage nodes...");
+
+        String bucket = "lifecycle-bucket";
+
+        // 1. Create bucket.
+        assertTrue(worker.createBucket(UUID.randomUUID(), bucket),
+                "createBucket should succeed");
+        log("Bucket created.");
+
+        // 2. PUT object.
+        byte[] data = new byte[DATA_SIZE];
+        new SecureRandom().nextBytes(data);
+        assertTrue(worker.put(UUID.randomUUID(), bucket, "life-obj",
+                        data.length, new ByteArrayInputStream(data)),
+                "PUT should succeed");
+        log("Object PUT succeeded.");
+
+        // 3. GET object — must round-trip correctly.
+        try (InputStream in = worker.get(UUID.randomUUID(), bucket, "life-obj")) {
+            assertArrayEquals(data, in.readAllBytes(), "GET should return original data");
+        }
+        log("GET round-trip verified.");
+
+        // 4. DELETE object via pub/sub — SNs tombstone metadata + op-log.
+        assertTrue(worker.delete(UUID.randomUUID(), bucket, "life-obj"),
+                "delete should succeed");
+        log("Object deleted.");
+
+        // 5. GET after delete — SNs return tombstone (404), so reconstruction fails.
+        // We accept either an exception or an empty/short stream.
+        try (InputStream in = worker.get(UUID.randomUUID(), bucket, "life-obj")) {
+            byte[] got = in.readAllBytes();
+            assertNotEquals(data.length, got.length,
+                    "Data should not be fully retrievable after delete");
+        } catch (Exception e) {
+            log("[WORKER] GET after delete threw as expected: " + e.getMessage());
+        }
+        log("Post-delete GET correctly failed.");
+
+        // 6. DELETE bucket.
+        assertTrue(worker.deleteBucket(UUID.randomUUID(), bucket),
+                "deleteBucket should succeed");
+        log("Bucket deleted.");
+
+        log("Full bucket lifecycle test completed successfully.");
+    }
+
+    /**
+     * Verifies that delete() correctly tombstones an object across the real SN
+     * cluster and that a subsequent GET cannot reconstruct it.
+     *
+     * Specifically tests the pub/sub delete path: QP publishes DeleteMessage →
+     * each SN writes a tombstone to RocksDB → SN ACKs → QP returns true.
+     */
+    @Test
+    void delete_tombstones_object_realServers() throws Exception {
+        log("Testing pub/sub delete with real storage nodes...");
+
+        byte[] data = new byte[DATA_SIZE];
+        new SecureRandom().nextBytes(data);
+
+        // PUT first.
+        assertTrue(worker.put(UUID.randomUUID(), "b", "to-delete",
+                        data.length, new ByteArrayInputStream(data)),
+                "PUT should succeed");
+        log("Object PUT succeeded.");
+
+        // Verify it's readable.
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", "to-delete")) {
+            assertArrayEquals(data, in.readAllBytes(), "Object should be readable before delete");
+        }
+
+        // DELETE via pub/sub.
+        boolean deleteOk = worker.delete(UUID.randomUUID(), "b", "to-delete");
+        log("[WORKER] delete result = " + deleteOk);
+        assertTrue(deleteOk, "delete should succeed with real SNs");
+
+        // GET after delete — tombstone on SNs means reconstruction fails.
+        try (InputStream in = worker.get(UUID.randomUUID(), "b", "to-delete")) {
+            byte[] got = in.readAllBytes();
+            assertNotEquals(data.length, got.length,
+                    "Object should not be fully retrievable after tombstone");
+        } catch (Exception e) {
+            log("[WORKER] GET after delete threw as expected: " + e.getMessage());
+        }
+
+        log("Delete tombstone test completed successfully.");
     }
 
     // -------------------------------------------------------

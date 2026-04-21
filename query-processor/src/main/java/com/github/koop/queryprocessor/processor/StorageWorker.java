@@ -3,12 +3,8 @@ package com.github.koop.queryprocessor.processor;
 import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
-import com.github.koop.common.metadata.ErasureSetConfiguration.ErasureSet;
-import com.github.koop.common.metadata.ErasureSetConfiguration.Machine;
-import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
-import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpread;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.google.protobuf.ByteString.Output;
@@ -54,9 +50,8 @@ public final class StorageWorker {
     private final CommitCoordinator commitCoordinator;
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
-    // Convenience constructor that restores the original single-arg signature.
-    // Creates a MemoryPubSub-backed CommitCoordinator on an OS-assigned port,
-    // which is sufficient for tests that supply their own MetadataClient.
+    // Convenience constructor — creates a MemoryPubSub-backed CommitCoordinator
+    // on an OS-assigned port. Useful when only a MetadataClient is available.
     public StorageWorker(MetadataClient metadataClient) {
         this(metadataClient, buildDefaultCommitCoordinator());
     }
@@ -180,10 +175,13 @@ public final class StorageWorker {
         return committed;
     }
 
-public InputStream get(UUID requestID, String bucket, String key) throws IOException {
-        if (requestID == null) throw new IllegalArgumentException("requestID is null");
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (key == null) throw new IllegalArgumentException("key is null");
+    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "/" + key;
         ErasureRouting r = getRouting();
@@ -216,7 +214,8 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         return pis;
     }
 
-    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
+    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
+            OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
         List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
 
@@ -235,7 +234,8 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         }
 
         if (representative.type() == ShardType.MULTIPART) {
-            logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion, storageKey);
+            logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion,
+                    storageKey);
             handleMultipartGet(representative.chunks(), k, out);
             return;
         }
@@ -246,11 +246,14 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
             return;
         }
 
-        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(), responses);
+        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(),
+                responses);
     }
 
-    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
-            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses) throws IOException {
+    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k,
+            int n,
+            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
+            throws IOException {
         logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
                 maxVersion, storageKey, maxVersionShardCount, k);
 
@@ -280,27 +283,30 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
 
     private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
         for (String chunkId : chunks) {
-            var partition = getRouting().getPartition(chunkId).orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
+            var partition = getRouting().getPartition(chunkId)
+                    .orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
             List<InetSocketAddress> nodes = getNodesForPartition(partition);
             processGetConsensus(partition, chunkId, nodes, k, nodes.size(), out);
         }
     }
-    
 
-    private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes, OptionalLong targetVersion) {
+    private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes,
+            OptionalLong targetVersion) {
         List<Callable<ShardResponse>> tasks = new ArrayList<>();
-        
+
         for (int i = 0; i < nodes.size(); i++) {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = nodes.get(index);
-                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(), partition, storageKey);
+                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
+                        partition, storageKey);
                 if (targetVersion.isPresent()) {
                     uriStr += "?version=" + targetVersion.getAsLong();
                 }
 
                 HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
-                HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                HttpResponse<InputStream> response = httpClient.send(request,
+                        HttpResponse.BodyHandlers.ofInputStream());
 
                 if (response.statusCode() == 200) {
                     long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
@@ -320,7 +326,7 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                         }
                         return new ShardResponse(index, version, type, chunks, InputStream.nullInputStream());
                     }
-                    
+
                     return new ShardResponse(index, version, type, List.of(), response.body());
                 }
                 return null;
@@ -330,8 +336,11 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         try {
             return executor.invokeAll(tasks).stream()
                     .map(future -> {
-                        try { return future.get(); } 
-                        catch (Exception e) { return null; }
+                        try {
+                            return future.get();
+                        } catch (Exception e) {
+                            return null;
+                        }
                     })
                     .filter(res -> res != null)
                     .toList();
@@ -341,7 +350,8 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         }
     }
 
-    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k, int n, OutputStream out) throws IOException {
+    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k,
+            int n, OutputStream out) throws IOException {
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
 
@@ -379,9 +389,15 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         }
     }
 
-    private record ShardResponse(int nodeIndex, long version, ShardType type, List<String> chunks, InputStream payload) {}
+    private record ShardResponse(int nodeIndex, long version, ShardType type, List<String> chunks,
+            InputStream payload) {
+    }
 
-    public boolean delete(UUID requestID, String bucket, String key) throws IOException {
+    /**
+     * Publishes a delete command via pub/sub and waits for {@code k + 1} SNs
+     * (the delete quorum) to acknowledge the tombstone.
+     */
+    public boolean delete(UUID requestID, String bucket, String key) {
         if (requestID == null)
             throw new IllegalArgumentException("requestID is null");
         if (bucket == null)
@@ -389,74 +405,94 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         if (key == null)
             throw new IllegalArgumentException("key is null");
 
-        String storageKey = bucket + "/" + key;
-        ErasureRouting r = getRouting();
-        OptionalInt partition = r.getPartition(storageKey);
-        Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
-                ? r.getErasureSet(partition.getAsInt())
-                : Optional.empty();
-
-        if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
+        String storageKey = toStorageKey(bucket, key);
+        Optional<PartitionAndSet> resolved = resolveErasureSet(storageKey);
+        if (resolved.isEmpty()) {
             logger.error("Routing failed for key {}, aborting delete", storageKey);
             return false;
         }
 
-        int resolvedPartition = partition.getAsInt();
-        ErasureSetConfiguration.ErasureSet es = erasureSetOpt.get();
-        List<InetSocketAddress> resolvedNodes = es.getMachines().stream()
-                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
-
-        List<Callable<Boolean>> tasks = new LinkedList<>();
-        for (int i = 0; i < es.getN(); i++) {
-            final int index = i;
-            tasks.add(() -> {
-                try {
-                    InetSocketAddress node = resolvedNodes.get(index);
-                    URI uri = URI.create(String.format("http://%s:%d/store/%d/%s",
-                            node.getHostString(), node.getPort(), resolvedPartition, storageKey));
-
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(uri)
-                            .DELETE()
-                            .build();
-
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                    if (response.statusCode() != 200) {
-                        logger.trace("DELETE failed for node {}: HTTP {}", node, response.statusCode());
-                        return false;
-                    }
-                    return true;
-                } catch (Exception e) {
-                    logger.warn("Exception in delete task for node {}: {}", resolvedNodes.get(index), e.getMessage());
-                    return false;
-                }
-            });
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
+        boolean deleted = commitCoordinator.beginDelete(
+                requestID, resolved.get().partition(), bucket, key, deleteQuorum);
+        if (!deleted) {
+            logger.error("Delete commit failed for requestId {} (quorum ACKs not received)", requestID);
         }
+        return deleted;
+    }
 
-        boolean success;
-        try {
-            success = executor.invokeAll(tasks).stream().allMatch(future -> {
-                try {
-                    return future.get();
-                } catch (Exception e) {
-                    logger.warn("Exception in delete task: {}", e.getMessage());
-                    return false;
-                }
-            });
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.warn("Delete operation interrupted");
+    /**
+     * Creates a bucket by hashing the bucket name to a partition, then publishing
+     * a {@link Message.CreateBucketMessage} to that partition's Kafka topic and
+     * waiting for {@code k + 1} SNs (the delete quorum) to acknowledge.
+     *
+     * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
+     */
+    public boolean createBucket(UUID requestID, String bucket) {
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting createBucket", bucket);
             return false;
         }
-        return success;
+
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
+        boolean created = commitCoordinator.beginCreateBucket(
+                requestID, resolved.get().partition(), bucket, deleteQuorum);
+        if (!created) {
+            logger.error("CreateBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
+                    requestID, bucket);
+        }
+        return created;
+    }
+
+    /**
+     * Deletes a bucket by hashing the bucket name to a partition, then publishing
+     * a {@link Message.DeleteBucketMessage} to that partition's Kafka topic and
+     * waiting for {@code k + 1} SNs (the delete quorum) to acknowledge.
+     *
+     * <p>
+     * The bucket record is logically deleted (tombstoned in RocksDB). Objects
+     * inside the bucket are not immediately purged; they are cleaned up
+     * asynchronously by background compaction on each SN.
+     *
+     * @return {@code true} iff the required quorum of SNs ACKed within the timeout.
+     */
+    public boolean deleteBucket(UUID requestID, String bucket) {
+        if (requestID == null)
+            throw new IllegalArgumentException("requestID is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting deleteBucket", bucket);
+            return false;
+        }
+
+        int deleteQuorum = resolved.get().erasureSet().getK() + 1;
+        boolean deleted = commitCoordinator.beginDeleteBucket(
+                requestID, resolved.get().partition(), bucket, deleteQuorum);
+        if (!deleted) {
+            logger.error("DeleteBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
+                    requestID, bucket);
+        }
+        return deleted;
     }
 
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
-        if (bucket == null)   throw new IllegalArgumentException("bucket is null");
-        if (key == null)      throw new IllegalArgumentException("key is null");
-        if (uploadId == null) throw new IllegalArgumentException("uploadId is null");
-        if (chunks == null)   throw new IllegalArgumentException("chunks is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (key == null)
+            throw new IllegalArgumentException("key is null");
+        if (uploadId == null)
+            throw new IllegalArgumentException("uploadId is null");
+        if (chunks == null)
+            throw new IllegalArgumentException("chunks is null");
 
         UUID requestId;
         try {
@@ -480,7 +516,8 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
             return false;
         }
 
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, erasureSetOpt.get().getWriteQuorum());
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
+                erasureSetOpt.get().getWriteQuorum());
     }
 
     public void shutdown() {
@@ -491,6 +528,23 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Resolves the partition and {@link ErasureSetConfiguration.ErasureSet} for
+     * the given routing key, returning an empty Optional if routing fails.
+     * Used by delete/bucket operations to avoid repeating the same lookup logic.
+     */
+    private record PartitionAndSet(int partition, ErasureSetConfiguration.ErasureSet erasureSet) {
+    }
+
+    private Optional<PartitionAndSet> resolveErasureSet(String routingKey) {
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(routingKey);
+        if (partition.isEmpty())
+            return Optional.empty();
+        return r.getErasureSet(partition.getAsInt())
+                .map(es -> new PartitionAndSet(partition.getAsInt(), es));
+    }
 
     private void registerListeners() {
         this.metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
@@ -530,6 +584,7 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
         return bucket + "/" + key;
     }
 
+
     private List<InetSocketAddress> getNodesForPartition(int partition) {
         ErasureRouting r = getRouting();
         Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
@@ -542,33 +597,4 @@ public InputStream get(UUID requestID, String bucket, String key) throws IOExcep
                 .toList();
     }
 
-
-
-    private static PartitionSpreadConfiguration buildTestPartitionSpread() {
-        PartitionSpreadConfiguration ps = new PartitionSpreadConfiguration();
-        List<PartitionSpread> spreads = new ArrayList<>();
-        for (int s = 0; s < 3; s++) {
-            PartitionSpread spread = new PartitionSpread();
-            spread.setErasureSet(s + 1); // set numbers 1, 2, 3
-            List<Integer> partitions = new ArrayList<>();
-            for (int p = s * 33; p < (s + 1) * 33; p++)
-                partitions.add(p);
-            spread.setPartitions(partitions);
-            spreads.add(spread);
-        }
-        ps.setPartitionSpread(spreads);
-        return ps;
-    }
-
-    private static ErasureSet toErasureSet(int number, List<InetSocketAddress> addresses) {
-        ErasureSet es = new ErasureSet();
-        es.setNumber(number);
-        es.setMachines(addresses.stream().map(addr -> {
-            Machine m = new Machine();
-            m.setIp(addr.getHostString());
-            m.setPort(addr.getPort());
-            return m;
-        }).toList());
-        return es;
-    }
 }
