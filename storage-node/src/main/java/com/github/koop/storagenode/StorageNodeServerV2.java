@@ -246,9 +246,10 @@ public class StorageNodeServerV2 {
                     case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
                 };
 
-                ctx.header("X-Object-Version", String.valueOf(responseSequenceNumber));
+                ctx.header("X-Koop-Version", String.valueOf(responseSequenceNumber));
 
                 if (response instanceof StorageNodeV2.FileObject fo) {
+                    ctx.header("X-Koop-Type", "BLOB");
                     var fc = fo.data();
                     ctx.status(200)
                             .header("Content-Type", "application/octet-stream")
@@ -274,14 +275,16 @@ public class StorageNodeServerV2 {
                             responseSequenceNumber, size);
 
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
+                    ctx.header("X-Koop-Type", "MULTIPART");
                     ctx.status(200)
-                            .header("Content-Type", "application/json")
-                            .json(md.version().chunks());
-                    logger.debug("GET partition={} fullKey={} version={} returned multipart chunk list", partition, fullKey,
+                       .header("Content-Type", "application/json")
+                       .json(md.version().chunks());
+                    logger.debug("GET partition={} fullKey={} version={} returned multipart chunks in body", partition, fullKey,
                             responseSequenceNumber);
 
                 } else if (response instanceof StorageNodeV2.Tombstone) {
-                    ctx.status(404).result("NOT_FOUND (Tombstone)");
+                    ctx.header("X-Koop-Type", "TOMBSTONE");
+                    ctx.status(200).result("");
                     logger.debug("GET partition={} fullKey={} version={} hit tombstone", partition, fullKey,
                             responseSequenceNumber);
                 }
