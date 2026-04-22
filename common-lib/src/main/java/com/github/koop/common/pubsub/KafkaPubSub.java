@@ -20,9 +20,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -65,6 +67,8 @@ public class KafkaPubSub implements PubSub {
     private final KafkaConsumer<String, byte[]> consumer;
     private final Set<String> subscribedTopics = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicBoolean subscriptionDirty = new AtomicBoolean(false);
+    private final BlockingQueue<Runnable> subscriptionChanges = new LinkedBlockingQueue<>();
     private final ExecutorService consumerThread = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "kafka-consumer");
         t.setDaemon(true);
@@ -113,25 +117,27 @@ public class KafkaPubSub implements PubSub {
     }
 
     /**
-     * Subscribes to {@code topic}. The consumer will start receiving messages
-     * for this topic on the next poll cycle. Safe to call before or after
-     * {@link #start}.
+     * Subscribes to {@code topic}. The subscription change is queued and applied
+     * on the consumer poll thread to avoid KafkaConsumer thread-safety violations.
      */
     @Override
     public void sub(String topic) {
         subscribedTopics.add(topic);
-        updateConsumerSubscription();
-        logger.debug("Subscribed to topic {}", topic);
+        subscriptionChanges.offer(() -> updateConsumerSubscription());
+        consumer.wakeup(); // interrupt current poll() so the change is picked up quickly
+        logger.debug("Queued subscription for topic {}", topic);
     }
 
     /**
-     * Unsubscribes from {@code topic}. Takes effect on the next poll cycle.
+     * Unsubscribes from {@code topic}. The change is queued and applied on the
+     * consumer poll thread.
      */
     @Override
     public void drop(String topic) {
         subscribedTopics.remove(topic);
-        updateConsumerSubscription();
-        logger.debug("Dropped subscription for topic {}", topic);
+        subscriptionChanges.offer(() -> updateConsumerSubscription());
+        consumer.wakeup();
+        logger.debug("Queued drop for topic {}", topic);
     }
 
     /**
@@ -151,7 +157,7 @@ public class KafkaPubSub implements PubSub {
     @Override
     public void close() {
         running.set(false);
-        consumer.wakeup(); // interrupts the blocking poll() call
+        consumer.wakeup(); // interrupts the blocking poll() call so loop checks running flag
         consumerThread.shutdown();
         try {
             if (!consumerThread.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
@@ -180,33 +186,56 @@ public class KafkaPubSub implements PubSub {
     private void pollLoop() {
         try {
             while (running.get()) {
-                ConsumerRecords<String, byte[]> records = consumer.poll(POLL_TIMEOUT);
-                records.forEach(record -> {
-                    PubSubListener l = listener;
-                    if (l != null) {
-                        try {
-                            l.onMessage(record.topic(), record.offset(), record.value());
-                        } catch (Exception e) {
-                            logger.error("Error dispatching message from topic {} offset {}: {}",
-                                    record.topic(), record.offset(), e.getMessage(), e);
+                // Drain any pending subscription changes on this thread
+                // (KafkaConsumer is not thread-safe — subscribe() must be called here)
+                Runnable change;
+                while ((change = subscriptionChanges.poll()) != null) {
+                    change.run();
+                }
+
+                // If not subscribed to anything, skip poll to avoid IllegalStateException
+                if (subscribedTopics.isEmpty()) {
+                    Thread.sleep(100);
+                    continue;
+                }
+
+                try {
+                    ConsumerRecords<String, byte[]> records = consumer.poll(POLL_TIMEOUT);
+                    records.forEach(record -> {
+                        PubSubListener l = listener;
+                        if (l != null) {
+                            try {
+                                l.onMessage(record.topic(), record.offset(), record.value());
+                            } catch (Exception e) {
+                                logger.error("Error dispatching message from topic {} offset {}: {}",
+                                        record.topic(), record.offset(), e.getMessage(), e);
+                            }
                         }
-                    }
-                });
+                    });
+                } catch (WakeupException e) {
+                    // Wakeup was triggered by sub()/drop()/close() — loop back to
+                    // drain the subscription queue or check running flag
+                    logger.debug("Consumer woken up — reprocessing subscription changes");
+                }
             }
-        } catch (WakeupException e) {
-            // Expected on close() — not an error
-            logger.debug("Kafka consumer poll interrupted by wakeup");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             logger.error("Kafka consumer poll loop failed: {}", e.getMessage(), e);
         }
     }
 
-    /** Re-subscribes the consumer to the current set of topics. */
+    /**
+     * Re-subscribes the consumer to the current set of topics.
+     * MUST be called from the consumer poll thread only.
+     */
     private void updateConsumerSubscription() {
         if (subscribedTopics.isEmpty()) {
             consumer.unsubscribe();
+            logger.debug("Unsubscribed from all topics");
         } else {
             consumer.subscribe(new ArrayList<>(subscribedTopics));
+            logger.debug("Updated subscription to topics: {}", subscribedTopics);
         }
     }
 
