@@ -18,10 +18,6 @@ import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.CompletedPart;
-import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.DeletedObject;
-import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.FoundObject;
-import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.GetObjectResult;
-import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.MissingObject;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
@@ -202,15 +198,15 @@ public class Main {
         String key = ctx.pathParam("key");
         String resourcePath = "/" + bucket + "/" + key;
         try {
-            GetObjectResult result = storage.getObject(bucket, key);
-            if (result instanceof FoundObject found) {
+            InputStream data = storage.getObject(bucket, key);
+            if (data != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
                 // Provide a stable, per-object ETag derived from bucket and key.
                 //String etag = "\"" + Integer.toHexString((bucket + "/" + key).hashCode()) + "\"";
                 //ctx.header("ETag", etag); //Ignore Etag for now. 
-                ctx.result(found.data());
-            } else if (result instanceof MissingObject || result instanceof DeletedObject) {
+                ctx.result(data);
+            } else {
                 ctx.status(404);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildS3ErrorXml("NoSuchKey",

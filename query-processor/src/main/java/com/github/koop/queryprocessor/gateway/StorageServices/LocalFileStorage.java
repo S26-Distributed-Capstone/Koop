@@ -29,13 +29,13 @@ public class LocalFileStorage implements StorageService {
     }
     
     @Override
-    public GetObjectResult getObject(String bucket, String key) throws Exception {
+    public InputStream getObject(String bucket, String key) throws Exception {
         Path filePath = rootDir.resolve(bucket).resolve(key);
         if(Files.exists(filePath)){
             System.out.println("[LocalFileStorage] Retrieved: " + filePath);
-            return new FoundObject(Files.newInputStream(filePath));
+            return Files.newInputStream(filePath);
         }
-        return new MissingObject();
+        return null;
     }
 
     @Override
