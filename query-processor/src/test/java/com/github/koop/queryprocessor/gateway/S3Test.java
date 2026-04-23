@@ -267,6 +267,22 @@ class S3Test {
         verify(mockStorage).getObject("videos", "clip.mp4");
     }
 
+    @Test
+    void sdkGetObject_emptyObject_returns200_withZeroBytes() throws Exception {
+        when(mockStorage.getObject(BUCKET, "empty-object")).thenReturn(new ByteArrayInputStream(new byte[0]));
+
+        ResponseBytes<GetObjectResponse> response = s3.getObject(
+                GetObjectRequest.builder()
+                        .bucket(BUCKET)
+                        .key("empty-object")
+                        .build(),
+                ResponseTransformer.toBytes()
+        );
+
+        assertEquals(0, response.asByteArray().length,
+                "Legitimate empty objects must return 200 with a zero-byte body");
+    }
+
     // ===================== DELETE OBJECT =====================
 
     @Test

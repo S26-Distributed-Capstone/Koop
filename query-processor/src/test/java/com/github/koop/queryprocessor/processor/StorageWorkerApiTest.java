@@ -212,11 +212,9 @@ public class StorageWorkerApiTest {
             assertTrue(prodWorker.delete(UUID.randomUUID(), "prod", "fileP"),
                     "production constructor: delete should succeed");
 
-            // After deletion the shards are gone so reconstruction should fail.
-            try (InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP")) {
-                assertNotEquals(data.length, in.readAllBytes().length,
-                        "production constructor: data should not be retrievable after delete");
-            }
+            // After deletion the shards are gone so get should return null.
+            InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP");
+            assertNull(in, "production constructor: get should return null after delete");
 
             prodWorker.shutdown();
         } finally {
@@ -542,10 +540,9 @@ public class StorageWorkerApiTest {
 
             assertTrue(w.delete(UUID.randomUUID(), "lifecycle-bucket", "obj1"), "delete should succeed");
 
-            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
-                assertNotEquals(data.length, in.readAllBytes().length,
-                        "data should not be retrievable after delete");
-            }
+            // After deletion the shards are gone so get should return null.
+            InputStream deletedIn = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1");
+            assertNull(deletedIn, "data should not be retrievable after delete");
 
             assertTrue(w.deleteBucket(UUID.randomUUID(), "lifecycle-bucket"), "deleteBucket should succeed");
         } finally {

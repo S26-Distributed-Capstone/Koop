@@ -20,7 +20,6 @@ import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 import io.javalin.Javalin;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.Disabled;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -258,15 +257,8 @@ public class S3GatewayE2EIT {
 
     // =====================================================================
     // TEST 2: PUT → DELETE → GET returns 404
-    // NOTE: StorageWorker.delete() sends direct HTTP DELETE requests to storage
-    // nodes, but StorageNodeServerV2 only registers PUT and GET routes — there
-    // is no DELETE route. Deletes are instead processed via pub/sub messages
-    // (Message.DeleteMessage → processSequencerMessage). This disconnect means
-    // delete via the gateway always returns 500. This is a pre-existing
-    // architecture gap that should be addressed in a separate issue.
     // =====================================================================
     @Test
-    @Disabled("StorageWorker.delete() uses direct HTTP DELETE but storage nodes handle deletes via pub/sub only — no DELETE route exists")
     void e2e_putObject_thenDeleteObject_thenGet_returns404() throws Exception {
         log("[E2E] PUT → DELETE → GET 404 test");
 
@@ -311,6 +303,37 @@ public class S3GatewayE2EIT {
         log("[E2E] GET after DELETE correctly returned 404");
 
         log("[E2E] PUT → DELETE → GET 404 test PASSED");
+    }
+
+    // =====================================================================
+    // TEST: Legitimate empty object PUT → GET should return 200 with 0 bytes
+    // =====================================================================
+    @Test
+    void e2e_putEmptyObject_thenGet_returnsZeroBytes() throws Exception {
+        log("[E2E] Empty object PUT → GET test");
+
+        byte[] data = new byte[0];
+        String key = "empty-object.bin";
+
+        s3.putObject(
+                PutObjectRequest.builder()
+                        .bucket(BUCKET)
+                        .key(key)
+                        .contentLength(0L)
+                        .build(),
+                RequestBody.fromBytes(data)
+        );
+        log("[E2E] Empty-object PUT completed");
+
+        ResponseBytes<GetObjectResponse> response = s3.getObject(
+                GetObjectRequest.builder().bucket(BUCKET).key(key).build(),
+                ResponseTransformer.toBytes()
+        );
+
+        assertEquals(0, response.asByteArray().length,
+                "GET of a legitimate empty object should return 200 with 0 bytes");
+
+        log("[E2E] Empty object PUT → GET test PASSED");
     }
 
     // =====================================================================
@@ -398,14 +421,12 @@ public class S3GatewayE2EIT {
     }
 
     // =====================================================================
-    // TEST 4: Multipart upload → abort → GET returns empty
-    // NOTE: After aborting a multipart upload, the key was never committed
-    // as a multipart object. StorageWorker.get() returns an empty InputStream
-    // (0-byte 200 response) for non-existent keys instead of throwing/returning null.
-    // This is a known pre-existing behavior (not a 404).
+    // TEST 4: Multipart upload → abort → GET returns 404
+    // After aborting a multipart upload, the key was never committed
+    // as a multipart object. GET should return 404 NoSuchKey.
     // =====================================================================
     @Test
-    void e2e_multipartUpload_abort_thenGet_returnsEmpty() throws Exception {
+    void e2e_multipartUpload_abort_thenGet_returns404() throws Exception {
         log("[E2E] Multipart abort test");
 
         String key = "mpu-abort-test.bin";
@@ -446,15 +467,16 @@ public class S3GatewayE2EIT {
         log("[E2E] Abort completed");
 
         // GET the key — it was never completed, so no object exists at this key.
-        // StorageWorker.get() returns an empty stream (0-byte 200) for missing keys
-        // rather than throwing or returning null. This is a known pre-existing behavior.
-        ResponseBytes<GetObjectResponse> resp = s3.getObject(
-                GetObjectRequest.builder().bucket(BUCKET).key(key).build(),
-                ResponseTransformer.toBytes()
+        // Should return 404 NoSuchKey per the S3 API contract.
+        NoSuchKeyException ex = assertThrows(NoSuchKeyException.class, () ->
+                s3.getObject(
+                        GetObjectRequest.builder().bucket(BUCKET).key(key).build(),
+                        ResponseTransformer.toBytes()
+                )
         );
-        assertEquals(0, resp.asByteArray().length,
-                "GET after abort should return empty response (object was never assembled)");
-        log("[E2E] GET after abort correctly returned empty response");
+        assertEquals(404, ex.statusCode(),
+                "GET after abort should return 404 (object was never assembled)");
+        log("[E2E] GET after abort correctly returned 404");
 
         log("[E2E] Multipart abort test PASSED");
     }
