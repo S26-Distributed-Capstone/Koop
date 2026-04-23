@@ -162,18 +162,16 @@ public class StorageNodeServerV2 {
         Set<Integer> toAdd = new HashSet<>(targetPartitions);
         toAdd.removeAll(subscribedPartitions);
 
-        String consumerGroupId = this.ip + ":" + this.port;
-
         for (Integer partition : toAdd) {
             String topic = CommitTopics.forPartition(partition);
-            logger.info("Node assigned to partition {}. Subscribing to topic: {} with consumerGroupId: {}",
-                    partition, topic, consumerGroupId);
+            logger.info("Node assigned to partition {}. Subscribing to topic: {}",
+                    partition, topic);
 
             ExecutorService partitionExecutor = Executors.newSingleThreadExecutor(
                     Thread.ofVirtual().name("partition-" + partition + "-").factory());
             partitionExecutors.put(partition, partitionExecutor);
 
-            pubSubClient.sub(topic, consumerGroupId, (incomingTopic, offset, messageBytes) -> {
+            pubSubClient.sub(topic,(incomingTopic, offset, messageBytes) -> {
                 partitionExecutor.submit(() -> {
                     try {
                         Message message = Message.deserializeMessage(messageBytes);
