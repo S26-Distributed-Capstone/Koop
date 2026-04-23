@@ -192,7 +192,7 @@ public final class StorageWorker {
 
         if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting get", storageKey);
-            return InputStream.nullInputStream();
+            return null;
         }
 
         int resolvedPartition = partition.getAsInt();
@@ -200,16 +200,57 @@ public final class StorageWorker {
         var resolvedNodes = es.getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
+        int k = es.getK();
+        int n = es.getN();
+
+        // Synchronous probe: fetch shard metadata to detect tombstones/type
+        // BEFORE creating the piped stream. This lets the caller (gateway)
+        // distinguish "deleted" (404) from real errors (500).
+        List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty());
+
+        if (responses.isEmpty()) {
+            logger.debug("No shards found for key {} — object does not exist", storageKey);
+            return null;
+        }
+
+        long maxVersion = responses.stream().mapToLong(ShardResponse::version).max().orElse(-1);
+        List<ShardResponse> maxVersionResponses = responses.stream().filter(sr -> sr.version() == maxVersion).toList();
+        ShardResponse representative = maxVersionResponses.get(0);
+
+        if (representative.type() == ShardType.TOMBSTONE) {
+            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
+            return null;
+        }
+
+        // Object exists — set up piped stream and reconstruct asynchronously
         PipedOutputStream pos = new PipedOutputStream();
         PipedInputStream pis = new PipedInputStream(pos, 256 * 1024);
 
-        executor.execute(() -> {
-            try (pos) {
-                processGetConsensus(resolvedPartition, storageKey, resolvedNodes, es.getK(), es.getN(), pos);
-            } catch (Exception e) {
-                logger.error("Failed to reconstruct stream for key {}", storageKey, e);
-            }
-        });
+        if (representative.type() == ShardType.MULTIPART) {
+            logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion,
+                    storageKey);
+            executor.execute(() -> {
+                try (pos) {
+                    handleMultipartGet(representative.chunks(), k, pos);
+                } catch (Exception e) {
+                    logger.error("Failed to stream multipart data for key {}", storageKey, e);
+                }
+            });
+        } else {
+            // BLOB — reconstruct from erasure-coded shards
+            executor.execute(() -> {
+                try (pos) {
+                    if (maxVersionResponses.size() >= k) {
+                        reconstructFromResponses(maxVersionResponses, resolvedNodes, k, n, pos);
+                    } else {
+                        reconstructFromOlderVersion(resolvedPartition, storageKey, resolvedNodes, k, n, pos,
+                                maxVersion, maxVersionResponses.size(), responses);
+                    }
+                } catch (Exception e) {
+                    logger.error("Failed to reconstruct stream for key {}", storageKey, e);
+                }
+            });
+        }
 
         return pis;
     }

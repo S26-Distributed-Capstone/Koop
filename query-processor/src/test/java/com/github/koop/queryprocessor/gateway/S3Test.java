@@ -204,7 +204,7 @@ class S3Test {
     @Order(6)
     void sdkGetObject_returnsCorrectContent() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder()
@@ -221,7 +221,7 @@ class S3Test {
     @Test
     @Order(7)
     void sdkGetObject_notFound_throwsNoSuchKeyException() throws Exception {
-        when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
+                when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
 
         NoSuchKeyException ex = assertThrows(NoSuchKeyException.class, () ->
                 s3.getObject(
@@ -257,7 +257,7 @@ class S3Test {
     @Order(9)
     void sdkGetObject_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
         when(mockStorage.getObject("videos", "clip.mp4"))
-                .thenReturn(new ByteArrayInputStream("data".getBytes()));
+                                .thenReturn(new ByteArrayInputStream("data".getBytes()));
 
         s3.getObject(
                 GetObjectRequest.builder().bucket("videos").key("clip.mp4").build(),
@@ -265,6 +265,23 @@ class S3Test {
         );
 
         verify(mockStorage).getObject("videos", "clip.mp4");
+    }
+
+    @Test
+    void sdkGetObject_emptyObject_returns200_withZeroBytes() throws Exception {
+        when(mockStorage.getObject(BUCKET, "empty-object"))
+                                .thenReturn(new ByteArrayInputStream(new byte[0]));
+
+        ResponseBytes<GetObjectResponse> response = s3.getObject(
+                GetObjectRequest.builder()
+                        .bucket(BUCKET)
+                        .key("empty-object")
+                        .build(),
+                ResponseTransformer.toBytes()
+        );
+
+        assertEquals(0, response.asByteArray().length,
+                "Legitimate empty objects must return 200 with a zero-byte body");
     }
 
     // ===================== DELETE OBJECT =====================
@@ -359,7 +376,7 @@ class S3Test {
     @Order(14)
     void sdkGetObject_contentType_isOctetStream() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder().bucket(BUCKET).key(KEY).build(),

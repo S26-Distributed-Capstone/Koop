@@ -35,7 +35,7 @@ public class LocalFileStorage implements StorageService {
             System.out.println("[LocalFileStorage] Retrieved: " + filePath);
             return Files.newInputStream(filePath);
         }
-        return null; // Or throw exception
+        return null;
     }
 
     @Override

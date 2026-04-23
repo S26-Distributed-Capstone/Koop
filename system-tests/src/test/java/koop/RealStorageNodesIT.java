@@ -288,7 +288,7 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
 
     @Test
-    void get_after_delete_returns_empty_realServers() throws Exception {
+    void get_after_delete_returnsNull_realServers() throws Exception {
 
         log("Generating random test data for tombstone test...");
         byte[] data = new byte[DATA_SIZE];
@@ -324,12 +324,10 @@ public class RealStorageNodesIT {
             db.deleteItem("b/" + key, partition, tombstoneSeq);
         }
 
-        // GET after delete should return empty (tombstone)
-        log("[WORKER] GET starting (after delete, expect empty)...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
-            byte[] got = in.readAllBytes();
-            assertEquals(0, got.length, "GET after delete should return empty data (tombstone)");
-        }
+        // GET after delete should return null (not found/deleted collapsed)
+        log("[WORKER] GET starting (after delete, expect null)...");
+        InputStream afterDelete = worker.get(UUID.randomUUID(), "b", key);
+        assertNull(afterDelete, "GET after delete should return null");
 
         log("Tombstone/delete test completed successfully.");
     }

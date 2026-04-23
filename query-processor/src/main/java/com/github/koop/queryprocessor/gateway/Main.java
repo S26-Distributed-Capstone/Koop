@@ -86,11 +86,11 @@ public class Main {
 
     private static boolean verifyContentLength(Context ctx) {
         long contentLength = ctx.contentLength();
-        if(contentLength <= 0) {
+        if(contentLength < 0) {
             ctx.status(400);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InvalidRequest",
-                    "Content-Length header is required and must be greater than 0.", ctx.path()));
+                    "Content-Length header is required and must be non-negative.", ctx.path()));
             return false;
         }
         return true;
