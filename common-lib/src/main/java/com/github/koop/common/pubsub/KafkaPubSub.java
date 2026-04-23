@@ -69,11 +69,8 @@ public class KafkaPubSub implements PubSub {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean subscriptionDirty = new AtomicBoolean(false);
     private final BlockingQueue<Runnable> subscriptionChanges = new LinkedBlockingQueue<>();
-    private final ExecutorService consumerThread = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "kafka-consumer");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService consumerThread =
+    Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("kafka-consumer-", 0).factory());
 
     private volatile PubSubListener listener;
 
