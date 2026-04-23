@@ -1,6 +1,9 @@
 package com.github.koop.queryprocessor.gateway;
 
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.DeletedObject;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.FoundObject;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.MissingObject;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import io.javalin.Javalin;
@@ -204,7 +207,7 @@ class S3Test {
     @Order(6)
     void sdkGetObject_returnsCorrectContent() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                                .thenReturn(new FoundObject(new ByteArrayInputStream(CONTENT_BYTES)));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder()
@@ -221,7 +224,7 @@ class S3Test {
     @Test
     @Order(7)
     void sdkGetObject_notFound_throwsNoSuchKeyException() throws Exception {
-        when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
+                when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(new MissingObject());
 
         NoSuchKeyException ex = assertThrows(NoSuchKeyException.class, () ->
                 s3.getObject(
@@ -257,7 +260,7 @@ class S3Test {
     @Order(9)
     void sdkGetObject_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
         when(mockStorage.getObject("videos", "clip.mp4"))
-                .thenReturn(new ByteArrayInputStream("data".getBytes()));
+                                .thenReturn(new FoundObject(new ByteArrayInputStream("data".getBytes())));
 
         s3.getObject(
                 GetObjectRequest.builder().bucket("videos").key("clip.mp4").build(),
@@ -269,7 +272,8 @@ class S3Test {
 
     @Test
     void sdkGetObject_emptyObject_returns200_withZeroBytes() throws Exception {
-        when(mockStorage.getObject(BUCKET, "empty-object")).thenReturn(new ByteArrayInputStream(new byte[0]));
+        when(mockStorage.getObject(BUCKET, "empty-object"))
+                .thenReturn(new FoundObject(new ByteArrayInputStream(new byte[0])));
 
         ResponseBytes<GetObjectResponse> response = s3.getObject(
                 GetObjectRequest.builder()
@@ -334,8 +338,8 @@ class S3Test {
 
         doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
         when(mockStorage.getObject(BUCKET, "lifecycle.bin"))
-                .thenReturn(new ByteArrayInputStream(data))
-                .thenReturn(null);
+                .thenReturn(new FoundObject(new ByteArrayInputStream(data)))
+                .thenReturn(new DeletedObject());
         doNothing().when(mockStorage).deleteObject(anyString(), anyString());
 
         // PUT
@@ -375,7 +379,7 @@ class S3Test {
     @Order(14)
     void sdkGetObject_contentType_isOctetStream() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                                .thenReturn(new FoundObject(new ByteArrayInputStream(CONTENT_BYTES)));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder().bucket(BUCKET).key(KEY).build(),
@@ -740,7 +744,7 @@ class S3Test {
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq(uploadId), anyList()))
                                 .thenReturn(MultipartUploadResult.success());
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8)));
+                .thenReturn(new FoundObject(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8))));
 
         // Step 1: initiate
         CreateMultipartUploadResponse initResp = s3.createMultipartUpload(

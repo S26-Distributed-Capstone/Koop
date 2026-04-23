@@ -10,7 +10,7 @@ import com.github.koop.common.metadata.PartitionSpreadConfiguration.PartitionSpr
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
-import com.github.koop.queryprocessor.processor.ObjectDeletedException;
+import com.github.koop.queryprocessor.processor.ReadObjectResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.storagenode.StorageNodeServerV2;
 import com.github.koop.storagenode.db.Database;
@@ -289,7 +289,7 @@ public class RealStorageNodesIT {
     // -------------------------------------------------------
 
     @Test
-    void get_after_delete_throws_objectDeleted_realServers() throws Exception {
+    void get_after_delete_returnsDeletedResult_realServers() throws Exception {
 
         log("Generating random test data for tombstone test...");
         byte[] data = new byte[DATA_SIZE];
@@ -325,11 +325,11 @@ public class RealStorageNodesIT {
             db.deleteItem("b/" + key, partition, tombstoneSeq);
         }
 
-        // GET after delete should signal tombstone via typed exception
-        log("[WORKER] GET starting (after delete, expect ObjectDeletedException)...");
-        assertThrows(ObjectDeletedException.class,
-                () -> worker.get(UUID.randomUUID(), "b", key),
-                "GET after delete should throw ObjectDeletedException");
+        // GET after delete should signal tombstone via typed sealed result
+        log("[WORKER] GET starting (after delete, expect Deleted result)...");
+        ReadObjectResult result = worker.read(UUID.randomUUID(), "b", key);
+        assertTrue(result instanceof ReadObjectResult.Deleted,
+            "GET after delete should return a Deleted result");
 
         log("Tombstone/delete test completed successfully.");
     }

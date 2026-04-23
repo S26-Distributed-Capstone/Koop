@@ -175,7 +175,7 @@ public final class StorageWorker {
         return committed;
     }
 
-    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+    public ReadObjectResult read(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null)
             throw new IllegalArgumentException("requestID is null");
         if (bucket == null)
@@ -192,7 +192,7 @@ public final class StorageWorker {
 
         if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
             logger.error("Routing failed for key {}, aborting get", storageKey);
-            return null;
+            return new ReadObjectResult.Missing();
         }
 
         int resolvedPartition = partition.getAsInt();
@@ -210,7 +210,7 @@ public final class StorageWorker {
 
         if (responses.isEmpty()) {
             logger.debug("No shards found for key {} — object does not exist", storageKey);
-            return null;
+            return new ReadObjectResult.Missing();
         }
 
         long maxVersion = responses.stream().mapToLong(ShardResponse::version).max().orElse(-1);
@@ -219,7 +219,7 @@ public final class StorageWorker {
 
         if (representative.type() == ShardType.TOMBSTONE) {
             logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
-            throw new ObjectDeletedException(storageKey);
+            return new ReadObjectResult.Deleted();
         }
 
         // Object exists — set up piped stream and reconstruct asynchronously
@@ -252,7 +252,19 @@ public final class StorageWorker {
             });
         }
 
-        return pis;
+        return new ReadObjectResult.Found(pis);
+    }
+
+    /**
+     * Backward-compatible read API.
+     * Returns null for missing/deleted objects.
+     */
+    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+        ReadObjectResult result = read(requestID, bucket, key);
+        if (result instanceof ReadObjectResult.Found found) {
+            return found.data();
+        }
+        return null;
     }
 
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,

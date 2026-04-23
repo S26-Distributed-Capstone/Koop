@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import com.github.koop.queryprocessor.processor.MultipartUploadManager;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
+import com.github.koop.queryprocessor.processor.ReadObjectResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.CacheClient;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
@@ -55,14 +56,18 @@ public class StorageWorkerService implements StorageService {
     }
 
     @Override
-    public InputStream getObject(String bucket, String key) throws Exception {
+    public GetObjectResult getObject(String bucket, String key) throws Exception {
         // Generate a unique request ID for this operation
         UUID requestId = UUID.randomUUID();
-        
-        // Execute directly in the calling thread (Javalin's virtual thread).
-        // Tombstone/missing-object handling must be surfaced explicitly by StorageWorker;
-        // do not rely on exception-message parsing here.
-        return storageWorker.get(requestId, bucket, key);
+
+        ReadObjectResult result = storageWorker.read(requestId, bucket, key);
+        if (result instanceof ReadObjectResult.Found found) {
+            return new FoundObject(found.data());
+        }
+        if (result instanceof ReadObjectResult.Deleted) {
+            return new DeletedObject();
+        }
+        return new MissingObject();
     }
 
     @Override

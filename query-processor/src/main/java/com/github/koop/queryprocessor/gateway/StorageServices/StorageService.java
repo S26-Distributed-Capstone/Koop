@@ -10,7 +10,7 @@ public interface StorageService {
     // ─── Object Operations ────────────────────────────────────────────────────
 
     void putObject(String bucket, String key, InputStream data, long length) throws Exception;
-    InputStream getObject(String bucket, String key) throws Exception;
+    GetObjectResult getObject(String bucket, String key) throws Exception;
     void deleteObject(String bucket, String key) throws Exception;
 
     // ─── Bucket Operations ────────────────────────────────────────────────────
@@ -62,4 +62,17 @@ public interface StorageService {
 
     record ObjectSummary(String key, long size, String lastModified) {}
     record CompletedPart(int partNumber) {}
+
+    sealed interface GetObjectResult
+            permits FoundObject, MissingObject, DeletedObject {
+    }
+
+    record FoundObject(InputStream data) implements GetObjectResult {
+    }
+
+    record MissingObject() implements GetObjectResult {
+    }
+
+    record DeletedObject() implements GetObjectResult {
+    }
 }
