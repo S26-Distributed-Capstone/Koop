@@ -47,15 +47,6 @@ public class MemoryPubSub implements PubSub {
     }
 
     @Override
-    public void sub(String topic, String consumerGroupId) {
-        subscribedTopics.add(topic);
-        String groupKey = consumerGroupId + ":" + topic;
-        topicToGroup.put(topic, groupKey);
-        // Initialize offset if this is a brand-new group (don't overwrite existing)
-        groupOffsets.putIfAbsent(groupKey, new AtomicLong(0));
-    }
-
-    @Override
     public void drop(String topic) {
         subscribedTopics.remove(topic);
         // Don't remove group offsets — they must survive reconnection

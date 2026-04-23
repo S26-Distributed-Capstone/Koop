@@ -7,16 +7,6 @@ public interface PubSub extends AutoCloseable {
 
     void sub(String topic);
 
-    /**
-     * Subscribe to a topic using a consumer group ID. When a consumer with the
-     * same {@code consumerGroupId} reconnects, consumption resumes from the
-     * offset where it previously left off.
-     *
-     * @param topic           the topic to subscribe to
-     * @param consumerGroupId identifier for the consumer group
-     */
-    void sub(String topic, String consumerGroupId);
-
     void drop(String topic);
 
     void start(PubSubListener listener);

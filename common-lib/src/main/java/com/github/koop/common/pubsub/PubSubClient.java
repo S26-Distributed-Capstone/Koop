@@ -32,26 +32,6 @@ public class PubSubClient {
         });
     }
 
-    /**
-     * Subscribe to a topic using a consumer group ID. When a consumer with the
-     * same {@code consumerGroupId} reconnects, consumption resumes from the
-     * offset where it previously left off.
-     *
-     * @param topic           the topic to subscribe to
-     * @param consumerGroupId identifier for the consumer group
-     * @param listener        the listener to receive messages
-     */
-    public void sub(String topic, String consumerGroupId, PubSubListener listener) {
-        this.listeners.compute(topic, (k, lst) -> {
-            if (lst == null) {
-                lst = new CopyOnWriteArrayList<>();
-                this.pubSub.sub(topic, consumerGroupId);
-            }
-            lst.add(listener);
-            return lst;
-        });
-    }
-
     public void drop(String topic) {
         this.listeners.remove(topic);
         this.pubSub.drop(topic);
