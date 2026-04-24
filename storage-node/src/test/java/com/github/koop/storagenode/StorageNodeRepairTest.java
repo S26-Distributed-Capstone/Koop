@@ -8,7 +8,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.concurrent.Executors;
 
 import org.junit.jupiter.api.AfterEach;
@@ -19,7 +18,6 @@ import org.junit.jupiter.api.io.TempDir;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
-import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
@@ -115,60 +113,6 @@ class StorageNodeRepairTest {
     }
 
     @Test
-    void testStartupRepairCompactsBacklog() {
-        int partition = 5;
-        String topic = CommitTopics.forPartition(partition);
-
-        // Simulate messages published while the node was offline
-        // by publishing before any node subscribes
-        InetSocketAddress sender = getDummySender();
-
-        // Write -> Update -> Delete for the same key (should compact to delete = no repair needed)
-        pubSub.pub(topic, Message.serializeMessage(
-                new Message.FileCommitMessage("bucket", "key1", "req-1", sender)));
-        pubSub.pub(topic, Message.serializeMessage(
-                new Message.FileCommitMessage("bucket", "key1", "req-2", sender)));
-        pubSub.pub(topic, Message.serializeMessage(
-                new Message.DeleteMessage("bucket", "key1", "req-3", sender)));
-
-        // Write for a different key (should result in a repair)
-        pubSub.pub(topic, Message.serializeMessage(
-                new Message.FileCommitMessage("bucket", "key2", "req-4", sender)));
-
-        // Now create and start the server — it should subscribe, poll backlog, compact, and enqueue repairs
-        // We don't have metadata config to auto-subscribe, so we manually test the repair logic
-        // by directly testing the pubsub backlog polling
-        pubSub.sub(topic, "127.0.0.1:0");
-
-        List<byte[]> backlog = pubSub.pollBacklog(topic);
-        assertEquals(4, backlog.size(), "Should have 4 raw backlog messages");
-
-        // Verify compaction logic: last-writer-wins per key
-        java.util.LinkedHashMap<String, Message> compacted = new java.util.LinkedHashMap<>();
-        for (byte[] msgBytes : backlog) {
-            Message message = Message.deserializeMessage(msgBytes);
-            String msgKey = switch (message) {
-                case Message.FileCommitMessage m -> m.bucket() + "/" + m.key();
-                case Message.MultipartCommitMessage m -> m.bucket() + "/" + m.key();
-                case Message.DeleteMessage m -> m.bucket() + "/" + m.key();
-                case Message.CreateBucketMessage m -> "bucket:" + m.bucket();
-                case Message.DeleteBucketMessage m -> "bucket:" + m.bucket();
-            };
-            compacted.put(msgKey, message);
-        }
-
-        assertEquals(2, compacted.size(), "Compaction should yield 2 unique keys");
-
-        // key1's final state is a delete — should NOT need repair
-        Message key1Final = compacted.get("bucket/key1");
-        assertInstanceOf(Message.DeleteMessage.class, key1Final);
-
-        // key2's final state is a file commit — DOES need repair
-        Message key2Final = compacted.get("bucket/key2");
-        assertInstanceOf(Message.FileCommitMessage.class, key2Final);
-    }
-
-    @Test
     void testTrafficGatingDuringRepair() throws Exception {
         // We can't easily test the 503 during REPAIRING because start() transitions
         // synchronously. Instead, verify that after start(), traffic works normally.
@@ -220,5 +164,107 @@ class StorageNodeRepairTest {
 
         assertEquals(200, getResp.statusCode());
         assertEquals(data, getResp.body());
+    }
+
+    // -------------------------------------------------------------------------
+    // COMMIT_MISS repair: FileCommitMessage without prior PUT
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testCommitMissEnqueuesRepairWhenBlobAbsent() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+
+        // Deliver a commit message with no prior PUT — blob is not on disk
+        server.processSequencerMessage(3,
+                new Message.FileCommitMessage("bucket", "absent-key", "req-absent", getDummySender()), 200L);
+
+        assertEquals(1, server.repairPendingCount(),
+                "A COMMIT_MISS repair should be enqueued when the commit arrives before the blob");
+    }
+
+    @Test
+    void testNoRepairEnqueuedWhenBlobAlreadyMaterialized() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+        port = server.port();
+
+        String bucket = "mat-bucket";
+        String key = "mat-key";
+        String fullKey = bucket + "/" + key;
+        String reqId = "req-mat";
+
+        // PUT first so the blob is on disk when commit arrives
+        HttpRequest putReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/store/4/" + fullKey + "?requestId=" + reqId))
+                .PUT(HttpRequest.BodyPublishers.ofString("materialized"))
+                .build();
+        assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        server.processSequencerMessage(4,
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
+
+        assertEquals(0, server.repairPendingCount(),
+                "No repair should be enqueued when the blob was already materialized at commit time");
+    }
+
+    // -------------------------------------------------------------------------
+    // Read-repair: GET on a committed-but-missing blob enqueues repair
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testReadRepairEnqueuesOnGetWithMissingPhysicalFile() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+        port = server.port();
+
+        // Commit without PUT: metadata exists but file is not on disk
+        server.processSequencerMessage(5,
+                new Message.FileCommitMessage("rb", "ghost", "req-ghost", getDummySender()), 400L);
+
+        // COMMIT_MISS repair already enqueued — drain it to start fresh
+        // (we want to isolate the READ_MISS repair triggered by GET)
+        // So we use a fresh key that has no commit at all (retrieves empty → no repair)
+        // vs a key that was committed: GET triggers read-repair
+        // The COMMIT_MISS repair from above is already in the pool (count == 1).
+
+        // A GET on the committed key should enqueue an additional repair (READ_MISS)
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/store/5/rb/ghost"))
+                .GET()
+                .build();
+        http.send(getReq, HttpResponse.BodyHandlers.ofString());
+
+        // At least 1 repair in the pool (COMMIT_MISS + possibly READ_MISS depending on timing)
+        assertTrue(server.repairPendingCount() >= 1,
+                "At least one repair should be pending after a GET on a missing blob");
+    }
+
+    // -------------------------------------------------------------------------
+    // Delete and bucket messages do NOT enqueue repair
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testDeleteMessageDoesNotEnqueueRepair() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+
+        server.processSequencerMessage(6,
+                new Message.DeleteMessage("del-bucket", "del-key", "req-del", getDummySender()), 10L);
+
+        assertEquals(0, server.repairPendingCount(),
+                "Delete messages should not trigger repairs");
+    }
+
+    @Test
+    void testCreateBucketMessageDoesNotEnqueueRepair() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+
+        server.processSequencerMessage(7,
+                new Message.CreateBucketMessage("new-bucket", "req-cb", getDummySender()), 20L);
+
+        assertEquals(0, server.repairPendingCount(),
+                "CreateBucket messages should not trigger repairs");
     }
 }

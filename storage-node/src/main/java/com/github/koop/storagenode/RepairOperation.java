@@ -15,6 +15,8 @@ public record RepairOperation(String blobKey, RepairReason reason) {
         /** A GET request found committed metadata but no physical file on disk. */
         READ_MISS,
         /** The node is catching up on messages missed while offline. */
-        STARTUP_CATCHUP
+        STARTUP_CATCHUP,
+        /** A commit message arrived but the blob was not present on disk. */
+        COMMIT_MISS
     }
 }

@@ -1,44 +1,65 @@
 package com.github.koop.storagenode;
 
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Manages a bounded concurrent worker pool that processes {@link RepairOperation}s
- * from an in-memory {@link BlockingQueue}.
+ * Manages a concurrent worker pool that processes {@link RepairOperation}s with
+ * debounced, last-writer-wins compaction.
  *
- * <p>Each worker takes repair operations from the queue and executes the
- * (currently stubbed) repair logic. The pool processes exactly {@code N}
- * operations concurrently using a fixed-size thread pool.
+ * <p>When the same key is enqueued multiple times before execution, only the
+ * most recent operation is retained. A short delay between enqueue and execution
+ * lets rapid sequential updates compact and gives in-progress writes time to
+ * finish before a repair is attempted.
  */
 public class RepairWorkerPool {
 
     private static final Logger logger = LogManager.getLogger(RepairWorkerPool.class);
 
-    /** Default number of concurrent repair workers. */
     public static final int DEFAULT_CONCURRENCY = 4;
+    static final long REPAIR_DELAY_MS = 2_000;
 
-    private final BlockingQueue<RepairOperation> queue;
+    private final ConcurrentHashMap<String, RepairOperation> pendingOperations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ScheduledFuture<?>> scheduledFutures = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "repair-scheduler");
+        t.setDaemon(true);
+        return t;
+    });
     private final ExecutorService workerPool;
+    private final Predicate<String> activeWriteCheck;
+    private final long repairDelayMs;
     private final int concurrency;
     private volatile boolean running;
 
     public RepairWorkerPool() {
-        this(DEFAULT_CONCURRENCY);
+        this(DEFAULT_CONCURRENCY, key -> false, REPAIR_DELAY_MS);
     }
 
     public RepairWorkerPool(int concurrency) {
+        this(concurrency, key -> false, REPAIR_DELAY_MS);
+    }
+
+    public RepairWorkerPool(int concurrency, Predicate<String> activeWriteCheck) {
+        this(concurrency, activeWriteCheck, REPAIR_DELAY_MS);
+    }
+
+    /** Package-private constructor for tests that need a shorter dispatch delay. */
+    RepairWorkerPool(int concurrency, Predicate<String> activeWriteCheck, long repairDelayMs) {
         if (concurrency <= 0) {
             throw new IllegalArgumentException("concurrency must be positive, got: " + concurrency);
         }
         this.concurrency = concurrency;
-        this.queue = new LinkedBlockingQueue<>();
+        this.activeWriteCheck = activeWriteCheck;
+        this.repairDelayMs = repairDelayMs;
         this.workerPool = Executors.newFixedThreadPool(concurrency, r -> {
             Thread t = new Thread(r);
             t.setName("repair-worker-" + t.threadId());
@@ -49,26 +70,26 @@ public class RepairWorkerPool {
     }
 
     /**
-     * Thread-safe enqueue of a repair operation. Can be called concurrently
-     * from read-repair triggers and startup catch-up processing.
-     *
-     * @param operation the repair operation to enqueue
+     * Enqueues a repair operation with debounced, last-writer-wins compaction.
+     * If a pending repair exists for the same key, it is overwritten and its
+     * scheduled execution is replaced.
      */
     public void enqueue(RepairOperation operation) {
         if (operation == null) {
             return;
         }
-        boolean offered = queue.offer(operation);
-        if (offered) {
-            logger.debug("Enqueued repair operation: key={}, reason={}", operation.blobKey(), operation.reason());
-        } else {
-            logger.warn("Failed to enqueue repair operation (queue full): key={}", operation.blobKey());
+        String key = operation.blobKey();
+        pendingOperations.put(key, operation);
+        ScheduledFuture<?> old = scheduledFutures.put(key,
+                scheduler.schedule(() -> dispatchRepair(key), repairDelayMs, TimeUnit.MILLISECONDS));
+        if (old != null) {
+            old.cancel(false);
         }
+        logger.debug("Enqueued repair operation: key={}, reason={}", key, operation.reason());
     }
 
     /**
-     * Starts the worker pool. Each worker loops, taking operations from the
-     * queue and executing the repair logic.
+     * Starts the worker pool. Must be called before any repair operations execute.
      */
     public void start() {
         if (running) {
@@ -76,18 +97,15 @@ public class RepairWorkerPool {
         }
         running = true;
         logger.info("Starting RepairWorkerPool with {} workers", concurrency);
-
-        for (int i = 0; i < concurrency; i++) {
-            workerPool.submit(this::workerLoop);
-        }
     }
 
     /**
-     * Gracefully shuts down the worker pool. Interrupts workers waiting on the
-     * queue and waits up to 10 seconds for in-flight operations to complete.
+     * Gracefully shuts down the worker pool and scheduler. Waits up to 10 seconds
+     * for in-flight operations to complete.
      */
     public void shutdown() {
         running = false;
+        scheduler.shutdownNow();
         workerPool.shutdownNow();
         try {
             if (!workerPool.awaitTermination(10, TimeUnit.SECONDS)) {
@@ -97,14 +115,14 @@ public class RepairWorkerPool {
             Thread.currentThread().interrupt();
             logger.warn("Interrupted while waiting for RepairWorkerPool shutdown");
         }
-        logger.info("RepairWorkerPool shut down. Remaining queue size: {}", queue.size());
+        logger.info("RepairWorkerPool shut down. Remaining pending: {}", pendingOperations.size());
     }
 
     /**
-     * Returns the current number of pending repair operations in the queue.
+     * Returns the current number of operations waiting to be dispatched.
      */
     public int pendingCount() {
-        return queue.size();
+        return pendingOperations.size();
     }
 
     /**
@@ -114,20 +132,19 @@ public class RepairWorkerPool {
         return running;
     }
 
-    private void workerLoop() {
-        logger.debug("Repair worker started: {}", Thread.currentThread().getName());
-        while (running) {
-            try {
-                RepairOperation operation = queue.take(); // blocks until available
-                executeRepair(operation);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                logger.error("Unexpected error in repair worker", e);
-            }
+    private void dispatchRepair(String key) {
+        scheduledFutures.remove(key);
+        RepairOperation op = pendingOperations.remove(key);
+        if (op == null) {
+            return;
         }
-        logger.debug("Repair worker stopped: {}", Thread.currentThread().getName());
+        if (activeWriteCheck.test(key)) {
+            // A write is in progress — re-enqueue so it retries after the blob lands
+            logger.debug("Deferring repair for key={}: write in progress", key);
+            enqueue(op);
+            return;
+        }
+        workerPool.submit(() -> executeRepair(op));
     }
 
     /**
@@ -135,8 +152,6 @@ public class RepairWorkerPool {
      *
      * <p>This is a stub — the actual implementation would fetch the missing blob
      * from peer storage nodes or reconstruct it via erasure coding.
-     *
-     * @param operation the repair operation to execute
      */
     void executeRepair(RepairOperation operation) {
         // TODO: Implement actual repair logic:

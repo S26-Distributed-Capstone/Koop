@@ -41,17 +41,6 @@ public class PubSubClient {
         this.pubSub.pub(topic, message);
     }
 
-    /**
-     * Synchronously drain all pending messages for the given topic from the
-     * consumer's current offset to the head of the topic log.
-     *
-     * @param topic the topic to poll
-     * @return an ordered list of raw message payloads; empty if no backlog
-     */
-    public List<byte[]> pollBacklog(String topic) {
-        return this.pubSub.pollBacklog(topic);
-    }
-
     public void start() {
         this.pubSub.start((topic, offset, message) -> {
             var lst = this.listeners.get(topic);

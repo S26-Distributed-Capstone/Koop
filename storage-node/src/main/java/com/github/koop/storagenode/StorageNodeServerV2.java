@@ -9,8 +9,6 @@ import java.nio.channels.Channels;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -67,8 +65,9 @@ public class StorageNodeServerV2 {
             PubSubClient pubSubClient, int repairConcurrency) {
         this.port = port;
         this.ip = ip;
-        this.repairWorkerPool = new RepairWorkerPool(repairConcurrency);
-        this.storageNode = new StorageNodeV2(db, dir, this.repairWorkerPool);
+        this.storageNode = new StorageNodeV2(db, dir, null);
+        this.repairWorkerPool = new RepairWorkerPool(repairConcurrency, storageNode::isActivelyWriting);
+        this.storageNode.setRepairWorkerPool(this.repairWorkerPool);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
     }
@@ -306,7 +305,11 @@ public class StorageNodeServerV2 {
             switch (message) {
                 case Message.FileCommitMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
-                    storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
+                    boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
+                    if (!materialized) {
+                        repairWorkerPool.enqueue(
+                                new RepairOperation(fullKey, RepairOperation.RepairReason.COMMIT_MISS));
+                    }
                     requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);
                 }
@@ -392,9 +395,6 @@ public class StorageNodeServerV2 {
             this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
             updateSubscriptions();
 
-            // Perform startup repair: consume and compact backlog for all subscribed partitions
-            performStartupRepair();
-
             metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
                 this.currentEsConfig = current;
                 updateSubscriptions();
@@ -433,72 +433,6 @@ public class StorageNodeServerV2 {
         }
     }
 
-    /**
-     * Consumes all backlog messages for subscribed partitions, compacts them
-     * (retaining only the latest operation per key), and enqueues repair
-     * operations for keys that need data reconstruction.
-     */
-    private void performStartupRepair() {
-        int totalBacklog = 0;
-        int totalRepairs = 0;
-
-        for (Integer partition : subscribedPartitions) {
-            String topic = CommitTopics.forPartition(partition);
-            List<byte[]> backlog = pubSubClient.pollBacklog(topic);
-
-            if (backlog.isEmpty()) {
-                logger.debug("No backlog for partition {} (topic: {})", partition, topic);
-                continue;
-            }
-
-            totalBacklog += backlog.size();
-            logger.info("Partition {} has {} backlog messages to compact", partition, backlog.size());
-
-            // Compact: retain only the latest message per unique key (last-writer-wins)
-            Map<String, Message> compacted = new LinkedHashMap<>();
-            for (byte[] msgBytes : backlog) {
-                try {
-                    Message message = Message.deserializeMessage(msgBytes);
-                    String key = extractKeyFromMessage(message);
-                    if (key != null) {
-                        compacted.put(key, message);
-                    }
-                } catch (Exception e) {
-                    logger.error("Failed to deserialize backlog message during compaction", e);
-                }
-            }
-
-            // Enqueue repair operations for keys whose final state requires data
-            for (Map.Entry<String, Message> entry : compacted.entrySet()) {
-                Message finalMessage = entry.getValue();
-                // Skip deletes and bucket operations — only data writes need repair
-                if (finalMessage instanceof Message.FileCommitMessage
-                        || finalMessage instanceof Message.MultipartCommitMessage) {
-                    repairWorkerPool.enqueue(
-                            new RepairOperation(entry.getKey(), RepairOperation.RepairReason.STARTUP_CATCHUP));
-                    totalRepairs++;
-                }
-            }
-        }
-
-        logger.info("Startup repair complete: processed {} backlog messages, enqueued {} repair operations",
-                totalBacklog, totalRepairs);
-    }
-
-    /**
-     * Extracts the full object key from a message for compaction purposes.
-     * Returns null for messages that don't map to an object key (e.g. bucket operations).
-     */
-    private String extractKeyFromMessage(Message message) {
-        return switch (message) {
-            case Message.FileCommitMessage m -> buildKey(m.bucket(), m.key());
-            case Message.MultipartCommitMessage m -> buildKey(m.bucket(), m.key());
-            case Message.DeleteMessage m -> buildKey(m.bucket(), m.key());
-            case Message.CreateBucketMessage m -> "bucket:" + m.bucket();
-            case Message.DeleteBucketMessage m -> "bucket:" + m.bucket();
-        };
-    }
-
     public void stop() {
         if (app != null) {
             app.stop();
@@ -522,5 +456,10 @@ public class StorageNodeServerV2 {
 
     public int port() {
         return app != null ? app.port() : port;
+    }
+
+    /** Package-private accessor for tests to inspect pending repair count. */
+    int repairPendingCount() {
+        return repairWorkerPool.pendingCount();
     }
 }
