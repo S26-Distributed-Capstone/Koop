@@ -21,8 +21,12 @@ import org.apache.logging.log4j.Logger;
  *
  * <p>A short delay between enqueue and execution lets rapid sequential updates
  * compact and gives in-progress writes time to finish before a repair fires.
+ *
+ * <p>Actual repair work is delegated to a {@link BlobRepairStrategy} supplied
+ * at construction time, keeping this class free of direct dependencies on
+ * {@link StorageNodeV2} or HTTP clients.
  */
-public class RepairWorkerPool {
+public class RepairWorkerPool implements RepairQueue {
 
     private static final Logger logger = LogManager.getLogger(RepairWorkerPool.class);
 
@@ -34,17 +38,19 @@ public class RepairWorkerPool {
             Thread.ofVirtual().name("repair-scheduler").factory());
     private final ExecutorService workerPool = Executors.newVirtualThreadPerTaskExecutor();
     private final WriteTracker writeTracker;
+    private final BlobRepairStrategy repairStrategy;
     private final long repairDelayMs;
     private volatile boolean running;
 
-    public RepairWorkerPool(WriteTracker writeTracker) {
-        this(writeTracker, REPAIR_DELAY_MS);
+    public RepairWorkerPool(WriteTracker writeTracker, BlobRepairStrategy repairStrategy) {
+        this(writeTracker, REPAIR_DELAY_MS, repairStrategy);
     }
 
     /** Package-private constructor for tests that need a shorter dispatch delay. */
-    RepairWorkerPool(WriteTracker writeTracker, long repairDelayMs) {
+    RepairWorkerPool(WriteTracker writeTracker, long repairDelayMs, BlobRepairStrategy repairStrategy) {
         this.writeTracker = writeTracker;
         this.repairDelayMs = repairDelayMs;
+        this.repairStrategy = repairStrategy;
         this.running = false;
     }
 
@@ -56,6 +62,7 @@ public class RepairWorkerPool {
      * strictly higher, the pending operation is replaced and the scheduled execution
      * is reset.
      */
+    @Override
     public void enqueue(RepairOperation operation) {
         if (operation == null) {
             return;
@@ -78,7 +85,7 @@ public class RepairWorkerPool {
         if (old != null) {
             old.cancel(false);
         }
-        logger.debug("Enqueued repair: key={}, reason={}, seqOffset={}", key, operation.reason(), operation.seqOffset());
+        logger.debug("Enqueued repair: key={}, seqOffset={}", key, operation.seqOffset());
     }
 
     /**
@@ -141,23 +148,14 @@ public class RepairWorkerPool {
     }
 
     /**
-     * Executes a single repair operation.
-     *
-     * <p>This is a stub — the actual implementation would fetch the missing blob
-     * from peer storage nodes or reconstruct it via erasure coding.
+     * Executes a single repair operation by delegating to the configured
+     * {@link BlobRepairStrategy}.
      */
     void executeRepair(RepairOperation operation) {
-        // TODO: Implement actual repair logic:
-        //  1. Identify peer nodes that hold a copy of this blob (via metadata/erasure set config)
-        //  2. Fetch the blob data from a healthy peer via HTTP GET
-        //  3. Write the blob to local disk using StorageNodeV2.store()
-        //  4. Update the local database to mark the version as materialized
-        //
-        // For erasure-coded data:
-        //  1. Fetch enough shards from peer nodes to reconstruct
-        //  2. Run erasure decoding
-        //  3. Write the reconstructed blob to local disk
-        logger.info("Executing repair (stub): key={}, reason={}, seqOffset={}",
-                operation.blobKey(), operation.reason(), operation.seqOffset());
+        if (repairStrategy != null) {
+            repairStrategy.repair(operation);
+        } else {
+            logger.warn("No repair strategy configured; skipping repair for key={}", operation.blobKey());
+        }
     }
 }

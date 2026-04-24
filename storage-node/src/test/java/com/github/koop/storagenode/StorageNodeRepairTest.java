@@ -86,33 +86,6 @@ class StorageNodeRepairTest {
     }
 
     @Test
-    void testReadRepairEnqueuesOnMissingFile() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
-        server.start();
-        port = server.port();
-
-        int partition = 1;
-        String bucket = "repair-bucket";
-        String key = "missing-blob";
-        String fullKey = bucket + "/" + key;
-        String reqId = "req-repair-123";
-
-        // Commit metadata without storing the physical file
-        server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 100L);
-
-        // GET should trigger read-repair (returns 404 but enqueues repair)
-        HttpRequest getReq = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey))
-                .GET()
-                .build();
-        HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
-
-        // Should still return 404 (the repair is async)
-        assertEquals(404, getResp.statusCode());
-    }
-
-    @Test
     void testExistingFunctionalityPreservedWithRepair() throws Exception {
         // Full PUT -> commit -> GET cycle should still work with repair infrastructure present
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
@@ -162,7 +135,7 @@ class StorageNodeRepairTest {
                 new Message.FileCommitMessage("bucket", "absent-key", "req-absent", getDummySender()), 200L);
 
         assertEquals(1, server.repairPendingCount(),
-                "A COMMIT_MISS repair should be enqueued when the commit arrives before the blob");
+                "A repair should be enqueued when the commit arrives before the blob");
     }
 
     @Test
@@ -191,35 +164,33 @@ class StorageNodeRepairTest {
     }
 
     // -------------------------------------------------------------------------
-    // Read-repair: GET on a committed-but-missing blob enqueues repair
+    // GET on committed-but-missing blob returns 404 (no read-repair)
     // -------------------------------------------------------------------------
 
     @Test
-    void testReadRepairEnqueuesOnGetWithMissingPhysicalFile() throws Exception {
+    void testGetOnMissingBlobReturns404WithoutEnqueueingRepair() throws Exception {
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
         server.start();
         port = server.port();
 
-        // Commit without PUT: metadata exists but file is not on disk
+        // Commit without PUT — metadata exists but file is not on disk
+        // This also enqueues a COMMIT_MISS repair (count = 1)
         server.processSequencerMessage(5,
                 new Message.FileCommitMessage("rb", "ghost", "req-ghost", getDummySender()), 400L);
 
-        // COMMIT_MISS repair already enqueued — drain it to start fresh
-        // (we want to isolate the READ_MISS repair triggered by GET)
-        // So we use a fresh key that has no commit at all (retrieves empty → no repair)
-        // vs a key that was committed: GET triggers read-repair
-        // The COMMIT_MISS repair from above is already in the pool (count == 1).
+        int repairCountAfterCommit = server.repairPendingCount();
 
-        // A GET on the committed key should enqueue an additional repair (READ_MISS)
+        // GET should return 404 but NOT enqueue additional repair (read-repair removed)
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/store/5/rb/ghost"))
                 .GET()
                 .build();
-        http.send(getReq, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // At least 1 repair in the pool (COMMIT_MISS + possibly READ_MISS depending on timing)
-        assertTrue(server.repairPendingCount() >= 1,
-                "At least one repair should be pending after a GET on a missing blob");
+        assertEquals(404, resp.statusCode());
+        // Repair count should not increase from the GET — only the commit path enqueues
+        assertEquals(repairCountAfterCommit, server.repairPendingCount(),
+                "GET should not enqueue additional repair; only the commit path triggers repair");
     }
 
     // -------------------------------------------------------------------------
@@ -248,5 +219,25 @@ class StorageNodeRepairTest {
 
         assertEquals(0, server.repairPendingCount(),
                 "CreateBucket messages should not trigger repairs");
+    }
+
+    // -------------------------------------------------------------------------
+    // Sequence number compaction in the repair queue
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testNewerCommitMissOverridesOlderForSameKey() throws Exception {
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server.start();
+
+        // Two commits for the same key — second has higher seqNumber
+        server.processSequencerMessage(3,
+                new Message.FileCommitMessage("bucket", "dup-key", "req-dup1", getDummySender()), 100L);
+        server.processSequencerMessage(3,
+                new Message.FileCommitMessage("bucket", "dup-key", "req-dup2", getDummySender()), 200L);
+
+        // Should compact to 1 pending repair (latest seqNumber wins)
+        assertEquals(1, server.repairPendingCount(),
+                "Multiple commits for the same key should compact to 1 pending repair");
     }
 }

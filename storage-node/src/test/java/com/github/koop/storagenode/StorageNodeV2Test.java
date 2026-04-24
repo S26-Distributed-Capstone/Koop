@@ -293,30 +293,33 @@ public class StorageNodeV2Test {
     // =========================================================================
 
     @Test
-    public void testRepairWorkerPoolEnqueuesReadRepairOnMissingBlob() throws Exception {
+    public void testRetrieveReturnEmptyForMissingBlobWithoutEnqueueingRepair() throws Exception {
         WriteTracker tracker = new WriteTracker();
-        RepairWorkerPool repairPool = new RepairWorkerPool(tracker);
+        RepairWorkerPool repairPool = new RepairWorkerPool(tracker, op -> {});
         repairPool.start();
         storageNode = new StorageNodeV2(db, tempDir, repairPool, tracker);
 
         // Commit without a prior store → version recorded as not materialized
         storageNode.commit(1, "bucket/ghost", "req-ghost", 99L);
 
-        // retrieve() should detect missing physical file and enqueue a repair
-        storageNode.retrieve("bucket/ghost");
-        assertEquals(1, repairPool.pendingCount(),
-                "A repair should be enqueued when retrieve finds a committed but physically missing blob");
+        // retrieve() should detect missing physical file and return empty,
+        // but NOT enqueue repair (read-repair path was removed)
+        var result = storageNode.retrieve("bucket/ghost");
+        assertTrue(result.isEmpty(),
+                "Missing blob should return empty");
+        assertEquals(0, repairPool.pendingCount(),
+                "retrieve() should not enqueue repair — only the commit path triggers repair");
 
         repairPool.shutdown();
     }
 
     @Test
-    public void testNoReadRepairEnqueuedWhenPoolIsNull() throws Exception {
+    public void testRetrieveReturnsEmptyWhenPoolIsNull() throws Exception {
         // storageNode constructed without a repair pool (null) — should not throw
         storageNode.commit(1, "bucket/no-pool", "req-no-pool", 5L);
-        // retrieve() with a null repairWorkerPool should return empty, not throw
+        // retrieve() with a null repairQueue should return empty, not throw
         Optional<StorageNodeV2.GetObjectResponse> result = storageNode.retrieve("bucket/no-pool");
-        assertTrue(result.isEmpty(), "Missing blob should return empty; no exception even with null repair pool");
+        assertTrue(result.isEmpty(), "Missing blob should return empty; no exception even with null repair queue");
     }
 
     @Test
