@@ -34,6 +34,7 @@ public class StorageNodeV2Test {
 
     private Database db;
     private StorageNodeV2 storageNode;
+    private WriteTracker writeTracker;
 
     @TempDir
     Path tempDir;
@@ -41,7 +42,8 @@ public class StorageNodeV2Test {
     @BeforeEach
     public void setup() throws Exception {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
-        storageNode = new StorageNodeV2(db, tempDir);
+        writeTracker = new WriteTracker();
+        storageNode = new StorageNodeV2(db, tempDir, null, writeTracker);
     }
 
     @AfterEach
@@ -198,23 +200,22 @@ public class StorageNodeV2Test {
     // =========================================================================
 
     @Test
-    public void testIsActivelyWritingFalseWhenIdle() {
-        assertFalse(storageNode.isActivelyWriting("any-key"),
-                "Should not report active write when nothing is writing");
+    public void testWriteTrackerFalseWhenIdle() {
+        assertFalse(writeTracker.isActive("any-key"),
+                "WriteTracker should not report active write when nothing is writing");
     }
 
     @Test
-    public void testIsActivelyWritingTrueWhileStoreExecutes() throws Exception {
+    public void testWriteTrackerTrueWhileStoreExecutes() throws Exception {
         String key = "bucket/concurrent-key";
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowComplete = new CountDownLatch(1);
         AtomicBoolean wasActiveWhileWriting = new AtomicBoolean(false);
 
-        // Run store() on a separate thread so we can observe the flag mid-write
+        // Run store() on a separate thread so we can observe the tracker mid-write
         var executor = Executors.newSingleThreadExecutor();
         executor.submit(() -> {
             try {
-                // Use a channel that signals when reading starts, then blocks until released
                 var blockingChannel = Channels.newChannel(new java.io.InputStream() {
                     private final byte[] data = "blocking-data".getBytes();
                     private int pos = 0;
@@ -232,21 +233,21 @@ public class StorageNodeV2Test {
         });
 
         assertTrue(writeStarted.await(5, TimeUnit.SECONDS), "Store should have started");
-        wasActiveWhileWriting.set(storageNode.isActivelyWriting(key));
+        wasActiveWhileWriting.set(writeTracker.isActive(key));
         allowComplete.countDown();
         executor.shutdown();
         executor.awaitTermination(5, TimeUnit.SECONDS);
 
-        assertTrue(wasActiveWhileWriting.get(), "isActivelyWriting should be true while store() is executing");
-        assertFalse(storageNode.isActivelyWriting(key), "isActivelyWriting should be false after store() completes");
+        assertTrue(wasActiveWhileWriting.get(), "WriteTracker should be active while store() is executing");
+        assertFalse(writeTracker.isActive(key), "WriteTracker should be inactive after store() completes");
     }
 
     @Test
-    public void testIsActivelyWritingFalseAfterStoreCompletes() throws Exception {
+    public void testWriteTrackerFalseAfterStoreCompletes() throws Exception {
         String key = "bucket/post-store-key";
         storageNode.store(1, key, "req-post", Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
-        assertFalse(storageNode.isActivelyWriting(key),
-                "isActivelyWriting should be false once store() returns");
+        assertFalse(writeTracker.isActive(key),
+                "WriteTracker should be inactive once store() returns");
     }
 
     // =========================================================================
@@ -292,10 +293,11 @@ public class StorageNodeV2Test {
     // =========================================================================
 
     @Test
-    public void testSetRepairWorkerPoolEnqueuesReadRepairOnMissingBlob() throws Exception {
-        RepairWorkerPool repairPool = new RepairWorkerPool(1);
+    public void testRepairWorkerPoolEnqueuesReadRepairOnMissingBlob() throws Exception {
+        WriteTracker tracker = new WriteTracker();
+        RepairWorkerPool repairPool = new RepairWorkerPool(tracker);
         repairPool.start();
-        storageNode.setRepairWorkerPool(repairPool);
+        storageNode = new StorageNodeV2(db, tempDir, repairPool, tracker);
 
         // Commit without a prior store → version recorded as not materialized
         storageNode.commit(1, "bucket/ghost", "req-ghost", 99L);

@@ -7,7 +7,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -32,7 +31,7 @@ class RepairWorkerPoolTest {
         List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
         CountDownLatch latch = new CountDownLatch(3);
 
-        pool = new RepairWorkerPool(2, key -> false, 0) {
+        pool = new RepairWorkerPool(new WriteTracker(), 0L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executed.add(op);
@@ -41,9 +40,9 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
-        pool.enqueue(new RepairOperation("key2", RepairOperation.RepairReason.STARTUP_CATCHUP));
-        pool.enqueue(new RepairOperation("key3", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
+        pool.enqueue(new RepairOperation("key2", RepairOperation.RepairReason.STARTUP_CATCHUP, 1L));
+        pool.enqueue(new RepairOperation("key3", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
 
         assertTrue(latch.await(5, TimeUnit.SECONDS), "All 3 operations should be processed");
         assertEquals(3, executed.size());
@@ -51,12 +50,12 @@ class RepairWorkerPoolTest {
 
     @Test
     void testConcurrentProcessing() throws Exception {
-        int concurrency = 4;
-        CountDownLatch inProgress = new CountDownLatch(concurrency);
+        int numOps = 4;
+        CountDownLatch inProgress = new CountDownLatch(numOps);
         CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(concurrency);
+        CountDownLatch done = new CountDownLatch(numOps);
 
-        pool = new RepairWorkerPool(concurrency, key -> false, 0) {
+        pool = new RepairWorkerPool(new WriteTracker(), 0L) {
             @Override
             void executeRepair(RepairOperation op) {
                 inProgress.countDown();
@@ -70,12 +69,12 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        for (int i = 0; i < concurrency; i++) {
-            pool.enqueue(new RepairOperation("key-" + i, RepairOperation.RepairReason.READ_MISS));
+        for (int i = 0; i < numOps; i++) {
+            pool.enqueue(new RepairOperation("key-" + i, RepairOperation.RepairReason.READ_MISS, (long) i));
         }
 
         assertTrue(inProgress.await(5, TimeUnit.SECONDS),
-                "All " + concurrency + " workers should be active concurrently");
+                "All " + numOps + " virtual-thread workers should be active concurrently");
 
         release.countDown();
         assertTrue(done.await(5, TimeUnit.SECONDS), "All operations should complete");
@@ -87,14 +86,14 @@ class RepairWorkerPoolTest {
 
     @Test
     void testPendingCountReflectsUniqueKeys() {
-        pool = new RepairWorkerPool(1);
+        pool = new RepairWorkerPool(new WriteTracker());
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
-        pool.enqueue(new RepairOperation("key2", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
+        pool.enqueue(new RepairOperation("key2", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
         assertEquals(2, pool.pendingCount());
 
-        // Re-enqueuing an existing key compacts — count stays at 2
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS));
+        // Re-enqueuing key1 with a higher seqOffset compacts — count stays at 2
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, Long.MAX_VALUE));
         assertEquals(2, pool.pendingCount());
     }
 
@@ -103,7 +102,7 @@ class RepairWorkerPoolTest {
         List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
         CountDownLatch latch = new CountDownLatch(1);
 
-        pool = new RepairWorkerPool(1, key -> false, 50) {
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executed.add(op);
@@ -112,17 +111,16 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        // Enqueue same key twice in quick succession
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS));
+        // Enqueue same key twice: second has higher seqOffset so it wins
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, 1L));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, 2L));
 
         assertTrue(latch.await(2, TimeUnit.SECONDS), "Exactly one execution should fire");
-        // Extra wait to confirm no second execution arrives
-        Thread.sleep(150);
+        Thread.sleep(150); // confirm no second execution arrives
 
         assertEquals(1, executed.size(), "Only one execution for the same key");
         assertEquals(RepairOperation.RepairReason.COMMIT_MISS, executed.get(0).reason(),
-                "Latest enqueued reason should win");
+                "Higher seqOffset operation should win");
     }
 
     @Test
@@ -130,7 +128,7 @@ class RepairWorkerPoolTest {
         CountDownLatch latch = new CountDownLatch(1);
         List<String> executions = Collections.synchronizedList(new ArrayList<>());
 
-        pool = new RepairWorkerPool(2, key -> false, 100) {
+        pool = new RepairWorkerPool(new WriteTracker(), 100L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executions.add(op.blobKey());
@@ -139,17 +137,97 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        // Enqueue the same key 10 times rapidly
+        // Enqueue same key 10 times with ascending seqOffsets
         for (int i = 0; i < 10; i++) {
-            pool.enqueue(new RepairOperation("hot-key", RepairOperation.RepairReason.READ_MISS));
+            pool.enqueue(new RepairOperation("hot-key", RepairOperation.RepairReason.READ_MISS, (long) i));
         }
-        // Count should be 1 (all compacted to 1 entry)
-        assertEquals(1, pool.pendingCount());
+        assertEquals(1, pool.pendingCount(), "All enqueues for same key should compact to 1");
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
         Thread.sleep(200); // confirm no additional fires
 
-        assertEquals(1, executions.size(), "Exactly one execution should fire for 10 rapid re-enqueues");
+        assertEquals(1, executions.size(), "Exactly one execution for 10 rapid re-enqueues");
+    }
+
+    // -------------------------------------------------------------------------
+    // Idempotency: seqOffset-based discard
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testOlderSeqOffsetDiscarded() throws Exception {
+        List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(1);
+
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
+            @Override
+            void executeRepair(RepairOperation op) {
+                executed.add(op);
+                latch.countDown();
+            }
+        };
+        pool.start();
+
+        // Higher seqOffset enqueued first, then lower — lower should be discarded
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, 10L));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, 5L));
+
+        assertTrue(latch.await(2, TimeUnit.SECONDS));
+        Thread.sleep(150);
+
+        assertEquals(1, executed.size(), "Only one execution should fire");
+        assertEquals(10L, executed.get(0).seqOffset(), "Higher seqOffset should execute");
+        assertEquals(RepairOperation.RepairReason.COMMIT_MISS, executed.get(0).reason());
+    }
+
+    @Test
+    void testNewerSeqOffsetOverwritesPending() throws Exception {
+        List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(1);
+
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
+            @Override
+            void executeRepair(RepairOperation op) {
+                executed.add(op);
+                latch.countDown();
+            }
+        };
+        pool.start();
+
+        // Lower seqOffset enqueued first, then higher — higher should overwrite
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, 5L));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, 10L));
+
+        assertTrue(latch.await(2, TimeUnit.SECONDS));
+        Thread.sleep(150);
+
+        assertEquals(1, executed.size(), "Only one execution should fire");
+        assertEquals(10L, executed.get(0).seqOffset(), "Newer seqOffset should win");
+        assertEquals(RepairOperation.RepairReason.COMMIT_MISS, executed.get(0).reason());
+    }
+
+    @Test
+    void testEqualSeqOffsetDoesNotOverwrite() throws Exception {
+        List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(1);
+
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
+            @Override
+            void executeRepair(RepairOperation op) {
+                executed.add(op);
+                latch.countDown();
+            }
+        };
+        pool.start();
+
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, 7L));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, 7L));
+
+        assertTrue(latch.await(2, TimeUnit.SECONDS));
+        Thread.sleep(150);
+
+        assertEquals(1, executed.size());
+        assertEquals(RepairOperation.RepairReason.COMMIT_MISS, executed.get(0).reason(),
+                "Equal seqOffset should not overwrite — first enqueue wins");
     }
 
     // -------------------------------------------------------------------------
@@ -158,10 +236,10 @@ class RepairWorkerPoolTest {
 
     @Test
     void testActiveWriteCheckDefersRepair() throws Exception {
-        AtomicBoolean writeInProgress = new AtomicBoolean(true);
+        WriteTracker writeTracker = new WriteTracker();
         CountDownLatch executed = new CountDownLatch(1);
 
-        pool = new RepairWorkerPool(1, key -> writeInProgress.get(), 50L) {
+        pool = new RepairWorkerPool(writeTracker, 50L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executed.countDown();
@@ -169,15 +247,17 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS));
+        // Mark write as in progress before the delay fires
+        writeTracker.begin("key1");
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.COMMIT_MISS, 1L));
 
-        // First delay fires but write is in progress → re-enqueued, not executed
+        // Delay fires but write is still in progress → re-enqueued, not executed
         Thread.sleep(120);
-        assertEquals(1, executed.getCount(), "Should not have executed yet while write is in progress");
+        assertEquals(1, executed.getCount(), "Should not have executed while write is in progress");
         assertEquals(1, pool.pendingCount(), "Should be re-enqueued while write is in progress");
 
-        // Mark write as done → next delay fires and executes
-        writeInProgress.set(false);
+        // Release write → next delay fires and executes
+        writeTracker.end("key1");
         assertTrue(executed.await(2, TimeUnit.SECONDS), "Should execute after write completes");
     }
 
@@ -185,7 +265,7 @@ class RepairWorkerPoolTest {
     void testRepairExecutesImmediatelyWhenNoActiveWrite() throws Exception {
         CountDownLatch executed = new CountDownLatch(1);
 
-        pool = new RepairWorkerPool(1, key -> false, 50) {
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executed.countDown();
@@ -193,7 +273,7 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
 
         assertTrue(executed.await(2, TimeUnit.SECONDS), "Should execute when no active write");
     }
@@ -206,7 +286,7 @@ class RepairWorkerPoolTest {
     void testPendingCountDropsToZeroAfterDispatch() throws Exception {
         CountDownLatch latch = new CountDownLatch(1);
 
-        pool = new RepairWorkerPool(1, key -> false, 50) {
+        pool = new RepairWorkerPool(new WriteTracker(), 50L) {
             @Override
             void executeRepair(RepairOperation op) {
                 latch.countDown();
@@ -214,10 +294,9 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
         assertEquals(1, pool.pendingCount());
 
-        // After dispatch, entry is removed from the map
         assertTrue(latch.await(2, TimeUnit.SECONDS));
         assertEquals(0, pool.pendingCount(), "Map should be empty after dispatch");
     }
@@ -231,7 +310,7 @@ class RepairWorkerPoolTest {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
 
-        pool = new RepairWorkerPool(1, key -> false, 0) {
+        pool = new RepairWorkerPool(new WriteTracker(), 0L) {
             @Override
             void executeRepair(RepairOperation op) {
                 started.countDown();
@@ -245,7 +324,7 @@ class RepairWorkerPoolTest {
         pool.start();
         assertTrue(pool.isRunning());
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
         assertTrue(started.await(5, TimeUnit.SECONDS));
 
         pool.shutdown();
@@ -257,7 +336,7 @@ class RepairWorkerPoolTest {
         CountDownLatch executed = new CountDownLatch(1);
 
         // Long delay — task should never fire because shutdown cancels it
-        pool = new RepairWorkerPool(1, key -> false, 5_000) {
+        pool = new RepairWorkerPool(new WriteTracker(), 5_000L) {
             @Override
             void executeRepair(RepairOperation op) {
                 executed.countDown();
@@ -265,33 +344,26 @@ class RepairWorkerPoolTest {
         };
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS));
+        pool.enqueue(new RepairOperation("key1", RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
         assertEquals(1, pool.pendingCount());
 
         pool.shutdown();
 
-        // After shutdown the scheduled task should NOT have fired
         assertFalse(executed.await(200, TimeUnit.MILLISECONDS),
                 "Repair should not execute after shutdown");
     }
 
     @Test
     void testNullEnqueueIgnored() {
-        pool = new RepairWorkerPool(1);
+        pool = new RepairWorkerPool(new WriteTracker());
         pool.enqueue(null);
         assertEquals(0, pool.pendingCount());
     }
 
     @Test
     void testDoubleStartThrows() {
-        pool = new RepairWorkerPool(1);
+        pool = new RepairWorkerPool(new WriteTracker());
         pool.start();
         assertThrows(IllegalStateException.class, () -> pool.start());
-    }
-
-    @Test
-    void testInvalidConcurrencyThrows() {
-        assertThrows(IllegalArgumentException.class, () -> new RepairWorkerPool(0));
-        assertThrows(IllegalArgumentException.class, () -> new RepairWorkerPool(-1));
     }
 }

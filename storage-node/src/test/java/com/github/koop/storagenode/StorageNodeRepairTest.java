@@ -70,19 +70,19 @@ class StorageNodeRepairTest {
     }
 
     @Test
-    void testNodeStartsInActiveState() {
+    void testNodeServesTrafficImmediatelyAfterStart() throws Exception {
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
         server.start();
-        assertEquals(NodeState.ACTIVE, server.getState());
-    }
+        port = server.port();
 
-    @Test
-    void testNodeStateTransitionsThroughRepair() {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
-        assertEquals(NodeState.INITIALIZING, server.getState(), "Should start in INITIALIZING");
+        HttpRequest getReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/store/1/any-bucket/any-key"))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        server.start();
-        assertEquals(NodeState.ACTIVE, server.getState(), "Should be ACTIVE after start completes");
+        // Node serves traffic immediately — no 503 gating
+        assertNotEquals(503, resp.statusCode(), "Node should not return 503 after start");
     }
 
     @Test
@@ -110,24 +110,6 @@ class StorageNodeRepairTest {
 
         // Should still return 404 (the repair is async)
         assertEquals(404, getResp.statusCode());
-    }
-
-    @Test
-    void testTrafficGatingDuringRepair() throws Exception {
-        // We can't easily test the 503 during REPAIRING because start() transitions
-        // synchronously. Instead, verify that after start(), traffic works normally.
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
-        server.start();
-        port = server.port();
-
-        HttpRequest getReq = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/store/1/test-bucket/test-key"))
-                .GET()
-                .build();
-        HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
-
-        // Should get 404 (not 503) because node is ACTIVE
-        assertEquals(404, getResp.statusCode(), "Should return 404, not 503, when node is ACTIVE");
     }
 
     @Test

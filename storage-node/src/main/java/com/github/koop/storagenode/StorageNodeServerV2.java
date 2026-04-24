@@ -40,9 +40,6 @@ public class StorageNodeServerV2 {
     private final PubSubClient pubSubClient;
     private final RepairWorkerPool repairWorkerPool;
 
-    /** Current lifecycle state of this node. */
-    private volatile NodeState state = NodeState.INITIALIZING;
-
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
@@ -58,16 +55,11 @@ public class StorageNodeServerV2 {
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
             PubSubClient pubSubClient) {
-        this(port, ip, db, dir, metadataClient, pubSubClient, RepairWorkerPool.DEFAULT_CONCURRENCY);
-    }
-
-    public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient, int repairConcurrency) {
         this.port = port;
         this.ip = ip;
-        this.storageNode = new StorageNodeV2(db, dir, null);
-        this.repairWorkerPool = new RepairWorkerPool(repairConcurrency, storageNode::isActivelyWriting);
-        this.storageNode.setRepairWorkerPool(this.repairWorkerPool);
+        WriteTracker writeTracker = new WriteTracker();
+        this.repairWorkerPool = new RepairWorkerPool(writeTracker);
+        this.storageNode = new StorageNodeV2(db, dir, this.repairWorkerPool, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
     }
@@ -308,7 +300,7 @@ public class StorageNodeServerV2 {
                     boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
                     if (!materialized) {
                         repairWorkerPool.enqueue(
-                                new RepairOperation(fullKey, RepairOperation.RepairReason.COMMIT_MISS));
+                                new RepairOperation(fullKey, RepairOperation.RepairReason.COMMIT_MISS, seqNumber));
                     }
                     requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);
@@ -384,10 +376,6 @@ public class StorageNodeServerV2 {
     }
 
     public void start() {
-        state = NodeState.REPAIRING;
-        logger.info("Node entering REPAIRING state");
-
-        // Start the repair worker pool
         repairWorkerPool.start();
 
         if (metadataClient != null) {
@@ -410,27 +398,12 @@ public class StorageNodeServerV2 {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
             config.http.maxRequestSize = 100_000_000L;
-            config.routes.before(this::gateTraffic);
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
         });
 
         app.start(port);
-
-        // Transition to ACTIVE — node is ready to serve traffic
-        state = NodeState.ACTIVE;
-        logger.info("StorageNodeServerV2 started on port {} — state: ACTIVE", app.port());
-    }
-
-    /**
-     * Blocks HTTP traffic while the node is not in ACTIVE state.
-     * Returns 503 Service Unavailable with the current node state.
-     */
-    private void gateTraffic(Context ctx) {
-        if (state != NodeState.ACTIVE) {
-            ctx.status(503).result("Node is not ready: " + state);
-            ctx.skipRemainingHandlers();
-        }
+        logger.info("StorageNodeServerV2 started on port {}", app.port());
     }
 
     public void stop() {
@@ -443,15 +416,7 @@ public class StorageNodeServerV2 {
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
 
-        state = NodeState.INITIALIZING;
         logger.info("StorageNodeServerV2 stopped");
-    }
-
-    /**
-     * Returns the current lifecycle state of this node.
-     */
-    public NodeState getState() {
-        return state;
     }
 
     public int port() {

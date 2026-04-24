@@ -9,8 +9,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
@@ -56,26 +54,19 @@ import com.github.koop.storagenode.db.TombstoneFileVersion;
 public class StorageNodeV2 {
     private final Database db;
     private final Path storageDir;
-    private RepairWorkerPool repairWorkerPool;
-    private final Set<String> activeWrites = ConcurrentHashMap.newKeySet();
+    private final RepairWorkerPool repairWorkerPool;
+    private final WriteTracker writeTracker;
     private final static Logger logger = LogManager.getLogger(StorageNodeV2.class);
 
     public StorageNodeV2(Database db, Path dir) {
-        this(db, dir, null);
+        this(db, dir, null, new WriteTracker());
     }
 
-    public StorageNodeV2(Database db, Path dir, RepairWorkerPool repairWorkerPool) {
+    public StorageNodeV2(Database db, Path dir, RepairWorkerPool repairWorkerPool, WriteTracker writeTracker) {
         this.db = db;
         this.storageDir = dir;
         this.repairWorkerPool = repairWorkerPool;
-    }
-
-    void setRepairWorkerPool(RepairWorkerPool repairWorkerPool) {
-        this.repairWorkerPool = repairWorkerPool;
-    }
-
-    public boolean isActivelyWriting(String key) {
-        return activeWrites.contains(key);
+        this.writeTracker = writeTracker;
     }
 
     private Path getObjectPath(String id) {
@@ -147,7 +138,7 @@ public class StorageNodeV2 {
         Path path = getObjectPath(requestID);
         Files.createDirectories(path.getParent());
 
-        activeWrites.add(key);
+        writeTracker.begin(key);
         try {
             write(path, data);
             try {
@@ -156,7 +147,7 @@ public class StorageNodeV2 {
                 throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
             }
         } finally {
-            activeWrites.remove(key);
+            writeTracker.end(key);
         }
     }
 
@@ -258,7 +249,7 @@ public class StorageNodeV2 {
         if (repairWorkerPool != null) {
             logger.info("Enqueuing read-repair for missing blob: key={}", key);
             repairWorkerPool.enqueue(
-                    new RepairOperation(key, RepairOperation.RepairReason.READ_MISS));
+                    new RepairOperation(key, RepairOperation.RepairReason.READ_MISS, Long.MAX_VALUE));
         }
     }
 
