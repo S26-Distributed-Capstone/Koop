@@ -2,12 +2,15 @@ package com.github.koop.storagenode;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.Executors;
 
 import org.junit.jupiter.api.AfterEach;
@@ -15,9 +18,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.Message;
+import com.github.koop.common.metadata.ErasureRouting;
+import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
@@ -32,6 +39,7 @@ class StorageNodeRepairTest {
     private int port;
     private Database db;
     private MetadataClient metadataClient;
+    private MemoryFetcher fetcher;
     private PubSubClient pubSubClient;
     private MemoryPubSub pubSub;
     private Javalin ackServer;
@@ -42,11 +50,20 @@ class StorageNodeRepairTest {
     @BeforeEach
     void setUp() throws Exception {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
-        metadataClient = new MetadataClient(new MemoryFetcher());
+        fetcher = new MemoryFetcher();
+        metadataClient = new MetadataClient(fetcher);
         pubSub = new MemoryPubSub();
         pubSubClient = new PubSubClient(pubSub);
         metadataClient.start();
         pubSubClient.start();
+
+        // Feed empty metadata so the waitFor completes immediately
+        var emptyEs = new ErasureSetConfiguration();
+        emptyEs.setErasureSets(List.of());
+        var emptyPs = new PartitionSpreadConfiguration();
+        emptyPs.setPartitionSpread(List.of());
+        fetcher.update(emptyEs);
+        fetcher.update(emptyPs);
 
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
@@ -242,5 +259,108 @@ class StorageNodeRepairTest {
         // Should compact to 1 pending repair (latest seqNumber wins)
         assertEquals(1, server.repairPendingCount(),
                 "Multiple commits for the same key should compact to 1 pending repair");
+    }
+
+    // -------------------------------------------------------------------------
+    // Full E2E Repair Retrieval Integration
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testActualBlobRepair() throws Exception {
+        // Setup original data and generate shards
+        byte[] originalData = "Testing actual blob repair with erasure coding across nodes.".getBytes(StandardCharsets.UTF_8);
+        int k = 2;
+        int n = 3;
+        InputStream[] shards;
+        try (var bais = new java.io.ByteArrayInputStream(originalData)) {
+            shards = ErasureCoder.shard(bais, originalData.length, k, n);
+        }
+        byte[] shard0 = shards[0].readAllBytes();
+        byte[] shard1 = shards[1].readAllBytes();
+        byte[] shard2 = shards[2].readAllBytes();
+
+        // Setup mocked peer nodes
+        Javalin peer1 = Javalin.create(config ->{
+                config.startup.showJavalinBanner = false;
+                config.routes.get("/store/{partition}/<blobKey>", ctx -> {
+                    ctx.header("X-Koop-Type", "BLOB");
+                    ctx.result(shard1);
+                });
+        }).start(0);
+        Javalin peer2 = Javalin.create(config ->{
+                config.startup.showJavalinBanner = false;
+                config.routes.get("/store/{partition}/<blobKey>", ctx -> {
+                    ctx.header("X-Koop-Type", "BLOB");
+                    ctx.result(shard2);
+                });
+        }).start(0);
+
+        try {
+            // Start node under test
+            server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+            server.start();
+            port = server.port();
+
+            // Provide populated metadata once the server port has been determined
+            var es = new ErasureSetConfiguration.ErasureSet();
+            es.setNumber(1);
+            es.setK(k);
+            es.setN(n);
+            var m0 = new ErasureSetConfiguration.Machine(); m0.setIp("127.0.0.1"); m0.setPort(port);
+            var m1 = new ErasureSetConfiguration.Machine(); m1.setIp("127.0.0.1"); m1.setPort(peer1.port());
+            var m2 = new ErasureSetConfiguration.Machine(); m2.setIp("127.0.0.1"); m2.setPort(peer2.port());
+            es.setMachines(List.of(m0, m1, m2));
+            var esConfig = new ErasureSetConfiguration();
+            esConfig.setErasureSets(List.of(es));
+
+            var ps = new PartitionSpreadConfiguration.PartitionSpread();
+            ps.setErasureSet(1);
+            List<Integer> parts = new java.util.ArrayList<>();
+            for(int i = 0; i < 1024; i++) parts.add(i);
+            ps.setPartitions(parts);
+            var psConfig = new PartitionSpreadConfiguration();
+            psConfig.setPartitionSpread(List.of(ps));
+
+            fetcher.update(esConfig);
+            fetcher.update(psConfig);
+
+            // Brief wait for metadata listener to recalculate node identities and subscriptions
+            Thread.sleep(500);
+
+            // Establish request context
+            String bucket = "repair-bucket";
+            String key = "repair-key-actual";
+            String fullKey = bucket + "/" + key;
+            String reqId = "req-repair-actual";
+
+            ErasureRouting routing = new ErasureRouting(psConfig, esConfig);
+            int partition = routing.getPartition(fullKey).orElseThrow();
+
+            // Trigger COMMIT_MISS by processing sequencer message directly, without issuing PUT beforehand
+            server.processSequencerMessage(partition, new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 100L);
+
+            // Verify completion by polling for a successful object payload
+            boolean repaired = false;
+            for (int i = 0; i < 50; i++) {
+                if (server.repairPendingCount() == 0) {
+                    HttpRequest getReq = HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey))
+                            .GET()
+                            .build();
+                    HttpResponse<byte[]> res = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+                    if (res.statusCode() == 200) {
+                        assertArrayEquals(shard0, res.body(), "Recovered shard should match original shard0 data");
+                        repaired = true;
+                        break;
+                    }
+                }
+                Thread.sleep(100);
+            }
+            assertTrue(repaired, "Node should have repaired the blob successfully by fetching and reconstructing from peers");
+
+        } finally {
+            peer1.stop();
+            peer2.stop();
+        }
     }
 }

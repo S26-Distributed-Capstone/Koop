@@ -44,8 +44,7 @@ class StorageNodeServerV2Test {
     private MemoryFetcher fetcher;
     private MemoryPubSub pubSub;
 
-    // A dummy server to absorb all the async ACKs and prevent connection errors in
-    // the logs
+    // A dummy server to absorb all the async ACKs and prevent connection errors in the logs
     private Javalin ackServer;
 
     @TempDir
@@ -60,25 +59,16 @@ class StorageNodeServerV2Test {
         pubSubClient = new PubSubClient(pubSub);
         metadataClient.start();
         pubSubClient.start();
-        var set1 = new ErasureSetConfiguration.ErasureSet();
-        set1.setK(6);
-        set1.setN(9);
-        var machine = new ErasureSetConfiguration.Machine();
-        machine.setIp("0");// dummy - not doing repair
-        machine.setPort(0);
-        set1.setMachines(List.of(machine));
-        var erasureConfig = new ErasureSetConfiguration();
-        erasureConfig.setErasureSets(List.of(set1));
-        var partitionSpreadConfig = new PartitionSpreadConfiguration();
-        var partitionSpread = new PartitionSpreadConfiguration.PartitionSpread();
-        partitionSpread.setErasureSet(1);
-        partitionSpread.setPartitions(List.of(1, 2, 3, 4, 5, 6, 7, 8));
-        partitionSpreadConfig.setPartitionSpread(List.of(partitionSpread));
-        fetcher.update(erasureConfig);
-        fetcher.update(partitionSpreadConfig);
 
-        // Start the ACK blackhole server on a random port (Updated to new path param
-        // spec)
+        // Feed empty metadata so the waitFor completes immediately
+        var emptyEs = new ErasureSetConfiguration();
+        emptyEs.setErasureSets(List.of());
+        var emptyPs = new PartitionSpreadConfiguration();
+        emptyPs.setPartitionSpread(List.of());
+        fetcher.update(emptyEs);
+        fetcher.update(emptyPs);
+
+        // Start the ACK blackhole server on a random port (Updated to new path param spec)
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
             config.routes.post("/ack/{requestId}", ctx -> ctx.status(200));
@@ -302,8 +292,7 @@ class StorageNodeServerV2Test {
         CountDownLatch ackLatch = new CountDownLatch(1);
         AtomicReference<String> receivedReqId = new AtomicReference<>();
 
-        // Start a dummy Javalin server on a random port to act as the sequencer
-        // callback endpoint
+        // Start a dummy Javalin server on a random port to act as the sequencer callback endpoint
         Javalin coordinator = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
@@ -318,12 +307,10 @@ class StorageNodeServerV2Test {
         int callbackPort = coordinator.port();
         InetSocketAddress senderAddress = new InetSocketAddress("127.0.0.1", callbackPort);
 
-        // Create a simple message to trigger the sequencer processing and subsequent
-        // ACK
+        // Create a simple message to trigger the sequencer processing and subsequent ACK
         Message.CreateBucketMessage msg = new Message.CreateBucketMessage(bucket, reqId, senderAddress);
 
-        // Process the message (this handles the database operation and fires the async
-        // ACK)
+        // Process the message (this handles the database operation and fires the async ACK)
         server.processSequencerMessage(partition, msg, 1L);
 
         // Wait for the asynchronous HTTP client to send the request to the dummy server
@@ -342,8 +329,7 @@ class StorageNodeServerV2Test {
         String fullKey = bucket + "/" + key;
         String reqId = "req-missing-123";
 
-        // Commit the file metadata via sequencer message WITHOUT performing the HTTP
-        // PUT first.
+        // Commit the file metadata via sequencer message WITHOUT performing the HTTP PUT first.
         server.processSequencerMessage(partition,
                 new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
 
@@ -353,8 +339,7 @@ class StorageNodeServerV2Test {
                 .build();
         HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // StorageNodeV2 checks Files.exists(path) for RegularFileVersion and returns
-        // Optional.empty(),
+        // StorageNodeV2 checks Files.exists(path) for RegularFileVersion and returns Optional.empty(),
         // which the server translates to 404 NOT_FOUND.
         assertEquals(404, getResp.statusCode(),
                 "GET should return 404 when file metadata exists but the physical file is missing from disk");
@@ -379,8 +364,7 @@ class StorageNodeServerV2Test {
                 .build();
         HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // StorageNodeV2 DOES NOT verify physical existence of individual chunks during
-        // a manifest retrieval.
+        // StorageNodeV2 DOES NOT verify physical existence of individual chunks during a manifest retrieval.
         // It returns the JSON list of chunks immediately.
         assertEquals(200, getResp.statusCode(),
                 "GET should return 200 for multipart manifest even if physical chunk files are unmaterialized");
@@ -398,13 +382,11 @@ class StorageNodeServerV2Test {
         String reqId = "req-late-123";
         String dataStr = "Better late than never";
 
-        // 1. Commit the file metadata via sequencer message FIRST (before the file is
-        // uploaded)
+        // 1. Commit the file metadata via sequencer message FIRST (before the file is uploaded)
         server.processSequencerMessage(partition,
                 new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 500L);
 
-        // 2. Verify the file is not yet available (returns 404 because physical file is
-        // missing)
+        // 2. Verify the file is not yet available (returns 404 because physical file is missing)
         HttpRequest getReq1 = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
