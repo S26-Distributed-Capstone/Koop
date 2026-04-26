@@ -67,6 +67,9 @@ class StorageNodeRepairTest {
         if (server != null) server.stop();
         if (db != null) db.close();
         if (ackServer != null) ackServer.stop();
+        if (metadataClient != null) metadataClient.close();
+        if (pubSubClient != null) pubSubClient.close();
+        if (http != null) http.close();
     }
 
     @Test

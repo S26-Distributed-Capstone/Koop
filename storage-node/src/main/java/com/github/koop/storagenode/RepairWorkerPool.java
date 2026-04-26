@@ -138,6 +138,10 @@ public class RepairWorkerPool implements RepairQueue {
         if (op == null) {
             return;
         }
+        if (!running) {
+            logger.debug("Pool not running; dropping repair for key={}", key);
+            return;
+        }
         if (writeTracker.isActive(key)) {
             // Write in progress — re-enqueue so it retries after the blob lands
             logger.debug("Deferring repair for key={}: write in progress", key);

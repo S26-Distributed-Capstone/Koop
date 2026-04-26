@@ -37,9 +37,9 @@ class RepairWorkerPoolTest {
         });
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 1L));
-        pool.enqueue(new RepairOperation("key2", 2L));
-        pool.enqueue(new RepairOperation("key3", 3L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
+        pool.enqueue(new RepairOperation("key2", 2L, null));
+        pool.enqueue(new RepairOperation("key3", 3L, null));
 
         assertTrue(latch.await(5, TimeUnit.SECONDS), "All 3 operations should be processed");
         assertEquals(3, executed.size());
@@ -64,7 +64,7 @@ class RepairWorkerPoolTest {
         pool.start();
 
         for (int i = 0; i < numOps; i++) {
-            pool.enqueue(new RepairOperation("key-" + i, (long) i));
+            pool.enqueue(new RepairOperation("key-" + i, (long) i, null));
         }
 
         assertTrue(inProgress.await(5, TimeUnit.SECONDS),
@@ -82,12 +82,12 @@ class RepairWorkerPoolTest {
     void testPendingCountReflectsUniqueKeys() {
         pool = new RepairWorkerPool(new WriteTracker(), op -> {});
 
-        pool.enqueue(new RepairOperation("key1", 1L));
-        pool.enqueue(new RepairOperation("key2", 2L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
+        pool.enqueue(new RepairOperation("key2", 2L, null));
         assertEquals(2, pool.pendingCount());
 
         // Re-enqueuing key1 with a higher seqOffset compacts — count stays at 2
-        pool.enqueue(new RepairOperation("key1", 3L));
+        pool.enqueue(new RepairOperation("key1", 3L, null));
         assertEquals(2, pool.pendingCount());
     }
 
@@ -103,8 +103,8 @@ class RepairWorkerPoolTest {
         pool.start();
 
         // Enqueue same key twice: second has higher seqOffset so it wins
-        pool.enqueue(new RepairOperation("key1", 1L));
-        pool.enqueue(new RepairOperation("key1", 2L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
+        pool.enqueue(new RepairOperation("key1", 2L, null));
 
         assertTrue(latch.await(2, TimeUnit.SECONDS), "Exactly one execution should fire");
         Thread.sleep(150); // confirm no second execution arrives
@@ -126,7 +126,7 @@ class RepairWorkerPoolTest {
 
         // Enqueue same key 10 times with ascending seqOffsets
         for (int i = 0; i < 10; i++) {
-            pool.enqueue(new RepairOperation("hot-key", (long) i));
+            pool.enqueue(new RepairOperation("hot-key", (long) i, null));
         }
         assertEquals(1, pool.pendingCount(), "All enqueues for same key should compact to 1");
 
@@ -152,8 +152,8 @@ class RepairWorkerPoolTest {
         pool.start();
 
         // Higher seqOffset enqueued first, then lower — lower should be discarded
-        pool.enqueue(new RepairOperation("key1", 10L));
-        pool.enqueue(new RepairOperation("key1", 5L));
+        pool.enqueue(new RepairOperation("key1", 10L, null));
+        pool.enqueue(new RepairOperation("key1", 5L, null));
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
         Thread.sleep(150);
@@ -174,8 +174,8 @@ class RepairWorkerPoolTest {
         pool.start();
 
         // Lower seqOffset enqueued first, then higher — higher should overwrite
-        pool.enqueue(new RepairOperation("key1", 5L));
-        pool.enqueue(new RepairOperation("key1", 10L));
+        pool.enqueue(new RepairOperation("key1", 5L, null));
+        pool.enqueue(new RepairOperation("key1", 10L, null));
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
         Thread.sleep(150);
@@ -195,8 +195,8 @@ class RepairWorkerPoolTest {
         });
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 7L));
-        pool.enqueue(new RepairOperation("key1", 7L));
+        pool.enqueue(new RepairOperation("key1", 7L, null));
+        pool.enqueue(new RepairOperation("key1", 7L, null));
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
         Thread.sleep(150);
@@ -220,7 +220,7 @@ class RepairWorkerPoolTest {
 
         // Mark write as in progress before the delay fires
         writeTracker.begin("key1");
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
 
         // Delay fires but write is still in progress → re-enqueued, not executed
         Thread.sleep(120);
@@ -239,7 +239,7 @@ class RepairWorkerPoolTest {
         pool = new RepairWorkerPool(new WriteTracker(), 50L, op -> executed.countDown());
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
 
         assertTrue(executed.await(2, TimeUnit.SECONDS), "Should execute when no active write");
     }
@@ -255,7 +255,7 @@ class RepairWorkerPoolTest {
         pool = new RepairWorkerPool(new WriteTracker(), 50L, op -> latch.countDown());
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
         assertEquals(1, pool.pendingCount());
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
@@ -282,7 +282,7 @@ class RepairWorkerPoolTest {
         pool.start();
         assertTrue(pool.isRunning());
 
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
         assertTrue(started.await(5, TimeUnit.SECONDS));
 
         pool.shutdown();
@@ -297,7 +297,7 @@ class RepairWorkerPoolTest {
         pool = new RepairWorkerPool(new WriteTracker(), 5_000L, op -> executed.countDown());
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
         assertEquals(1, pool.pendingCount());
 
         pool.shutdown();
@@ -335,7 +335,7 @@ class RepairWorkerPoolTest {
         });
         pool.start();
 
-        RepairOperation op = new RepairOperation("test-key", 42L);
+        RepairOperation op = new RepairOperation("test-key", 42L, null);
         pool.enqueue(op);
 
         assertTrue(latch.await(2, TimeUnit.SECONDS));
@@ -350,7 +350,7 @@ class RepairWorkerPoolTest {
         pool = new RepairWorkerPool(new WriteTracker(), 0L, null);
         pool.start();
 
-        pool.enqueue(new RepairOperation("key1", 1L));
+        pool.enqueue(new RepairOperation("key1", 1L, null));
         Thread.sleep(200); // let dispatch fire
         // Should not throw — just logs a warning
         assertEquals(0, pool.pendingCount());

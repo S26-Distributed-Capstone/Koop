@@ -7,6 +7,8 @@ package com.github.koop.storagenode;
  * @param seqOffset the pub/sub sequence offset of the commit message that
  *                  triggered this repair; used for last-writer-wins compaction
  *                  in the enqueue path.
+ * @param requestId the request ID from the commit message; used as the storage
+ *                  location when writing the recovered shard to disk.
  */
-public record RepairOperation(String blobKey, long seqOffset) {
+public record RepairOperation(String blobKey, long seqOffset, String requestId) {
 }

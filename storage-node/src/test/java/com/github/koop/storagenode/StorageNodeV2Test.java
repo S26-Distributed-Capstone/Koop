@@ -43,7 +43,7 @@ public class StorageNodeV2Test {
     public void setup() throws Exception {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
         writeTracker = new WriteTracker();
-        storageNode = new StorageNodeV2(db, tempDir, null, writeTracker);
+        storageNode = new StorageNodeV2(db, tempDir, writeTracker);
     }
 
     @AfterEach
@@ -297,7 +297,7 @@ public class StorageNodeV2Test {
         WriteTracker tracker = new WriteTracker();
         RepairWorkerPool repairPool = new RepairWorkerPool(tracker, op -> {});
         repairPool.start();
-        storageNode = new StorageNodeV2(db, tempDir, repairPool, tracker);
+        storageNode = new StorageNodeV2(db, tempDir, tracker);
 
         // Commit without a prior store → version recorded as not materialized
         storageNode.commit(1, "bucket/ghost", "req-ghost", 99L);

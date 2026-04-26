@@ -54,18 +54,16 @@ import com.github.koop.storagenode.db.TombstoneFileVersion;
 public class StorageNodeV2 {
     private final Database db;
     private final Path storageDir;
-    private final RepairQueue repairQueue;
     private final WriteTracker writeTracker;
     private final static Logger logger = LogManager.getLogger(StorageNodeV2.class);
 
     public StorageNodeV2(Database db, Path dir) {
-        this(db, dir, null, new WriteTracker());
+        this(db, dir, new WriteTracker());
     }
 
-    public StorageNodeV2(Database db, Path dir, RepairQueue repairQueue, WriteTracker writeTracker) {
+    public StorageNodeV2(Database db, Path dir, WriteTracker writeTracker) {
         this.db = db;
         this.storageDir = dir;
-        this.repairQueue = repairQueue;
         this.writeTracker = writeTracker;
     }
 

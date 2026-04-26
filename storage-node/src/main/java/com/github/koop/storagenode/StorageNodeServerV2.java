@@ -51,6 +51,7 @@ public class StorageNodeServerV2 {
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
     private PartitionSpreadConfiguration currentPsConfig;
+    private volatile int myShardIndex = -1;
 
     private final Set<Integer> subscribedPartitions = new HashSet<>();
     private final Map<Integer, ExecutorService> partitionExecutors = new ConcurrentHashMap<>();
@@ -70,7 +71,7 @@ public class StorageNodeServerV2 {
         // Lambda captures 'this' — storageNode/config are dereferenced at call time,
         // not at construction time, so there is no circular dependency.
         this.repairWorkerPool = new RepairWorkerPool(writeTracker, this::repairBlob);
-        this.storageNode = new StorageNodeV2(db, dir, this.repairWorkerPool, writeTracker);
+        this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
     }
@@ -113,23 +114,28 @@ public class StorageNodeServerV2 {
         }
 
         int myErasureSetId = -1;
+        int newShardIndex = -1;
 
+        outer:
         for (ErasureSetConfiguration.ErasureSet es : currentEsConfig.getErasureSets()) {
-            for (ErasureSetConfiguration.Machine machine : es.getMachines()) {
-                if (machine.getIp().equals(this.ip) && machine.getPort() == this.port) {
+            List<ErasureSetConfiguration.Machine> machines = es.getMachines();
+            for (int i = 0; i < machines.size(); i++) {
+                ErasureSetConfiguration.Machine machine = machines.get(i);
+                if (machine.getIp().equals(this.ip) && machine.getPort() == app.port()) {
                     myErasureSetId = es.getNumber();
-                    break;
+                    newShardIndex = i;
+                    break outer;
                 }
             }
-            if (myErasureSetId != -1)
-                break;
         }
+
+        this.myShardIndex = newShardIndex;
 
         Set<Integer> targetPartitions = new HashSet<>();
 
         if (myErasureSetId == -1) {
             logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
-                    this.port);
+                    app.port());
         } else {
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
                 if (spread.getErasureSet() == myErasureSetId) {
@@ -310,7 +316,7 @@ public class StorageNodeServerV2 {
                     String fullKey = buildKey(m.bucket(), m.key());
                     boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
                     if (!materialized) {
-                        repairWorkerPool.enqueue(new RepairOperation(fullKey, seqNumber));
+                        repairWorkerPool.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
                     }
                     requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);
@@ -399,18 +405,11 @@ public class StorageNodeServerV2 {
         int n = es.getN();
         int k = es.getK();
 
-        // 3. Determine this node's shard index
-        int myIndex = -1;
-        for (int i = 0; i < machines.size(); i++) {
-            ErasureSetConfiguration.Machine m = machines.get(i);
-            if (m.getIp().equals(this.ip) && m.getPort() == this.port) {
-                myIndex = i;
-                break;
-            }
-        }
+        // 3. Determine this node's shard index (cached from last metadata update)
+        int myIndex = this.myShardIndex;
         if (myIndex == -1) {
             logger.error("Repair failed: this node {}:{} not found in erasure set {} for key={}",
-                    this.ip, this.port, es.getNumber(), blobKey);
+                    this.ip, app.port(), es.getNumber(), blobKey);
             return;
         }
 
@@ -463,8 +462,7 @@ public class StorageNodeServerV2 {
                 byte[] ourShard = resharded[myIndex].readAllBytes();
 
                 // 6. Write our shard to disk
-                // The requestID IS the blob key for the purpose of storage
-                storageNode.store(partition, blobKey, blobKey,
+                storageNode.store(partition, blobKey, operation.requestId(),
                         Channels.newChannel(new java.io.ByteArrayInputStream(ourShard)));
 
                 logger.info("Repair succeeded: key={}, seqOffset={}, shard index={}, {} bytes written",
@@ -487,11 +485,11 @@ public class StorageNodeServerV2 {
 
     private ShardFetchResult fetchShardFromPeer(ErasureSetConfiguration.Machine peer,
             int partition, String blobKey, long seqOffset, int nodeIndex) {
-        String url = String.format("http://%s:%d/store/%d/%s?version=%d",
-                peer.getIp(), peer.getPort(), partition, blobKey, seqOffset);
         try {
+            URI uri = new URI("http", null, peer.getIp(), peer.getPort(),
+                    "/store/" + partition + "/" + blobKey, "version=" + seqOffset, null);
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
+                    .uri(uri)
                     .GET()
                     .timeout(Duration.ofSeconds(10))
                     .build();
@@ -560,22 +558,6 @@ public class StorageNodeServerV2 {
     public void start() {
         repairWorkerPool.start();
 
-        if (metadataClient != null) {
-            this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
-            this.currentPsConfig = metadataClient.get(PartitionSpreadConfiguration.class);
-            updateSubscriptions();
-
-            metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
-                this.currentEsConfig = current;
-                updateSubscriptions();
-            });
-
-            metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
-                this.currentPsConfig = current;
-                updateSubscriptions();
-            });
-        }
-
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
@@ -586,6 +568,28 @@ public class StorageNodeServerV2 {
 
         app.start(port);
         logger.info("StorageNodeServerV2 started on port {}", app.port());
+
+        if (metadataClient != null) {
+            metadataClient.listen(ErasureSetConfiguration.class, (prev, current) -> {
+                this.currentEsConfig = current;
+                updateSubscriptions();
+            });
+
+            metadataClient.listen(PartitionSpreadConfiguration.class, (prev, current) -> {
+                this.currentPsConfig = current;
+                updateSubscriptions();
+            });
+
+            try {
+                this.currentEsConfig = metadataClient.waitFor(ErasureSetConfiguration.class, 30, TimeUnit.SECONDS);
+                this.currentPsConfig = metadataClient.waitFor(PartitionSpreadConfiguration.class, 30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Interrupted while waiting for initial metadata");
+            }
+
+            updateSubscriptions();
+        }
     }
 
     public void stop() {
