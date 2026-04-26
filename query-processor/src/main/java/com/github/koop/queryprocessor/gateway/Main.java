@@ -448,10 +448,15 @@ public class Main {
         sb.append("  <MaxKeys>1000</MaxKeys>\n");
         sb.append("  <IsTruncated>false</IsTruncated>\n");
         for (ObjectSummary obj : objects) {
+            // S3 clients require LastModified to be a valid ISO-8601 timestamp;
+            // fall back to epoch when the storage layer doesn't supply one yet.
+            String lastModified = (obj.lastModified() == null || obj.lastModified().isEmpty())
+                    ? "1970-01-01T00:00:00.000Z"
+                    : obj.lastModified();
             sb.append("  <Contents>\n");
             sb.append("    <Key>").append(obj.key()).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
-            sb.append("    <LastModified>").append(obj.lastModified()).append("</LastModified>\n");
+            sb.append("    <LastModified>").append(lastModified).append("</LastModified>\n");
             //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
             sb.append("  </Contents>\n");
         }
