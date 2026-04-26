@@ -20,7 +20,6 @@ import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 import io.javalin.Javalin;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.Disabled;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -127,7 +126,6 @@ public class S3GatewayE2EIT {
             dataDirs.add(dir);
             databases.add(db);
 
-            server.start();
             addrs.add(new InetSocketAddress("127.0.0.1", port));
             log("[NODE " + i + "] READY on port " + port);
         }
@@ -160,7 +158,7 @@ public class S3GatewayE2EIT {
         sharedFetcher.update(esConfig);
         sharedFetcher.update(psConfig);
 
-        Thread.sleep(1000);
+        servers.forEach(StorageNodeServerV2::start);
         log("=== CLUSTER READY ===");
 
         // 5. Wire up the Gateway
