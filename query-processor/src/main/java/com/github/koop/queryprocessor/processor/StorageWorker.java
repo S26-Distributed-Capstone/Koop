@@ -525,6 +525,202 @@ public final class StorageWorker {
         return deleted;
     }
 
+    /**
+     * Checks whether a bucket exists by querying nodes in the partition's
+     * erasure set sequentially. Returns true on the first 200, false if all
+     * nodes either return 404 or fail.
+     */
+    public boolean bucketExists(String bucket) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting bucketExists", bucket);
+            return false;
+        }
+
+        List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+
+        for (InetSocketAddress node : nodes) {
+            URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
+                    node.getHostString(), node.getPort(), bucket));
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                    .build();
+            try {
+                HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
+                int status = resp.statusCode();
+                if (status == 200) return true;
+                if (status == 404) return false;
+                logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+            } catch (Exception e) {
+                logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Lists objects in a bucket by fanning out a GET to one node per partition,
+     * merging results, deduping by key, sorting, and applying maxKeys.
+     */
+    public List<ObjectInfo> listObjects(String bucket, String prefix, int maxKeys) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (maxKeys < 0) throw new IllegalArgumentException("maxKeys < 0");
+
+        ErasureRouting r = getRouting();
+        var spreads = metadataClient.get(PartitionSpreadConfiguration.class).getPartitionSpread();
+        if (spreads == null || spreads.isEmpty()) {
+            logger.error("listObjects: no partition spread");
+            return List.of();
+        }
+
+        List<Integer> partitions = spreads.stream()
+                .flatMap(s -> s.getPartitions().stream())
+                .distinct()
+                .toList();
+
+        String safePrefix = prefix == null ? "" : prefix;
+        String query = "?maxKeys=" + maxKeys
+                + (safePrefix.isEmpty() ? "" : "&prefix=" + safePrefix);
+
+        List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
+        for (int partition : partitions) {
+            Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
+            if (esOpt.isEmpty()) continue;
+            List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
+                    .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+            if (nodes.isEmpty()) continue;
+            tasks.add(() -> fetchListFromAnyNode(bucket, query, nodes));
+        }
+
+        List<ObjectInfo> merged = new ArrayList<>();
+        try {
+            for (var future : executor.invokeAll(tasks)) {
+                try {
+                    merged.addAll(future.get());
+                } catch (ExecutionException e) {
+                    logger.warn("listObjects partition fetch failed: {}", e.getMessage());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        }
+
+        return merged.stream()
+                .collect(java.util.stream.Collectors.toMap(ObjectInfo::key, o -> o, (a, b) -> a))
+                .values().stream()
+                .sorted(Comparator.comparing(ObjectInfo::key))
+                .limit(maxKeys)
+                .toList();
+    }
+
+    private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
+        for (InetSocketAddress node : nodes) {
+            URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
+                    node.getHostString(), node.getPort(), bucket, query));
+            HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
+            try {
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    return parseObjectListJson(resp.body());
+                }
+                logger.trace("GET list {} → node {} HTTP {}", bucket, node, resp.statusCode());
+            } catch (Exception e) {
+                logger.trace("GET list {} → node {} failed: {}", bucket, node, e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    /** Parses the storage node's list response: [{"key":"..."},...]. */
+    private static List<ObjectInfo> parseObjectListJson(String body) {
+        if (body == null) return List.of();
+        String trimmed = body.trim();
+        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return List.of();
+        String inner = trimmed.substring(1, trimmed.length() - 1).trim();
+        if (inner.isEmpty()) return List.of();
+
+        List<ObjectInfo> out = new ArrayList<>();
+        int depth = 0;
+        StringBuilder cur = new StringBuilder();
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '{') depth++;
+            if (c == '}') depth--;
+            if (c == ',' && depth == 0) {
+                ObjectInfo oi = parseObjectEntry(cur.toString());
+                if (oi != null) out.add(oi);
+                cur.setLength(0);
+            } else {
+                cur.append(c);
+            }
+        }
+        if (cur.length() > 0) {
+            ObjectInfo oi = parseObjectEntry(cur.toString());
+            if (oi != null) out.add(oi);
+        }
+        return out;
+    }
+
+    private static ObjectInfo parseObjectEntry(String entry) {
+        int keyIdx = entry.indexOf("\"key\"");
+        if (keyIdx < 0) return null;
+        int firstQuote = entry.indexOf('"', entry.indexOf(':', keyIdx) + 1);
+        if (firstQuote < 0) return null;
+        StringBuilder key = new StringBuilder();
+        boolean escape = false;
+        int i = firstQuote + 1;
+        for (; i < entry.length(); i++) {
+            char c = entry.charAt(i);
+            if (escape) { key.append(c); escape = false; continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (c == '"') break;
+            key.append(c);
+        }
+        long size = parseLongField(entry, "size");
+        String lastModified = parseStringField(entry, "lastModified");
+        return new ObjectInfo(key.toString(), size, lastModified);
+    }
+
+    private static long parseLongField(String entry, String field) {
+        int idx = entry.indexOf("\"" + field + "\"");
+        if (idx < 0) return 0L;
+        int colon = entry.indexOf(':', idx);
+        if (colon < 0) return 0L;
+        StringBuilder num = new StringBuilder();
+        for (int i = colon + 1; i < entry.length(); i++) {
+            char c = entry.charAt(i);
+            if (Character.isDigit(c) || c == '-') num.append(c);
+            else if (num.length() > 0) break;
+        }
+        try {
+            return num.length() == 0 ? 0L : Long.parseLong(num.toString());
+        } catch (NumberFormatException e) { return 0L; }
+    }
+
+    private static String parseStringField(String entry, String field) {
+        int idx = entry.indexOf("\"" + field + "\"");
+        if (idx < 0) return "";
+        int firstQuote = entry.indexOf('"', entry.indexOf(':', idx) + 1);
+        if (firstQuote < 0) return "";
+        StringBuilder val = new StringBuilder();
+        boolean escape = false;
+        for (int i = firstQuote + 1; i < entry.length(); i++) {
+            char c = entry.charAt(i);
+            if (escape) { val.append(c); escape = false; continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (c == '"') break;
+            val.append(c);
+        }
+        return val.toString();
+    }
+
+    public record ObjectInfo(String key, long size, String lastModified) {}
+
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
