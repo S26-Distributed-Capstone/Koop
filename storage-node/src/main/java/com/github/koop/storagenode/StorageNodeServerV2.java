@@ -26,6 +26,7 @@ import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.Metadata;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -366,6 +367,53 @@ public class StorageNodeServerV2 {
         return bucket + "/" + key;
     }
 
+    // ─── Bucket query handlers ────────────────────────────────────────────────
+
+    private void handleHeadBucket(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            boolean exists = storageNode.bucketExists(bucket);
+            ctx.status(exists ? 200 : 404);
+        } catch (Exception e) {
+            logger.error("Error handling HEAD /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+    private void handleListObjects(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            String prefix = ctx.queryParam("prefix");
+            String maxKeysParam = ctx.queryParam("maxKeys");
+            int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;
+
+            // Prefix scan: bucket + "/" ensures we only get objects inside this bucket
+            String scanPrefix = bucket + "/";
+            if (prefix != null && !prefix.isEmpty()) {
+                scanPrefix = bucket + "/" + prefix;
+            }
+
+            var items = storageNode.listItemsInBucket(scanPrefix)
+                    .limit(maxKeys)
+                    .map(m -> "{\"key\":\"" + escapeJson(m.key()) + "\"}")
+                    .toList();
+
+            ctx.status(200)
+               .header("Content-Type", "application/json")
+               .result("[" + String.join(",", items) + "]");
+        } catch (NumberFormatException e) {
+            ctx.status(400).result("Invalid maxKeys parameter");
+        } catch (Exception e) {
+            logger.error("Error handling GET /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+    /** Minimal JSON string escaping for keys. */
+    private static String escapeJson(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     public void start() {
         if (metadataClient != null) {
             this.currentEsConfig = metadataClient.get(ErasureSetConfiguration.class);
@@ -389,6 +437,10 @@ public class StorageNodeServerV2 {
             config.http.maxRequestSize = 100_000_000L;
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
+
+            // Bucket-level query endpoints (read-only, no PubSub needed)
+            config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
+            config.routes.get("/bucket/{bucket}", this::handleListObjects);
         });
 
         app.start(port);
