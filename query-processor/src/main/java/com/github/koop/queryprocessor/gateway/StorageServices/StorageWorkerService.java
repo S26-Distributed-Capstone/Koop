@@ -79,14 +79,20 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public void createBucket(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'createBucket'");
+        UUID requestId = UUID.randomUUID();
+        boolean success = storageWorker.createBucket(requestId, bucket);
+        if (!success) {
+            throw new RuntimeException("StorageWorker failed to create bucket");
+        }
     }
 
     @Override
     public void deleteBucket(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'deleteBucket'");
+        UUID requestId = UUID.randomUUID();
+        boolean success = storageWorker.deleteBucket(requestId, bucket);
+        if (!success) {
+            throw new RuntimeException("StorageWorker failed to delete bucket");
+        }
     }
 
     @Override
