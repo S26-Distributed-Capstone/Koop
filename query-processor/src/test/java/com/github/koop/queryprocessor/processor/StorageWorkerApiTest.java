@@ -611,6 +611,98 @@ public class StorageWorkerApiTest {
     }
 
     // -------------------------------------------------------------------------
+    // bucketExists / listObjects tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    void bucketExists_returnsTrueAfterCreate() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+        List<AckingFakeStorageNodeServer> beNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) beNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = beNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
+        try {
+            assertTrue(w.createBucket(UUID.randomUUID(), "exists-bucket"), "createBucket should succeed");
+            assertTrue(w.bucketExists("exists-bucket"), "bucketExists should be true after create");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : beNodes) n.close();
+        }
+    }
+
+    @Test
+    void bucketExists_returnsFalseForNonExistentBucket() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+        List<AckingFakeStorageNodeServer> beNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) beNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = beNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
+        try {
+            assertFalse(w.bucketExists("never-created"), "bucketExists should be false");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : beNodes) n.close();
+        }
+    }
+
+    @Test
+    void listObjects_returnsEmptyForEmptyBucket() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+        List<AckingFakeStorageNodeServer> loNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) loNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = loNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
+        try {
+            assertTrue(w.createBucket(UUID.randomUUID(), "empty-bucket"));
+            List<StorageWorker.ObjectInfo> objects = w.listObjects("empty-bucket", "", 1000);
+            assertNotNull(objects);
+            assertTrue(objects.isEmpty(), "expected empty list, got: " + objects);
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : loNodes) n.close();
+        }
+    }
+
+    @Test
+    void listObjects_returnsStoredObjects() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+        List<AckingFakeStorageNodeServer> loNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) loNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = loNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
+        try {
+            assertTrue(w.createBucket(UUID.randomUUID(), "list-bucket"));
+
+            byte[] data = randomBytes(1024);
+            assertTrue(w.put(UUID.randomUUID(), "list-bucket", "alpha", data.length,
+                    new ByteArrayInputStream(data)));
+            assertTrue(w.put(UUID.randomUUID(), "list-bucket", "beta", data.length,
+                    new ByteArrayInputStream(data)));
+            assertTrue(w.put(UUID.randomUUID(), "list-bucket", "gamma", data.length,
+                    new ByteArrayInputStream(data)));
+
+            List<StorageWorker.ObjectInfo> objects = w.listObjects("list-bucket", "", 1000);
+            List<String> keys = objects.stream().map(StorageWorker.ObjectInfo::key).sorted().toList();
+            assertEquals(List.of("list-bucket/alpha", "list-bucket/beta", "list-bucket/gamma"), keys);
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : loNodes) n.close();
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
