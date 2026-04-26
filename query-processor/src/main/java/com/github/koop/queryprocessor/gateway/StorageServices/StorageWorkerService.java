@@ -97,14 +97,14 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public List<ObjectSummary> listObjects(String bucket, String prefix, int maxKeys) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'listObjects'");
+        return storageWorker.listObjects(bucket, prefix, maxKeys).stream()
+                .map(o -> new ObjectSummary(o.key(), o.size(), o.lastModified()))
+                .toList();
     }
 
     @Override
     public boolean bucketExists(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'bucketExists'");
+        return storageWorker.bucketExists(bucket);
     }
 
     @Override
