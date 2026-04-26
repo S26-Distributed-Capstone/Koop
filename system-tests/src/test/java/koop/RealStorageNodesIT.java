@@ -75,7 +75,7 @@ public class RealStorageNodesIT {
         // 2. Init QP Commit Coordinator and Storage Worker
         commitCoordinator = new CommitCoordinator(sharedPubSubClient, 0, 10);
         worker = new StorageWorker(sharedMetadataClient, commitCoordinator);
-
+    
         // 3. Start Storage Node Servers (V2)
         for (int i = 0; i < TOTAL_NODES; i++) {
 
@@ -94,9 +94,6 @@ public class RealStorageNodesIT {
             databases.add(db);
 
             log("[NODE " + i + "] server starting");
-
-            // Start server directly (non-blocking in Javalin)
-            server.start();
 
             InetSocketAddress addr = new InetSocketAddress("127.0.0.1", port);
 
@@ -135,8 +132,7 @@ public class RealStorageNodesIT {
         sharedFetcher.update(esConfig);
         sharedFetcher.update(psConfig);
 
-        // Sleep briefly to let the pubsub/metadata configuration apply locally across the instances
-        Thread.sleep(1000);
+        servers.forEach(StorageNodeServerV2::start);
 
         log("=== CLUSTER READY ===");
     }

@@ -19,8 +19,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.github.koop.common.messages.Message;
+import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MemoryFetcher;
 import com.github.koop.common.metadata.MetadataClient;
+import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
@@ -57,7 +59,15 @@ class StorageNodeServerV2Test {
         pubSubClient = new PubSubClient(pubSub);
         metadataClient.start();
         pubSubClient.start();
-        
+
+        // Feed empty metadata so the waitFor completes immediately
+        var emptyEs = new ErasureSetConfiguration();
+        emptyEs.setErasureSets(List.of());
+        var emptyPs = new PartitionSpreadConfiguration();
+        emptyPs.setPartitionSpread(List.of());
+        fetcher.update(emptyEs);
+        fetcher.update(emptyPs);
+
         // Start the ACK blackhole server on a random port (Updated to new path param spec)
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
@@ -320,8 +330,8 @@ class StorageNodeServerV2Test {
         String reqId = "req-missing-123";
 
         // Commit the file metadata via sequencer message WITHOUT performing the HTTP PUT first.
-        server.processSequencerMessage(partition, 
-            new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
 
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
@@ -331,7 +341,8 @@ class StorageNodeServerV2Test {
 
         // StorageNodeV2 checks Files.exists(path) for RegularFileVersion and returns Optional.empty(),
         // which the server translates to 404 NOT_FOUND.
-        assertEquals(404, getResp.statusCode(), "GET should return 404 when file metadata exists but the physical file is missing from disk");
+        assertEquals(404, getResp.statusCode(),
+                "GET should return 404 when file metadata exists but the physical file is missing from disk");
     }
 
     @Test
@@ -344,8 +355,8 @@ class StorageNodeServerV2Test {
 
         // Commit the multipart manifest WITHOUT putting the actual chunk files on disk.
         List<String> chunks = List.of("missing-chunk1", "missing-chunk2");
-        server.processSequencerMessage(partition, 
-            new Message.MultipartCommitMessage(bucket, key, reqId, getDummySender(), chunks), 400L);
+        server.processSequencerMessage(partition,
+                new Message.MultipartCommitMessage(bucket, key, reqId, getDummySender(), chunks), 400L);
 
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
@@ -355,7 +366,8 @@ class StorageNodeServerV2Test {
 
         // StorageNodeV2 DOES NOT verify physical existence of individual chunks during a manifest retrieval.
         // It returns the JSON list of chunks immediately.
-        assertEquals(200, getResp.statusCode(), "GET should return 200 for multipart manifest even if physical chunk files are unmaterialized");
+        assertEquals(200, getResp.statusCode(),
+                "GET should return 200 for multipart manifest even if physical chunk files are unmaterialized");
         assertEquals("application/json", getResp.headers().firstValue("Content-Type").orElse(""));
         assertTrue(getResp.body().contains("missing-chunk1"));
         assertTrue(getResp.body().contains("missing-chunk2"));
@@ -371,24 +383,24 @@ class StorageNodeServerV2Test {
         String dataStr = "Better late than never";
 
         // 1. Commit the file metadata via sequencer message FIRST (before the file is uploaded)
-        server.processSequencerMessage(partition, 
-            new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 500L);
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 500L);
 
         // 2. Verify the file is not yet available (returns 404 because physical file is missing)
         HttpRequest getReq1 = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
                 .build();
-        assertEquals(404, http.send(getReq1, HttpResponse.BodyHandlers.ofString()).statusCode(), 
-            "GET should return 404 when committed but not yet materialized");
+        assertEquals(404, http.send(getReq1, HttpResponse.BodyHandlers.ofString()).statusCode(),
+                "GET should return 404 when committed but not yet materialized");
 
         // 3. Materialize the physical file on disk via HTTP PUT
         HttpRequest putReq = HttpRequest.newBuilder()
                 .uri(storeUriWithReq(partition, fullKey, reqId))
                 .PUT(HttpRequest.BodyPublishers.ofString(dataStr))
                 .build();
-        assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode(), 
-            "PUT should succeed in materializing the file");
+        assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode(),
+                "PUT should succeed in materializing the file");
 
         // 4. Verify the file is now successfully retrievable
         HttpRequest getReq2 = HttpRequest.newBuilder()
@@ -396,10 +408,10 @@ class StorageNodeServerV2Test {
                 .GET()
                 .build();
         HttpResponse<String> getResp2 = http.send(getReq2, HttpResponse.BodyHandlers.ofString());
-        
+
         assertEquals(200, getResp2.statusCode(), "GET should return 200 after the file is materialized");
         assertEquals(dataStr, getResp2.body(), "GET should return the correctly materialized data");
-        assertEquals("500", getResp2.headers().firstValue("X-Koop-Version").orElse(""), 
-            "The version headers should match the initial sequencer commit");
+        assertEquals("500", getResp2.headers().firstValue("X-Koop-Version").orElse(""),
+                "The version headers should match the initial sequencer commit");
     }
 }

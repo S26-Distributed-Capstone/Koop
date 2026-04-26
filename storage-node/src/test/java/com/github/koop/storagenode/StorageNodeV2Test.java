@@ -11,6 +11,10 @@ import java.nio.channels.Channels;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +34,7 @@ public class StorageNodeV2Test {
 
     private Database db;
     private StorageNodeV2 storageNode;
+    private WriteTracker writeTracker;
 
     @TempDir
     Path tempDir;
@@ -37,7 +42,8 @@ public class StorageNodeV2Test {
     @BeforeEach
     public void setup() throws Exception {
         db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
-        storageNode = new StorageNodeV2(db, tempDir);
+        writeTracker = new WriteTracker();
+        storageNode = new StorageNodeV2(db, tempDir, writeTracker);
     }
 
     @AfterEach
@@ -187,6 +193,133 @@ public class StorageNodeV2Test {
 
         storageNode.deleteBucket(1, bucketKey, 2L);
         assertFalse(storageNode.bucketExists(bucketKey));
+    }
+
+    // =========================================================================
+    // isActivelyWriting
+    // =========================================================================
+
+    @Test
+    public void testWriteTrackerFalseWhenIdle() {
+        assertFalse(writeTracker.isActive("any-key"),
+                "WriteTracker should not report active write when nothing is writing");
+    }
+
+    @Test
+    public void testWriteTrackerTrueWhileStoreExecutes() throws Exception {
+        String key = "bucket/concurrent-key";
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch allowComplete = new CountDownLatch(1);
+        AtomicBoolean wasActiveWhileWriting = new AtomicBoolean(false);
+
+        // Run store() on a separate thread so we can observe the tracker mid-write
+        var executor = Executors.newSingleThreadExecutor();
+        executor.submit(() -> {
+            try {
+                var blockingChannel = Channels.newChannel(new java.io.InputStream() {
+                    private final byte[] data = "blocking-data".getBytes();
+                    private int pos = 0;
+                    @Override
+                    public int read() {
+                        if (pos == 0) {
+                            writeStarted.countDown();
+                            try { allowComplete.await(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                        }
+                        return pos < data.length ? (data[pos++] & 0xFF) : -1;
+                    }
+                });
+                storageNode.store(1, key, "req-active", blockingChannel);
+            } catch (Exception ignored) {}
+        });
+
+        assertTrue(writeStarted.await(5, TimeUnit.SECONDS), "Store should have started");
+        wasActiveWhileWriting.set(writeTracker.isActive(key));
+        allowComplete.countDown();
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        assertTrue(wasActiveWhileWriting.get(), "WriteTracker should be active while store() is executing");
+        assertFalse(writeTracker.isActive(key), "WriteTracker should be inactive after store() completes");
+    }
+
+    @Test
+    public void testWriteTrackerFalseAfterStoreCompletes() throws Exception {
+        String key = "bucket/post-store-key";
+        storageNode.store(1, key, "req-post", Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
+        assertFalse(writeTracker.isActive(key),
+                "WriteTracker should be inactive once store() returns");
+    }
+
+    // =========================================================================
+    // commit() return value
+    // =========================================================================
+
+    @Test
+    public void testCommitReturnsTrueWhenBlobPreStored() throws Exception {
+        String key = "bucket/pre-stored";
+        String reqId = "req-pre";
+        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
+
+        boolean materialized = storageNode.commit(1, key, reqId, 42L);
+        assertTrue(materialized, "commit() should return true when blob was stored first");
+    }
+
+    @Test
+    public void testCommitReturnsFalseWhenBlobNotYetStored() throws Exception {
+        boolean materialized = storageNode.commit(1, "bucket/no-blob", "req-absent", 10L);
+        assertFalse(materialized, "commit() should return false when blob has not arrived yet");
+    }
+
+    @Test
+    public void testCommitReturnsTrueForLateArrivalAfterCommit() throws Exception {
+        String key = "bucket/late-arrival";
+        String reqId = "req-late";
+
+        // Commit first (blob hasn't arrived yet)
+        boolean firstCommit = storageNode.commit(1, key, reqId, 20L);
+        assertFalse(firstCommit, "First commit without blob should return false");
+
+        // Blob arrives after commit — registerBlobArrival should materialise the version
+        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream("late".getBytes())));
+
+        // Now the version should be retrievable (materialized=true after store updates it)
+        Optional<StorageNodeV2.GetObjectResponse> resp = storageNode.retrieve(key);
+        assertTrue(resp.isPresent(), "Object should be retrievable after late blob arrival");
+        assertTrue(resp.get() instanceof StorageNodeV2.FileObject);
+    }
+
+    // =========================================================================
+    // setRepairWorkerPool wires read-repair
+    // =========================================================================
+
+    @Test
+    public void testRetrieveReturnEmptyForMissingBlobWithoutEnqueueingRepair() throws Exception {
+        WriteTracker tracker = new WriteTracker();
+        RepairWorkerPool repairPool = new RepairWorkerPool(tracker, op -> {});
+        repairPool.start();
+        storageNode = new StorageNodeV2(db, tempDir, tracker);
+
+        // Commit without a prior store → version recorded as not materialized
+        storageNode.commit(1, "bucket/ghost", "req-ghost", 99L);
+
+        // retrieve() should detect missing physical file and return empty,
+        // but NOT enqueue repair (read-repair path was removed)
+        var result = storageNode.retrieve("bucket/ghost");
+        assertTrue(result.isEmpty(),
+                "Missing blob should return empty");
+        assertEquals(0, repairPool.pendingCount(),
+                "retrieve() should not enqueue repair — only the commit path triggers repair");
+
+        repairPool.shutdown();
+    }
+
+    @Test
+    public void testRetrieveReturnsEmptyWhenPoolIsNull() throws Exception {
+        // storageNode constructed without a repair pool (null) — should not throw
+        storageNode.commit(1, "bucket/no-pool", "req-no-pool", 5L);
+        // retrieve() with a null repairQueue should return empty, not throw
+        Optional<StorageNodeV2.GetObjectResponse> result = storageNode.retrieve("bucket/no-pool");
+        assertTrue(result.isEmpty(), "Missing blob should return empty; no exception even with null repair queue");
     }
 
     @Test
