@@ -12,6 +12,6 @@ RUN mvn -pl storage-node -am clean package -DskipTests
 FROM eclipse-temurin:21-jdk
 WORKDIR /app
 
-COPY --from=builder /build/storage-node/target/storage-node-*-jar-with-dependencies.jar app.jar
+COPY --from=builder /build/storage-node/target/storage-node-1.0.jar app.jar
 
 ENTRYPOINT ["java","-jar","/app/app.jar"]
