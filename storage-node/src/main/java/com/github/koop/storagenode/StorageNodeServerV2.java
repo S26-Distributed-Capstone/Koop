@@ -21,11 +21,15 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.github.koop.common.messages.Message;
+import com.github.koop.common.metadata.EtcdFetcher;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+import com.github.koop.common.pubsub.KafkaPubSub;
+import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -52,7 +56,7 @@ public class StorageNodeServerV2 {
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient) {
+                               PubSubClient pubSubClient) {
         this.port = port;
         this.ip = ip;
         this.storageNode = new StorageNodeV2(db, dir);
@@ -61,9 +65,9 @@ public class StorageNodeServerV2 {
     }
 
     public static void main(String[] args) {
-        String envPort = System.getenv("PORT");
-        String envDir = System.getenv("STORAGE_DIR");
-        String envIp = System.getenv("NODE_IP");
+        String envPort = System.getenv("APP_PORT");
+        String envDir  = System.getenv("STORAGE_DIR");
+        String envIp   = System.getenv("NODE_IP");
 
         int port = (envPort != null) ? Integer.parseInt(envPort) : 8080;
         String ip = (envIp != null) ? envIp : "127.0.0.1";
@@ -78,18 +82,68 @@ public class StorageNodeServerV2 {
             System.exit(1);
         }
 
-        Database db = null;
-        MetadataClient metadataClient = null;
-        PubSubClient pubSubClient = null;
+        // ── Database ──────────────────────────────────────────────────────────
+        Database db;
+        try {
+            String dbPath = storagePath.resolve("rocksdb").toString();
+            System.out.println(">>> Opening RocksDB at " + dbPath);
+            db = new Database(new RocksDbStorageStrategy(dbPath));
+            System.out.println(">>> RocksDB opened successfully");
+            logger.info("RocksDB opened at {}", dbPath);
+        } catch (Exception e) {
+            System.err.println(">>> Failed to open RocksDB: " + e.getMessage());
+            e.printStackTrace(System.err);
+            logger.error("Failed to open RocksDB", e);
+            System.exit(1);
+            return;
+        }
+
+        // ── Metadata client (etcd) ────────────────────────────────────────────
+        System.out.println(">>> Creating MetadataClient");
+        Map<Class<?>, String> metadataKeys = Map.of(
+                ErasureSetConfiguration.class,    "erasure_set_configurations",
+                PartitionSpreadConfiguration.class, "partition_spread_configurations"
+        );
+        MetadataClient metadataClient = new MetadataClient(new EtcdFetcher(metadataKeys));
+        System.out.println(">>> MetadataClient created");
+
+        // ── Pub/Sub client (Kafka if KAFKA_BOOTSTRAP_SERVERS set, else in-memory) ─
+        System.out.println(">>> Creating PubSubClient");
+        String kafkaBrokers = System.getenv("KAFKA_BOOTSTRAP_SERVERS");
+        PubSubClient pubSubClient;
+        if (kafkaBrokers != null && !kafkaBrokers.isBlank()) {
+            logger.info("Kafka brokers found, using KafkaPubSub: {}", kafkaBrokers);
+            pubSubClient = new PubSubClient(new com.github.koop.common.pubsub.KafkaPubSub(kafkaBrokers,
+                    "koop-sn-" + ip + "-" + port));
+        } else {
+            logger.info("No KAFKA_BOOTSTRAP_SERVERS set, using MemoryPubSub");
+            pubSubClient = new PubSubClient(new com.github.koop.common.pubsub.MemoryPubSub());
+        }
+        pubSubClient.start();
+        System.out.println(">>> PubSubClient started");
 
         StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
+        System.out.println(">>> Server created, starting...");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
             server.stop();
+            try { db.close(); } catch (Exception e) { logger.error("Error closing DB", e); }
+            try { pubSubClient.close(); } catch (Exception e) { logger.error("Error closing pubsub", e); }
         }));
 
+        metadataClient.start();
+        System.out.println(">>> MetadataClient started");
         server.start();
+        System.out.println(">>> Server started, entering keep-alive");
+
+        // Keep main thread alive — Javalin runs on virtual threads and won't
+        // prevent the JVM from exiting on its own.
+        try {
+            Thread.currentThread().join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private synchronized void updateSubscriptions() {
@@ -173,7 +227,7 @@ public class StorageNodeServerV2 {
         }
     }
 
-   private void handlePut(Context ctx) {
+    private void handlePut(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String bucket = ctx.pathParam("bucket");
@@ -261,8 +315,8 @@ public class StorageNodeServerV2 {
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
                     ctx.header("X-Koop-Type", "MULTIPART");
                     ctx.status(200)
-                       .header("Content-Type", "application/json")
-                       .json(md.version().chunks());
+                            .header("Content-Type", "application/json")
+                            .json(md.version().chunks());
                     logger.debug("GET partition={} fullKey={} version={} returned multipart chunks in body", partition, fullKey,
                             responseSequenceNumber);
 
@@ -333,7 +387,7 @@ public class StorageNodeServerV2 {
         }
 
         try {
-            String baseUrl = callbackAddress.endsWith("/") ? 
+            String baseUrl = callbackAddress.endsWith("/") ?
                     callbackAddress.substring(0, callbackAddress.length() - 1) : callbackAddress;
             String url = baseUrl + "/ack/" + requestId;
 

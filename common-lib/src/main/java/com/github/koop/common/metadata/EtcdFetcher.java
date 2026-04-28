@@ -24,9 +24,10 @@ public class EtcdFetcher implements Fetcher {
     private Consumer<Object> listener;
 
     public EtcdFetcher(String etcdEndpoint, Map<Class<? extends Object>, String> metadataKeyMap) {
-        if(etcdEndpoint == null || etcdEndpoint.isEmpty()){
+        if (etcdEndpoint == null || etcdEndpoint.isEmpty()) {
             throw new IllegalArgumentException("ETCD endpoint must be provided");
         }
+        System.out.println(">>> EtcdFetcher endpoint: [" + etcdEndpoint + "]");
         this.metadataKeyMap = metadataKeyMap.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> ByteSequence.from(e.getValue(), StandardCharsets.UTF_8)));

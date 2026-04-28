@@ -12,6 +12,6 @@ RUN mvn -pl query-processor -am clean package -DskipTests
 FROM eclipse-temurin:21-jdk
 WORKDIR /app
 
-COPY --from=builder /build/query-processor/target/query-processor-*-jar-with-dependencies.jar app.jar
+COPY --from=builder /build/query-processor/target/query-processor-*.jar app.jar
 
 ENTRYPOINT ["java","-jar","/app/app.jar"]
