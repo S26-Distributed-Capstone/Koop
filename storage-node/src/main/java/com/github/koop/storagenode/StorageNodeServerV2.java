@@ -75,6 +75,7 @@ public class StorageNodeServerV2 {
     }
 
     public static void main(String[] args) {
+        logger.error("Starting StorageNodeServerV2...");
         String envPort = System.getenv("APP_PORT");
         String envDir = System.getenv("STORAGE_DIR");
         String envIp = System.getenv("NODE_IP");
