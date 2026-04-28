@@ -690,10 +690,7 @@ public class S3GatewayE2EIT {
         s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
 
         byte[] data = "x".getBytes(StandardCharsets.UTF_8);
-        // Single-segment keys: the gateway's /{bucket}/{key} route is non-greedy,
-        // so multi-segment keys (e.g. "logs/jan.txt") don't match. Use a prefix
-        // pattern that lives entirely within one path segment.
-        for (String k : List.of("logs-jan.txt", "logs-feb.txt", "images-cat.png")) {
+        for (String k : List.of("logs/jan.txt", "logs/feb.txt", "images/cat.png")) {
             s3.putObject(
                     PutObjectRequest.builder().bucket(bucket).key(k)
                             .contentLength((long) data.length).build(),
@@ -701,13 +698,13 @@ public class S3GatewayE2EIT {
         }
 
         ListObjectsV2Response resp = s3.listObjectsV2(
-                ListObjectsV2Request.builder().bucket(bucket).prefix("logs-").build());
+                ListObjectsV2Request.builder().bucket(bucket).prefix("logs/").build());
 
         assertEquals(2, resp.keyCount(),
-                "prefix=logs- should match exactly 2 keys, got: " + resp.contents());
+                "prefix=logs/ should match exactly 2 keys, got: " + resp.contents());
         for (S3Object o : resp.contents()) {
-            assertTrue(o.key().contains("logs-"),
-                    "every returned key should contain 'logs-' prefix, got: " + o.key());
+            assertTrue(o.key().contains("logs/"),
+                    "every returned key should be under logs/ prefix, got: " + o.key());
         }
         log("[E2E] ListObjects prefix PASSED");
     }

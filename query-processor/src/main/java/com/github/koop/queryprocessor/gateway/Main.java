@@ -44,14 +44,14 @@ public class Main {
      * │ GET     │ /{bucket}                    │ ListObjectsV2              │
      * │ HEAD    │ /{bucket}                    │ HeadBucket                 │
      * ├─────────┼──────────────────────────────┼────────────────────────────┤
-     * │ GET     │ /{bucket}/{key}              │ GetObject                  │
-     * │ DELETE  │ /{bucket}/{key}              │ DeleteObject               │
-     * │         │ /{bucket}/{key}?uploadId=X   │   └─ AbortMultipartUpload  │
-     * │ PUT     │ /{bucket}/{key}              │ PutObject                  │
-     * │         │ /{bucket}/{key}?partNumber=N │   └─ UploadPart            │
+     * │ GET     │ /{bucket}/<key>              │ GetObject                  │
+     * │ DELETE  │ /{bucket}/<key>              │ DeleteObject               │
+     * │         │ /{bucket}/<key>?uploadId=X   │   └─ AbortMultipartUpload  │
+     * │ PUT     │ /{bucket}/<key>              │ PutObject                  │
+     * │         │ /{bucket}/<key>?partNumber=N │   └─ UploadPart            │
      * │         │   &uploadId=X                │                            │
-     * │ POST    │ /{bucket}/{key}?uploads      │ CreateMultipartUpload      │
-     * │ POST    │ /{bucket}/{key}?uploadId=X   │ CompleteMultipartUpload    │
+     * │ POST    │ /{bucket}/<key>?uploads      │ CreateMultipartUpload      │
+     * │ POST    │ /{bucket}/<key>?uploadId=X   │ CompleteMultipartUpload    │
      * └─────────┴──────────────────────────────┴────────────────────────────┘
      */
     public static Javalin createApp(StorageService storage) {
@@ -68,17 +68,17 @@ public class Main {
             config.routes.head("/{bucket}",   ctx -> headBucketHandler(ctx, storage));
 
             // ── Object-level routes ─────────────────────────────────────────
-            // GET — plain object retrieval only (no multipart GET needed at gateway)
-            config.routes.get("/{bucket}/{key}", ctx -> getObjectHandler(ctx, storage));
+            // <key> is greedy so multi-segment S3 keys like "logs/jan.txt" match.
+            config.routes.get("/{bucket}/<key>", ctx -> getObjectHandler(ctx, storage));
 
             // DELETE — handles both DeleteObject and AbortMultipartUpload
-            config.routes.delete("/{bucket}/{key}", ctx -> deleteOrAbortHandler(ctx, storage));
+            config.routes.delete("/{bucket}/<key>", ctx -> deleteOrAbortHandler(ctx, storage));
 
             // PUT — handles both PutObject and UploadPart
-            config.routes.put("/{bucket}/{key}", ctx -> putOrUploadPartHandler(ctx, storage));
+            config.routes.put("/{bucket}/<key>", ctx -> putOrUploadPartHandler(ctx, storage));
 
             // POST — handles both CreateMultipartUpload (?uploads) and CompleteMultipartUpload (?uploadId=...)
-            config.routes.post("/{bucket}/{key}", ctx -> postObjectHandler(ctx, storage));
+            config.routes.post("/{bucket}/<key>", ctx -> postObjectHandler(ctx, storage));
         });
 
         return app;
