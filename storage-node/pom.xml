@@ -88,7 +88,7 @@
                     </descriptorRefs>
                     <archive>
                         <manifest>
-                            <mainClass>com.github.koop.storagenode.StorageNodeServer</mainClass>
+                            <mainClass>com.github.koop.storagenode.StorageNodeServerV2</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
