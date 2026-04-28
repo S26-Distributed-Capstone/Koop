@@ -7,3 +7,5 @@ target/
 plans/
 .roomodes
 docs/messy-everything-doc.md
+CLAUDE.md
+settings.local.json

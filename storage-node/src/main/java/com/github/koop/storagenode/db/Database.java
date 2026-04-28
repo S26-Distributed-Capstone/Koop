@@ -69,11 +69,11 @@ public class Database implements AutoCloseable {
     // PUT item — atomic write into metadata and oplog
     // -------------------------------------------------------------------------
 
-    public void putItem(String key, int partition, long seqNumber, String requestID) throws Exception {
+    public boolean putItem(String key, int partition, long seqNumber, String requestID) throws Exception {
         try (StorageTransaction txn = strategy.beginTransaction()) {
             boolean materialized = false;
             Optional<Long> uncommitted = txn.getUncommitted(requestID);
-            
+
             if (uncommitted.isPresent()) {
                 materialized = true;
                 txn.deleteUncommitted(requestID);
@@ -82,13 +82,14 @@ public class Database implements AutoCloseable {
             List<FileVersion> versions = txn.getMetadata(key)
                     .map(m -> new ArrayList<>(m.versions()))
                     .orElseGet(ArrayList::new);
-            
+
             versions.add(new RegularFileVersion(seqNumber, requestID, materialized));
-            
+
             txn.putLog(new OpLog(partition, seqNumber, key, Operation.PUT));
             txn.putMetadata(new Metadata(key, partition, versions));
-            
+
             txn.commit();
+            return materialized;
         }
     }
 

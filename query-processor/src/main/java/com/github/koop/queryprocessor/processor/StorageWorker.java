@@ -2,6 +2,7 @@ package com.github.koop.queryprocessor.processor;
 
 import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.Message;
+import com.github.koop.common.metadata.ErasureRouting;
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
