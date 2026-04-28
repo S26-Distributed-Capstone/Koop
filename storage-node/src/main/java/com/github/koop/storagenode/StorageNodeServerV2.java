@@ -112,6 +112,8 @@ public class StorageNodeServerV2 {
         );
         MetadataClient metadataClient = new MetadataClient(new EtcdFetcher(metadataKeys));
         logger.info(">>> MetadataClient created");
+        metadataClient.start();
+        logger.info(">>> MetadataClient started");
 
 
         //PubSubClient pubSubClient = null;
