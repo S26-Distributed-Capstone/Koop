@@ -10,7 +10,7 @@ services:
       - "8001-8006:8080" # Maps each replica to 8001, 8002, etc.
     environment:
       - APP_PORT=8080
-      - ETCD_ENDPOINTS=http://etcd1:2379
+      - ETCD_URL=http://etcd1:2379
       - REDIS_URL=redis://redis-master:6379
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - NODE_IP=storage-node
