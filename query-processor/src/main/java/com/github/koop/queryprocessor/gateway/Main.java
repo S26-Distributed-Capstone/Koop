@@ -1,5 +1,7 @@
 package com.github.koop.queryprocessor.gateway;
 
+import com.github.koop.common.pubsub.KafkaPubSub;
+import com.github.koop.queryprocessor.processor.cache.RedisCacheClient;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 
@@ -412,7 +414,7 @@ public class Main {
     // ─── Entry Point ─────────────────────────────────────────────────────────
 
     public static void main(String[] args) {
-        var pubSubClient = new PubSubClient(new MemoryPubSub());//TODO: Replace with real PubSubClient implementation
+        var pubSubClient = new PubSubClient(new KafkaPubSub());
         pubSubClient.start();
         var metadataFetcherMap =Map.of(
             ErasureSetConfiguration.class, "erasure_set_configurations",
@@ -420,9 +422,12 @@ public class Main {
         );
         var metadataClient = new MetadataClient(new EtcdFetcher(metadataFetcherMap));
         metadataClient.start();
+        String redisURL = System.getenv("REDIS_URL");
+        var cacheClient = new RedisCacheClient(redisURL);
+
         var commitCoordinator = new CommitCoordinator(pubSubClient,0);
         StorageWorker storageWorker = new StorageWorker(metadataClient, commitCoordinator);
-        StorageService storage = new StorageWorkerService(storageWorker);
+        StorageService storage = new StorageWorkerService(storageWorker, cacheClient);
         createApp(storage).start(8080);
     }
 
