@@ -34,6 +34,7 @@ services:
       - ETCD_URL=http://etcd1:2379
       - STORAGE_NODE_URL=http://storage-node:8080
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis-master:6379
     depends_on:
       - storage-node
       - kafka
