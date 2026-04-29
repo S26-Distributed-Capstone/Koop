@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -554,7 +555,8 @@ public final class StorageWorker {
         for (InetSocketAddress node : nodes) {
             tasks.add(() -> {
                 URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
-                        node.getHostString(), node.getPort(), bucket));
+                        node.getHostString(), node.getPort(),
+                        URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(uri)
                         .method("HEAD", HttpRequest.BodyPublishers.noBody())
@@ -612,8 +614,9 @@ public final class StorageWorker {
                 .toList();
 
         String safePrefix = prefix == null ? "" : prefix;
+        String encodedPrefix = URLEncoder.encode(safePrefix, java.nio.charset.StandardCharsets.UTF_8);
         String query = "?maxKeys=" + maxKeys
-                + (safePrefix.isEmpty() ? "" : "&prefix=" + safePrefix);
+                + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
 
         List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
         for (int partition : partitions) {
@@ -650,7 +653,8 @@ public final class StorageWorker {
     private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
         for (InetSocketAddress node : nodes) {
             URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
-                    node.getHostString(), node.getPort(), bucket, query));
+                    node.getHostString(), node.getPort(),
+                    URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
             HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
             try {
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
