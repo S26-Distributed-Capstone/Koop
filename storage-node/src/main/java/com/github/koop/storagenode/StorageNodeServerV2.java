@@ -147,18 +147,18 @@ public class StorageNodeServerV2 {
             return;
         }
 
-        int myErasureSetId = -1;
+        Set<Integer> myErasureSetIds = new HashSet<>();
         int newShardIndex = -1;
 
-        outer:
+        // Find ALL erasure sets this node belongs to
         for (ErasureSetConfiguration.ErasureSet es : currentEsConfig.getErasureSets()) {
             List<ErasureSetConfiguration.Machine> machines = es.getMachines();
             for (int i = 0; i < machines.size(); i++) {
                 ErasureSetConfiguration.Machine machine = machines.get(i);
                 if (machine.getIp().equals(this.ip) && machine.getPort() == app.port()) {
-                    myErasureSetId = es.getNumber();
-                    newShardIndex = i;
-                    break outer;
+                    myErasureSetIds.add(es.getNumber());
+                    newShardIndex = i; // Save index (identical across sets in your config)
+                    break; // Break inner loop, but keep checking other erasure sets
                 }
             }
         }
@@ -167,12 +167,13 @@ public class StorageNodeServerV2 {
 
         Set<Integer> targetPartitions = new HashSet<>();
 
-        if (myErasureSetId == -1) {
+        if (myErasureSetIds.isEmpty()) {
             logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
                     app.port());
         } else {
+            // Add partitions for EVERY erasure set this node is a part of
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
-                if (spread.getErasureSet() == myErasureSetId) {
+                if (myErasureSetIds.contains(spread.getErasureSet())) {
                     targetPartitions.addAll(spread.getPartitions());
                 }
             }
