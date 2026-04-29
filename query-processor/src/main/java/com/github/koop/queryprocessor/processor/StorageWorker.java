@@ -526,9 +526,12 @@ public final class StorageWorker {
     }
 
     /**
-     * Checks whether a bucket exists by querying nodes in the partition's
-     * erasure set sequentially. Returns true on the first 200, false if all
-     * nodes either return 404 or fail.
+     * Checks whether a bucket exists by querying all nodes in the partition's
+     * erasure set concurrently. Returns {@code true} if any node returns 200
+     * (bucket exists), {@code false} only if every node returns 404 or fails.
+     *
+     * <p>This prevents false negatives when a node is stale or partitioned:
+     * even a single node reporting the bucket exists is sufficient.
      */
     public boolean bucketExists(String bucket) {
         if (bucket == null) throw new IllegalArgumentException("bucket is null");
@@ -542,24 +545,45 @@ public final class StorageWorker {
         List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
+        List<Callable<Boolean>> tasks = new ArrayList<>();
         for (InetSocketAddress node : nodes) {
-            URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
-                    node.getHostString(), node.getPort(), bucket));
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(uri)
-                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
-                    .build();
-            try {
-                HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
-                int status = resp.statusCode();
-                if (status == 200) return true;
-                if (status == 404) return false;
-                logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
-            } catch (Exception e) {
-                logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
-            }
+            tasks.add(() -> {
+                URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
+                        node.getHostString(), node.getPort(), bucket));
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(uri)
+                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .build();
+                try {
+                    HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
+                    int status = resp.statusCode();
+                    if (status == 200) return true;
+                    if (status == 404) {
+                        logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
+                        return false;
+                    }
+                    logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+                } catch (Exception e) {
+                    logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
+                }
+                return false;
+            });
         }
-        return false;
+
+        try {
+            // Return true if ANY node reports the bucket exists
+            return executor.invokeAll(tasks).stream().anyMatch(f -> {
+                try {
+                    return f.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    logger.trace("bucketExists task error: {}", e.getMessage());
+                    return false;
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**
