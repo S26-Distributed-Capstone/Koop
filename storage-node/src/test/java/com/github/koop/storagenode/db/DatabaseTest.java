@@ -47,6 +47,38 @@ class DatabaseTest {
     }
 
     @Test
+    void testPutItemReturnsFalseWhenBlobNotPreRegistered() throws Exception {
+        boolean materialized = database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
+        assertFalse(materialized, "putItem should return false when no prior registerBlobArrival");
+    }
+
+    @Test
+    void testPutItemReturnsTrueWhenBlobPreRegistered() throws Exception {
+        database.registerBlobArrival("animals/cat.jpg", "uuid-100.blob", System.currentTimeMillis());
+
+        boolean materialized = database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
+        assertTrue(materialized, "putItem should return true when blob was pre-registered");
+
+        // The stored version should reflect materialized=true
+        var version = (RegularFileVersion) database.getLatestFileVersion("animals/cat.jpg").orElseThrow();
+        assertTrue(version.materialized(), "RegularFileVersion.materialized should be true");
+    }
+
+    @Test
+    void testPutItemCleansUpUncommittedEntryOnMaterialization() throws Exception {
+        String reqId = "uuid-cleanup.blob";
+        database.putUncommittedWrite(reqId, System.currentTimeMillis());
+
+        // Confirm the uncommitted entry exists by checking putItem returns true (it found it)
+        boolean materialized = database.putItem("animals/cat.jpg", 1, 100L, reqId);
+        assertTrue(materialized);
+
+        // Second putItem with same requestID should NOT find an uncommitted entry
+        boolean second = database.putItem("animals/cat.jpg2", 1, 101L, reqId);
+        assertFalse(second, "Uncommitted entry should have been removed after first materialization");
+    }
+
+    @Test
     void testPutItemAppendsVersions() throws Exception {
         database.putItem("animals/cat.jpg", 1, 100L, "uuid-100.blob");
         database.putItem("animals/cat.jpg", 1, 101L, "uuid-101.blob");

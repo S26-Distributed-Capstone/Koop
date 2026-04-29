@@ -54,11 +54,17 @@ import com.github.koop.storagenode.db.TombstoneFileVersion;
 public class StorageNodeV2 {
     private final Database db;
     private final Path storageDir;
+    private final WriteTracker writeTracker;
     private final static Logger logger = LogManager.getLogger(StorageNodeV2.class);
 
     public StorageNodeV2(Database db, Path dir) {
+        this(db, dir, new WriteTracker());
+    }
+
+    public StorageNodeV2(Database db, Path dir, WriteTracker writeTracker) {
         this.db = db;
         this.storageDir = dir;
+        this.writeTracker = writeTracker;
     }
 
     private Path getObjectPath(String id) {
@@ -127,16 +133,19 @@ public class StorageNodeV2 {
             String requestID,
             ReadableByteChannel data) throws IOException {
 
-        // 1. Perform the physical file write.
         Path path = getObjectPath(requestID);
         Files.createDirectories(path.getParent());
-        write(path, data);
 
-        // 2. Record the uncommitted write intent in the database
+        writeTracker.begin(key);
         try {
-            db.registerBlobArrival(key, requestID, System.currentTimeMillis());
-        } catch (Exception e) {
-            throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
+            write(path, data);
+            try {
+                db.registerBlobArrival(key, requestID, System.currentTimeMillis());
+            } catch (Exception e) {
+                throw new IOException("Failed to record uncommitted write intent for requestID: " + requestID, e);
+            }
+        } finally {
+            writeTracker.end(key);
         }
     }
 
@@ -152,8 +161,8 @@ public class StorageNodeV2 {
      * @param seqNumber
      * @throws Exception
      */
-    protected void commit(int partition, String key, String requestID, long seqNumber) throws Exception {
-        db.putItem(key, partition, seqNumber, requestID);
+    protected boolean commit(int partition, String key, String requestID, long seqNumber) throws Exception {
+        return db.putItem(key, partition, seqNumber, requestID);
     }
 
     /**
@@ -213,8 +222,11 @@ public class StorageNodeV2 {
             return Optional.of(new Tombstone(t));
         } else if (latest instanceof RegularFileVersion r) {
             Path path = getObjectPath(r.location());
-            if (!Files.exists(path))
+            if (!Files.exists(path)) {
+                // File metadata exists but physical file is missing.
+                // Repair will be triggered by the commit path, not on GET.
                 return Optional.empty();
+            }
             return Optional.of(new FileObject(FileChannel.open(path, StandardOpenOption.READ), latest));
         } else if (latest instanceof MultipartFileVersion m) {
             if (m.chunks().isEmpty())

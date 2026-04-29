@@ -1,7 +1,4 @@
-package com.github.koop.queryprocessor.processor;
-
-import com.github.koop.common.metadata.ErasureSetConfiguration;
-import com.github.koop.common.metadata.PartitionSpreadConfiguration;
+package com.github.koop.common.metadata;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;

@@ -109,7 +109,6 @@ public class MultipartUploadIT {
             dataDirs.add(dir);
             databases.add(db);
 
-            server.start();
             addrs.add(new InetSocketAddress("127.0.0.1", port));
             log("[NODE " + i + "] READY on port " + port);
         }
@@ -142,7 +141,7 @@ public class MultipartUploadIT {
         sharedFetcher.update(esConfig);
         sharedFetcher.update(psConfig);
 
-        Thread.sleep(1000);
+        servers.forEach(StorageNodeServerV2::start);
         log("=== CLUSTER READY ===");
     }
 
