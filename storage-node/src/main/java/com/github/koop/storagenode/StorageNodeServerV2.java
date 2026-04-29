@@ -9,6 +9,7 @@ import java.nio.channels.Channels;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -387,16 +388,31 @@ public class StorageNodeServerV2 {
             String maxKeysParam = ctx.queryParam("maxKeys");
             int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;
 
+            if (maxKeys < 0) {
+                ctx.status(400).result("maxKeys must be non-negative");
+                return;
+            }
+
+            // Return 404 if the bucket doesn't exist (matches HEAD semantics and S3 behavior)
+            if (!storageNode.bucketExists(bucket)) {
+                ctx.status(404);
+                return;
+            }
+
             // Prefix scan: bucket + "/" ensures we only get objects inside this bucket
             String scanPrefix = bucket + "/";
             if (prefix != null && !prefix.isEmpty()) {
                 scanPrefix = bucket + "/" + prefix;
             }
 
-            var items = storageNode.listItemsInBucket(scanPrefix)
-                    .limit(maxKeys)
-                    .map(m -> "{\"key\":\"" + escapeJson(m.key()) + "\"}")
-                    .toList();
+            // try-with-resources closes the underlying RocksDB iterator
+            List<String> items;
+            try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
+                items = stream
+                        .limit(maxKeys)
+                        .map(m -> "{\"key\":\"" + escapeJson(m.key()) + "\"}")
+                        .toList();
+            }
 
             ctx.status(200)
                .header("Content-Type", "application/json")
