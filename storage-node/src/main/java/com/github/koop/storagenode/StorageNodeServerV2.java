@@ -594,17 +594,15 @@ public class StorageNodeServerV2 {
             }
 
             // try-with-resources closes the underlying RocksDB iterator
-            List<String> items;
+            List<Map<String, String>> items;
             try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
                 items = stream
                         .limit(maxKeys)
-                        .map(m -> "{\"key\":\"" + escapeJson(m.key()) + "\"}")
+                        .map(m -> Map.of("key", m.key()))
                         .toList();
             }
 
-            ctx.status(200)
-               .header("Content-Type", "application/json")
-               .result("[" + String.join(",", items) + "]");
+            ctx.status(200).json(items);
         } catch (NumberFormatException e) {
             ctx.status(400).result("Invalid maxKeys parameter");
         } catch (Exception e) {
@@ -613,10 +611,7 @@ public class StorageNodeServerV2 {
         }
     }
 
-    /** Minimal JSON string escaping for keys. */
-    private static String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
+
 
     public void start() {
         repairWorkerPool.start();

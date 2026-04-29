@@ -507,6 +507,10 @@ class StorageNodeServerV2Test {
         String fullKey1 = bucket + "/" + key1;
         String fullKey2 = bucket + "/" + key2;
 
+        // Create bucket first so that GET /bucket/{bucket} doesn't 404
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-list-create", getDummySender()), 899L);
+
         // PUT + commit two objects
         http.send(HttpRequest.newBuilder()
                 .uri(storeUriWithReq(partition, fullKey1, "req-list-1"))
@@ -536,6 +540,10 @@ class StorageNodeServerV2Test {
     void testListObjects_respectsMaxKeysParam() throws Exception {
         int partition = 14;
         String bucket = "maxkeys-bucket";
+
+        // Create bucket first
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-mk-create", getDummySender()), 999L);
 
         // Commit three objects
         for (int i = 1; i <= 3; i++) {
@@ -568,6 +576,12 @@ class StorageNodeServerV2Test {
     void testListObjects_onlyReturnsObjectsMatchingPrefix() throws Exception {
         int partition = 15;
         String bucket = "prefix-bucket";
+
+        // Create both buckets first
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-pf-create", getDummySender()), 1099L);
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage("other-bucket", "req-pf-other-create", getDummySender()), 1098L);
 
         // Two objects in "prefix-bucket", one in "other-bucket"
         String fullKey1 = bucket + "/alpha";

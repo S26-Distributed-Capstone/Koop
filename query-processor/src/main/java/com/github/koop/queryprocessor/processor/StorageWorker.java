@@ -10,6 +10,10 @@ import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.google.protobuf.ByteString.Output;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -661,87 +665,18 @@ public final class StorageWorker {
         return List.of();
     }
 
-    /** Parses the storage node's list response: [{"key":"..."},...]. */
+    /** Parses the storage node's list response: [{"key":"..."},...] using Jackson. */
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
     private static List<ObjectInfo> parseObjectListJson(String body) {
-        if (body == null) return List.of();
-        String trimmed = body.trim();
-        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return List.of();
-        String inner = trimmed.substring(1, trimmed.length() - 1).trim();
-        if (inner.isEmpty()) return List.of();
-
-        List<ObjectInfo> out = new ArrayList<>();
-        int depth = 0;
-        StringBuilder cur = new StringBuilder();
-        for (int i = 0; i < inner.length(); i++) {
-            char c = inner.charAt(i);
-            if (c == '{') depth++;
-            if (c == '}') depth--;
-            if (c == ',' && depth == 0) {
-                ObjectInfo oi = parseObjectEntry(cur.toString());
-                if (oi != null) out.add(oi);
-                cur.setLength(0);
-            } else {
-                cur.append(c);
-            }
-        }
-        if (cur.length() > 0) {
-            ObjectInfo oi = parseObjectEntry(cur.toString());
-            if (oi != null) out.add(oi);
-        }
-        return out;
-    }
-
-    private static ObjectInfo parseObjectEntry(String entry) {
-        int keyIdx = entry.indexOf("\"key\"");
-        if (keyIdx < 0) return null;
-        int firstQuote = entry.indexOf('"', entry.indexOf(':', keyIdx) + 1);
-        if (firstQuote < 0) return null;
-        StringBuilder key = new StringBuilder();
-        boolean escape = false;
-        int i = firstQuote + 1;
-        for (; i < entry.length(); i++) {
-            char c = entry.charAt(i);
-            if (escape) { key.append(c); escape = false; continue; }
-            if (c == '\\') { escape = true; continue; }
-            if (c == '"') break;
-            key.append(c);
-        }
-        long size = parseLongField(entry, "size");
-        String lastModified = parseStringField(entry, "lastModified");
-        return new ObjectInfo(key.toString(), size, lastModified);
-    }
-
-    private static long parseLongField(String entry, String field) {
-        int idx = entry.indexOf("\"" + field + "\"");
-        if (idx < 0) return 0L;
-        int colon = entry.indexOf(':', idx);
-        if (colon < 0) return 0L;
-        StringBuilder num = new StringBuilder();
-        for (int i = colon + 1; i < entry.length(); i++) {
-            char c = entry.charAt(i);
-            if (Character.isDigit(c) || c == '-') num.append(c);
-            else if (num.length() > 0) break;
-        }
+        if (body == null || body.isBlank()) return List.of();
         try {
-            return num.length() == 0 ? 0L : Long.parseLong(num.toString());
-        } catch (NumberFormatException e) { return 0L; }
-    }
-
-    private static String parseStringField(String entry, String field) {
-        int idx = entry.indexOf("\"" + field + "\"");
-        if (idx < 0) return "";
-        int firstQuote = entry.indexOf('"', entry.indexOf(':', idx) + 1);
-        if (firstQuote < 0) return "";
-        StringBuilder val = new StringBuilder();
-        boolean escape = false;
-        for (int i = firstQuote + 1; i < entry.length(); i++) {
-            char c = entry.charAt(i);
-            if (escape) { val.append(c); escape = false; continue; }
-            if (c == '\\') { escape = true; continue; }
-            if (c == '"') break;
-            val.append(c);
+            List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});
+            return result != null ? result : List.of();
+        } catch (Exception e) {
+            return List.of();
         }
-        return val.toString();
     }
 
     public record ObjectInfo(String key, long size, String lastModified) {}
