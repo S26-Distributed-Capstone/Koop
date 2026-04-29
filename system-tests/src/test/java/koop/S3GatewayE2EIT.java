@@ -576,10 +576,14 @@ public class S3GatewayE2EIT {
         s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
         log("[E2E] CreateBucket completed");
 
-        assertDoesNotThrow(() ->
-                s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build()),
-                "HeadBucket on existing bucket should not throw");
-        log("[E2E] HeadBucket → 200 PASSED");
+        try {
+            assertDoesNotThrow(() ->
+                    s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build()),
+                    "HeadBucket on existing bucket should not throw");
+            log("[E2E] HeadBucket → 200 PASSED");
+        } finally {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
     }
 
     // =====================================================================
@@ -633,12 +637,16 @@ public class S3GatewayE2EIT {
         String bucket = "empty-list-" + System.nanoTime();
         s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
 
-        ListObjectsV2Response resp = s3.listObjectsV2(
-                ListObjectsV2Request.builder().bucket(bucket).build());
+        try {
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).build());
 
-        assertEquals(0, resp.keyCount(), "empty bucket should have keyCount=0");
-        assertTrue(resp.contents().isEmpty(), "empty bucket should have no Contents");
-        log("[E2E] Empty list PASSED");
+            assertEquals(0, resp.keyCount(), "empty bucket should have keyCount=0");
+            assertTrue(resp.contents().isEmpty(), "empty bucket should have no Contents");
+            log("[E2E] Empty list PASSED");
+        } finally {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
     }
 
     // =====================================================================
@@ -653,29 +661,36 @@ public class S3GatewayE2EIT {
 
         byte[] data = "list-test".getBytes(StandardCharsets.UTF_8);
         List<String> keys = List.of("alpha.txt", "beta.txt", "gamma.txt");
-        for (String k : keys) {
-            s3.putObject(
-                    PutObjectRequest.builder().bucket(bucket).key(k)
-                            .contentLength((long) data.length).build(),
-                    RequestBody.fromBytes(data));
-        }
-        log("[E2E] PUT " + keys.size() + " objects completed");
+        try {
+            for (String k : keys) {
+                s3.putObject(
+                        PutObjectRequest.builder().bucket(bucket).key(k)
+                                .contentLength((long) data.length).build(),
+                        RequestBody.fromBytes(data));
+            }
+            log("[E2E] PUT " + keys.size() + " objects completed");
 
-        ListObjectsV2Response resp = s3.listObjectsV2(
-                ListObjectsV2Request.builder().bucket(bucket).build());
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).build());
 
-        assertEquals(keys.size(), resp.keyCount(),
-                "keyCount should match number of PUTs");
-        List<String> returnedKeys = new ArrayList<>(resp.contents().stream().map(S3Object::key).toList());
-        Collections.sort(returnedKeys);
-        // The storage layer stores keys as "bucket/key"; assert each user-visible key is in the returned list.
-        for (String k : keys) {
-            String storedKey = bucket + "/" + k;
-            assertTrue(returnedKeys.contains(storedKey) || returnedKeys.contains(k),
-                    "ListObjects should return key " + k + " (looked for '" + k
-                            + "' or '" + storedKey + "' in " + returnedKeys + ")");
+            assertEquals(keys.size(), resp.keyCount(),
+                    "keyCount should match number of PUTs");
+            List<String> returnedKeys = new ArrayList<>(resp.contents().stream().map(S3Object::key).toList());
+            Collections.sort(returnedKeys);
+            // The storage layer stores keys as "bucket/key"; assert each user-visible key is in the returned list.
+            for (String k : keys) {
+                String storedKey = bucket + "/" + k;
+                assertTrue(returnedKeys.contains(storedKey) || returnedKeys.contains(k),
+                        "ListObjects should return key " + k + " (looked for '" + k
+                                + "' or '" + storedKey + "' in " + returnedKeys + ")");
+            }
+            log("[E2E] ListObjects keys PASSED");
+        } finally {
+            for (String k : keys) {
+                try { s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(k).build()); } catch (Exception ignored) {}
+            }
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
         }
-        log("[E2E] ListObjects keys PASSED");
     }
 
     // =====================================================================
@@ -689,23 +704,31 @@ public class S3GatewayE2EIT {
         s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
 
         byte[] data = "x".getBytes(StandardCharsets.UTF_8);
-        for (String k : List.of("logs/jan.txt", "logs/feb.txt", "images/cat.png")) {
-            s3.putObject(
-                    PutObjectRequest.builder().bucket(bucket).key(k)
-                            .contentLength((long) data.length).build(),
-                    RequestBody.fromBytes(data));
-        }
+        List<String> allKeys = List.of("logs/jan.txt", "logs/feb.txt", "images/cat.png");
+        try {
+            for (String k : allKeys) {
+                s3.putObject(
+                        PutObjectRequest.builder().bucket(bucket).key(k)
+                                .contentLength((long) data.length).build(),
+                        RequestBody.fromBytes(data));
+            }
 
-        ListObjectsV2Response resp = s3.listObjectsV2(
-                ListObjectsV2Request.builder().bucket(bucket).prefix("logs/").build());
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).prefix("logs/").build());
 
-        assertEquals(2, resp.keyCount(),
-                "prefix=logs/ should match exactly 2 keys, got: " + resp.contents());
-        for (S3Object o : resp.contents()) {
-            assertTrue(o.key().contains("logs/"),
-                    "every returned key should be under logs/ prefix, got: " + o.key());
+            assertEquals(2, resp.keyCount(),
+                    "prefix=logs/ should match exactly 2 keys, got: " + resp.contents());
+            for (S3Object o : resp.contents()) {
+                assertTrue(o.key().contains("logs/"),
+                        "every returned key should be under logs/ prefix, got: " + o.key());
+            }
+            log("[E2E] ListObjects prefix PASSED");
+        } finally {
+            for (String k : allKeys) {
+                try { s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(k).build()); } catch (Exception ignored) {}
+            }
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
         }
-        log("[E2E] ListObjects prefix PASSED");
     }
 
     // -------------------------------------------------------
