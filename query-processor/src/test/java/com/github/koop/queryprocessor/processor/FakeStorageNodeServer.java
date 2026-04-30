@@ -126,6 +126,10 @@ public class FakeStorageNodeServer implements Closeable {
         }
         try {
             String bucket = ctx.pathParam("bucket");
+            if (!buckets.contains(bucket)) {
+                ctx.status(404);
+                return;
+            }
             String prefix = ctx.queryParam("prefix");
             String maxKeysParam = ctx.queryParam("maxKeys");
             int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;

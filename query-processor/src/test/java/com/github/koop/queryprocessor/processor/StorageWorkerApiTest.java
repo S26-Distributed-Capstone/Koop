@@ -702,6 +702,81 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Proves that parseObjectListJson silently swallows parse errors.
+     * The method currently returns an empty list on malformed JSON with NO
+     * logging — making corrupt responses indistinguishable from empty buckets.
+     * This test locks in the current fallback behavior so the fix can safely
+     * add logging without breaking the return contract.
+     */
+    @Test
+    void parseObjectListJson_returnsEmptyOnMalformedInput() throws Exception {
+        // Access the private static method via reflection
+        java.lang.reflect.Method method = StorageWorker.class.getDeclaredMethod(
+                "parseObjectListJson", String.class);
+        method.setAccessible(true);
+
+        // Malformed JSON — not valid JSON at all
+        @SuppressWarnings("unchecked")
+        List<StorageWorker.ObjectInfo> result1 =
+                (List<StorageWorker.ObjectInfo>) method.invoke(null, "THIS IS NOT JSON!!!");
+        assertNotNull(result1, "Should return non-null on malformed input");
+        assertTrue(result1.isEmpty(), "Should return empty list on malformed JSON, got: " + result1);
+
+        // Truncated JSON — partial array
+        @SuppressWarnings("unchecked")
+        List<StorageWorker.ObjectInfo> result2 =
+                (List<StorageWorker.ObjectInfo>) method.invoke(null, "[{\"key\":\"test");
+        assertNotNull(result2, "Should return non-null on truncated input");
+        assertTrue(result2.isEmpty(), "Should return empty list on truncated JSON, got: " + result2);
+
+        // Null input
+        @SuppressWarnings("unchecked")
+        List<StorageWorker.ObjectInfo> result3 =
+                (List<StorageWorker.ObjectInfo>) method.invoke(null, (String) null);
+        assertNotNull(result3, "Should return non-null on null input");
+        assertTrue(result3.isEmpty(), "Should return empty list on null input");
+
+        // Empty string
+        @SuppressWarnings("unchecked")
+        List<StorageWorker.ObjectInfo> result4 =
+                (List<StorageWorker.ObjectInfo>) method.invoke(null, "");
+        assertNotNull(result4, "Should return non-null on empty input");
+        assertTrue(result4.isEmpty(), "Should return empty list on empty input");
+    }
+
+    /**
+     * Proves that FakeStorageNodeServer returns 200 for list-objects
+     * on a bucket that was never created. In production, storage nodes would
+     * return 404 for a non-existent bucket. The fake server should do the same
+     * to prevent false-positive tests.
+     *
+     * After fixing FakeStorageNodeServer.handleListObjects() to check
+     * bucket existence, this test should still pass (empty list returned)
+     * because StorageWorker.listObjects() treats 404 the same as empty.
+     */
+    @Test
+    void listObjects_returnsEmptyForNonExistentBucket() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+        List<AckingFakeStorageNodeServer> loNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) loNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = loNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
+
+        MetadataClient client = createConfiguredClient(set);
+        StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
+        try {
+            // Do NOT create the bucket — go straight to listing
+            List<StorageWorker.ObjectInfo> objects = w.listObjects("never-created-bucket", "", 1000);
+            assertNotNull(objects, "Should return non-null even for non-existent bucket");
+            assertTrue(objects.isEmpty(),
+                    "Should return empty list for non-existent bucket, got: " + objects);
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : loNodes) n.close();
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

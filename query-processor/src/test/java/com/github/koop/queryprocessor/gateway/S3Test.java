@@ -562,10 +562,72 @@ class S3Test {
         verify(mockStorage).listObjects(eq(BUCKET), eq("logs/"), anyInt());
     }
 
+    @Test
+    @Order(26)
+    void sdkListObjects_keysDoNotIncludeBucketPrefix() throws Exception {
+        // StorageWorkerService returns keys as "bucket/key" from the storage layer.
+        // The XML builder should strip the bucket prefix so clients see just "key".
+        List<ObjectSummary> summaries = List.of(
+                new ObjectSummary(BUCKET + "/photo.jpg", 100L, "2025-01-01T00:00:00Z")
+        );
+        when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
+                .thenReturn(summaries);
+
+        ListObjectsV2Response response = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build()
+        );
+
+        assertEquals(1, response.keyCount());
+        assertEquals("photo.jpg", response.contents().get(0).key(),
+                "Key should not include the bucket prefix, but got: "
+                        + response.contents().get(0).key());
+    }
+
+    @Test
+    @Order(27)
+    void sdkListObjects_keysWithSpecialCharsProduceValidXml() throws Exception {
+        // Keys containing XML special characters (&, <, >) must be escaped in the
+        // XML response. If not escaped, the AWS SDK's XML parser will fail.
+        List<ObjectSummary> summaries = List.of(
+                new ObjectSummary("a&b<c.txt", 50L, "2025-01-01T00:00:00Z")
+        );
+        when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
+                .thenReturn(summaries);
+
+        // This should NOT throw — if XML is invalid the SDK will throw S3Exception
+        ListObjectsV2Response response = assertDoesNotThrow(() ->
+                s3.listObjectsV2(ListObjectsV2Request.builder().bucket(BUCKET).build()),
+                "Keys with XML special characters should not break the XML response"
+        );
+
+        assertEquals(1, response.keyCount());
+        assertEquals("a&b<c.txt", response.contents().get(0).key(),
+                "Key with special chars should round-trip correctly through XML escaping");
+    }
+
+    @Test
+    @Order(28)
+    void sdkListObjects_maxKeysReflectedInResponse() throws Exception {
+        // The XML builder hardcodes <MaxKeys>1000</MaxKeys> regardless of the
+        // client's max-keys query parameter. The SDK should see the requested value.
+        when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
+                .thenReturn(List.of());
+
+        ListObjectsV2Response response = s3.listObjectsV2(
+                ListObjectsV2Request.builder()
+                        .bucket(BUCKET)
+                        .maxKeys(5)
+                        .build()
+        );
+
+        assertEquals(5, response.maxKeys(),
+                "MaxKeys in response should reflect the client's requested value, not hardcoded 1000");
+    }
+
     // ===================== MULTIPART UPLOAD =====================
 
     @Test
-    @Order(26)
+    @Order(29)
     void sdkCreateMultipartUpload_returnsUploadId() throws Exception {
         when(mockStorage.initiateMultipartUpload(BUCKET, KEY)).thenReturn("upload-id-xyz");
 
@@ -581,7 +643,7 @@ class S3Test {
     }
 
     @Test
-    @Order(27)
+    @Order(30)
     void sdkCreateMultipartUpload_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
         when(mockStorage.initiateMultipartUpload(anyString(), anyString())).thenReturn("upload-id-xyz");
 
@@ -594,7 +656,7 @@ class S3Test {
     }
 
     @Test
-    @Order(28)
+    @Order(31)
     void sdkUploadPart_completesWithoutException() throws Exception {
         byte[] partData = new byte[5 * 1024 * 1024]; 
         doAnswer(invocation -> {
@@ -619,7 +681,7 @@ class S3Test {
     }
 
     @Test
-    @Order(29)
+    @Order(32)
     void sdkUploadPart_delegatesCorrectArgs_toStorageService() throws Exception {
         byte[] partData = new byte[5 * 1024 * 1024];
         doAnswer(invocation -> {
@@ -643,7 +705,7 @@ class S3Test {
     }
 
     @Test
-    @Order(30)
+    @Order(33)
     void sdkCompleteMultipartUpload_completesWithoutException() throws Exception {
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq("upload-id-xyz"), anyList()))
                                 .thenReturn(MultipartUploadResult.success());
@@ -665,7 +727,7 @@ class S3Test {
     }
 
     @Test
-    @Order(31)
+    @Order(34)
     void sdkCompleteMultipartUpload_delegatesCorrectUploadIdAndParts_toStorageService() throws Exception {
         when(mockStorage.completeMultipartUpload(anyString(), anyString(), anyString(), anyList()))
                                 .thenReturn(MultipartUploadResult.success());
@@ -690,7 +752,7 @@ class S3Test {
     }
 
     @Test
-    @Order(32)
+    @Order(35)
     void sdkAbortMultipartUpload_returns204_noException() throws Exception {
         when(mockStorage.abortMultipartUpload(anyString(), anyString(), anyString()))
                 .thenReturn(MultipartUploadResult.success());
@@ -705,7 +767,7 @@ class S3Test {
     }
 
     @Test
-    @Order(33)
+    @Order(36)
     void sdkAbortMultipartUpload_delegatesCorrectArgs_toStorageService() throws Exception {
         when(mockStorage.abortMultipartUpload(anyString(), anyString(), anyString()))
                 .thenReturn(MultipartUploadResult.success());
@@ -721,7 +783,7 @@ class S3Test {
     // ===================== MULTIPART FULL LIFECYCLE =====================
 
     @Test
-    @Order(34)
+    @Order(37)
     void sdkMultipartLifecycle_initiateUploadCompleteThenGet() throws Exception {
         String uploadId = "lifecycle-upload-id";
         byte[] part1 = new byte[5 * 1024 * 1024];

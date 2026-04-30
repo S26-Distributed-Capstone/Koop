@@ -97,8 +97,15 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public List<ObjectSummary> listObjects(String bucket, String prefix, int maxKeys) throws Exception {
+        String bucketPrefix = bucket + "/";
         return storageWorker.listObjects(bucket, prefix, maxKeys).stream()
-                .map(o -> new ObjectSummary(o.key(), o.size(), o.lastModified()))
+                .map(o -> {
+                    String key = o.key();
+                    if (key.startsWith(bucketPrefix)) {
+                        key = key.substring(bucketPrefix.length());
+                    }
+                    return new ObjectSummary(key, o.size(), o.lastModified());
+                })
                 .toList();
     }
 

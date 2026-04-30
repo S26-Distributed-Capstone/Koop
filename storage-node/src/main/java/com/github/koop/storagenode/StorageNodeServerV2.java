@@ -35,6 +35,7 @@ import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.Metadata;
+import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -597,6 +598,11 @@ public class StorageNodeServerV2 {
             List<Map<String, String>> items;
             try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
                 items = stream
+                        .filter(m -> {
+                            var versions = m.versions();
+                            if (versions == null || versions.isEmpty()) return false;
+                            return !(versions.getLast() instanceof TombstoneFileVersion);
+                        })
                         .limit(maxKeys)
                         .map(m -> Map.of("key", m.key()))
                         .toList();

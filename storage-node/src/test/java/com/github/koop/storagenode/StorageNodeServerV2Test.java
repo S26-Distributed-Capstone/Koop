@@ -619,4 +619,48 @@ class StorageNodeServerV2Test {
         assertTrue(resp.body().contains(fullKey2));
         assertFalse(resp.body().contains(otherKey), "Should not include objects from other buckets");
     }
+
+    @Test
+    void testListObjects_excludesDeletedObjects() throws Exception {
+        int partition = 16;
+        String bucket = "tombstone-list-bucket";
+        String key1 = "alive.txt";
+        String key2 = "deleted.txt";
+        String fullKey1 = bucket + "/" + key1;
+        String fullKey2 = bucket + "/" + key2;
+
+        // Create bucket
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-ts-create", getDummySender()), 1200L);
+
+        // PUT + commit both objects
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey1, "req-ts-1"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key1, "req-ts-1", getDummySender()), 1201L);
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey2, "req-ts-2"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key2, "req-ts-2", getDummySender()), 1202L);
+
+        // Delete the second object (writes a tombstone)
+        server.processSequencerMessage(partition,
+                new Message.DeleteMessage(bucket, key2, "req-ts-del", getDummySender()), 1203L);
+
+        // List objects — deleted key should NOT appear
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertTrue(resp.body().contains(fullKey1), "Living object should still appear in listing");
+        assertFalse(resp.body().contains(fullKey2),
+                "Deleted (tombstoned) object should NOT appear in listing, but got: " + resp.body());
+    }
 }

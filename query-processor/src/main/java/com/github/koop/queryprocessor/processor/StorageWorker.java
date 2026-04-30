@@ -679,6 +679,8 @@ public final class StorageWorker {
             List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});
             return result != null ? result : List.of();
         } catch (Exception e) {
+            logger.warn("Failed to parse object list JSON (body length={}): {}",
+                        body.length(), e.getMessage());
             return List.of();
         }
     }
