@@ -680,7 +680,7 @@ public final class StorageWorker {
             return result != null ? result : List.of();
         } catch (Exception e) {
             logger.warn("Failed to parse object list JSON (body length={}): {}",
-                        body.length(), e.getMessage());
+                        body != null ? body.length() : 0, e.getMessage());
             return List.of();
         }
     }

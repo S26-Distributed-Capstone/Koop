@@ -448,20 +448,14 @@ public class Main {
         sb.append("  <KeyCount>").append(objects.size()).append("</KeyCount>\n");
         sb.append("  <MaxKeys>").append(maxKeys).append("</MaxKeys>\n");
         sb.append("  <IsTruncated>false</IsTruncated>\n");
-        String bucketPrefix = bucket + "/";
         for (ObjectSummary obj : objects) {
             // S3 clients require LastModified to be a valid ISO-8601 timestamp;
             // fall back to epoch when the storage layer doesn't supply one yet.
             String lastModified = (obj.lastModified() == null || obj.lastModified().isEmpty())
                     ? "1970-01-01T00:00:00.000Z"
                     : obj.lastModified();
-            // Strip the internal "bucket/key" prefix so clients see just "key"
-            String key = obj.key();
-            if (key.startsWith(bucketPrefix)) {
-                key = key.substring(bucketPrefix.length());
-            }
             sb.append("  <Contents>\n");
-            sb.append("    <Key>").append(escapeXml(key)).append("</Key>\n");
+            sb.append("    <Key>").append(escapeXml(obj.key())).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
             sb.append("    <LastModified>").append(lastModified).append("</LastModified>\n");
             //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");

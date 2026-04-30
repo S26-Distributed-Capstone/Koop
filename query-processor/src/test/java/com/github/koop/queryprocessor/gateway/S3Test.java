@@ -565,10 +565,10 @@ class S3Test {
     @Test
     @Order(26)
     void sdkListObjects_keysDoNotIncludeBucketPrefix() throws Exception {
-        // StorageWorkerService returns keys as "bucket/key" from the storage layer.
-        // The XML builder should strip the bucket prefix so clients see just "key".
+        // StorageWorkerService strips the "bucket/" prefix at the adapter layer.
+        // Verify the gateway correctly passes through bucket-relative keys.
         List<ObjectSummary> summaries = List.of(
-                new ObjectSummary(BUCKET + "/photo.jpg", 100L, "2025-01-01T00:00:00Z")
+                new ObjectSummary("photo.jpg", 100L, "2025-01-01T00:00:00Z")
         );
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(summaries);
