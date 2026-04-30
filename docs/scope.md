@@ -20,7 +20,7 @@ The KoopDB project focuses on building a **distributed, fault-tolerant object st
 
 While KoopDB mimics S3, it is not a full replacement. The following features are explicitly out of scope for this version:
 
-- **Repartitioning/moving data**: While repartitioning and moving data around is essential for scalability, we are not doing this here due to project complexity. We have the infrastructure to support it - namely virtual data partitions which can be reassigned via dynamic metadata updates
+- **Repartitioning/moving data**: While repartitioning and moving data around is essential for scalability, we are not doing this here due to project complexity. The data model supports it in principle — partitions are virtual and the partition→erasure-set mapping is held in Etcd — but the runtime path for dynamic reconfiguration (data movement, live re-routing on watch events) is not implemented.
 - **Authentication/Authorization:** No IAM, ACLs, or signed URL validation (access is open/anonymous).
 - **Advanced S3 Features:** Object Versioning, Lifecycle Policies, Server-Side Encryption, Object Tagging, BitTorrent support.
 - **HTTPS/TLS:** Traffic is currently HTTP-only.
