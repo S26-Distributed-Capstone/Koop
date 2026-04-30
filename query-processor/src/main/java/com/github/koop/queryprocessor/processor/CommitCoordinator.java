@@ -309,6 +309,12 @@ public final class CommitCoordinator implements AutoCloseable {
      * be resolved (e.g. some CI containers).
      */
     private static String resolveLocalHostname() {
+        // ADDED: Check for an explicitly set environment variable for Docker
+        String envIp = System.getenv("NODE_IP");
+        if (envIp != null && !envIp.isBlank()) {
+            return envIp;
+        }
+
         try {
             return InetAddress.getLocalHost().getHostAddress();
         } catch (UnknownHostException e) {

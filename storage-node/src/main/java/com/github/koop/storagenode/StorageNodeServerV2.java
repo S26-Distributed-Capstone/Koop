@@ -22,15 +22,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import com.github.koop.common.metadata.*;
+import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.Message;
-import com.github.koop.common.metadata.ErasureRouting;
-import com.github.koop.common.metadata.ErasureSetConfiguration;
-import com.github.koop.common.metadata.MetadataClient;
-import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
@@ -79,7 +77,8 @@ public class StorageNodeServerV2 {
     }
 
     public static void main(String[] args) {
-        String envPort = System.getenv("PORT");
+        logger.error("Starting StorageNodeServerV2...");
+        String envPort = System.getenv("APP_PORT");
         String envDir = System.getenv("STORAGE_DIR");
         String envIp = System.getenv("NODE_IP");
 
@@ -96,9 +95,44 @@ public class StorageNodeServerV2 {
             System.exit(1);
         }
 
-        Database db = null;
-        MetadataClient metadataClient = null;
-        PubSubClient pubSubClient = null;
+        Database db;
+        try {
+            String dbPath = storagePath.resolve("rocksdb").toString();
+            db = new Database(new RocksDbStorageStrategy(dbPath));
+            logger.info("RocksDB opened at {}", dbPath);
+        } catch (Exception e) {
+            e.printStackTrace(System.err);
+            logger.error("Failed to open RocksDB", e);
+            System.exit(1);
+            return;
+        }
+
+        logger.info(">>> Creating MetadataClient");
+        Map<Class<?>, String> metadataKeys = Map.of(
+                ErasureSetConfiguration.class,    "erasure_set_configurations",
+                PartitionSpreadConfiguration.class, "partition_spread_configurations"
+        );
+        MetadataClient metadataClient = new MetadataClient(new EtcdFetcher(metadataKeys));
+        logger.info(">>> MetadataClient created");
+        metadataClient.start();
+        logger.info(">>> MetadataClient started");
+
+
+        //PubSubClient pubSubClient = null;
+        logger.info(">>> Creating PubSubClient");
+        String kafkaBrokers = System.getenv("KAFKA_BOOTSTRAP_SERVERS");
+        PubSubClient pubSubClient;
+        if (kafkaBrokers != null && !kafkaBrokers.isBlank()) {
+            logger.info("Kafka brokers found, using KafkaPubSub: {}", kafkaBrokers);
+            pubSubClient = new PubSubClient(new com.github.koop.common.pubsub.KafkaPubSub(kafkaBrokers,
+                    "koop-sn-" + ip + "-" + port));
+        } else {
+            logger.error("No KAFKA_BOOTSTRAP_SERVERS set");
+            return;
+        }
+        pubSubClient.start();
+        logger.info(">>> PubSubClient started");
+
 
         StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
 
@@ -115,18 +149,18 @@ public class StorageNodeServerV2 {
             return;
         }
 
-        int myErasureSetId = -1;
+        Set<Integer> myErasureSetIds = new HashSet<>();
         int newShardIndex = -1;
 
-        outer:
+        // Find ALL erasure sets this node belongs to
         for (ErasureSetConfiguration.ErasureSet es : currentEsConfig.getErasureSets()) {
             List<ErasureSetConfiguration.Machine> machines = es.getMachines();
             for (int i = 0; i < machines.size(); i++) {
                 ErasureSetConfiguration.Machine machine = machines.get(i);
                 if (machine.getIp().equals(this.ip) && machine.getPort() == app.port()) {
-                    myErasureSetId = es.getNumber();
-                    newShardIndex = i;
-                    break outer;
+                    myErasureSetIds.add(es.getNumber());
+                    newShardIndex = i; // Save index (identical across sets in your config)
+                    break; // Break inner loop, but keep checking other erasure sets
                 }
             }
         }
@@ -135,12 +169,13 @@ public class StorageNodeServerV2 {
 
         Set<Integer> targetPartitions = new HashSet<>();
 
-        if (myErasureSetId == -1) {
+        if (myErasureSetIds.isEmpty()) {
             logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
                     app.port());
         } else {
+            // Add partitions for EVERY erasure set this node is a part of
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
-                if (spread.getErasureSet() == myErasureSetId) {
+                if (myErasureSetIds.contains(spread.getErasureSet())) {
                     targetPartitions.addAll(spread.getPartitions());
                 }
             }

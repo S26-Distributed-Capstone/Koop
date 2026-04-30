@@ -27,6 +27,7 @@ public class EtcdFetcher implements Fetcher {
         if(etcdEndpoint == null || etcdEndpoint.isEmpty()){
             throw new IllegalArgumentException("ETCD endpoint must be provided");
         }
+        logger.info(">>> EtcdFetcher endpoint: [{}]", etcdEndpoint);
         this.metadataKeyMap = metadataKeyMap.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> ByteSequence.from(e.getValue(), StandardCharsets.UTF_8)));

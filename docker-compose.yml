@@ -1,36 +1,165 @@
 services:
-  # --- 6 Storage Nodes ---
-  storage-node:
+  # --- 6 Explicit Storage Nodes ---
+  storage-node-1: &storage-node-base
     build:
       context: .
       dockerfile: storage-node/Dockerfile
-    deploy:
-      replicas: 6
     ports:
-      - "8001-8006:8080" # Maps each replica to 8001, 8002, etc.
+      - "8001:8080"
     environment:
       - APP_PORT=8080
-      - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
+      - ETCD_URL=http://etcd1:2379
       - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-1
     depends_on:
       - etcd1
       - redis-master
+      - kafka
 
-  # --- 3 Query Processors ---
-  query-processor:
+  storage-node-2:
+    <<: *storage-node-base
+    ports:
+      - "8002:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-2
+
+  storage-node-3:
+    <<: *storage-node-base
+    ports:
+      - "8003:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-3
+
+  storage-node-4:
+    <<: *storage-node-base
+    ports:
+      - "8004:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-4
+
+  storage-node-5:
+    <<: *storage-node-base
+    ports:
+      - "8005:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-5
+
+  storage-node-6:
+    <<: *storage-node-base
+    ports:
+      - "8006:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - REDIS_URL=redis://redis-master:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - NODE_IP=storage-node-6
+
+  # --- 3 Explicit Query Processors ---
+  query-processor-1: &qp-base
     build:
       context: .
       dockerfile: query-processor/Dockerfile
-    deploy:
-      replicas: 3
     ports:
-      - "9001-9003:8080" # Maps each replica to 9001, 9002, 9003
+      - "9001:8080"
     environment:
       - APP_PORT=8080
-      - ETCD_ENDPOINTS=etcd1:2379,etcd2:2379,etcd3:2379
-      - STORAGE_NODE_URL=http://storage-node:8080
+      - ETCD_URL=http://etcd1:2379
+      - STORAGE_NODE_URL=http://storage-node-1:8080
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis-master:6379
+      - NODE_IP=query-processor-1
     depends_on:
-      - storage-node
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+      - storage-node-4
+      - storage-node-5
+      - storage-node-6
+      - kafka
+      - etcd-seeder
+
+  query-processor-2:
+    <<: *qp-base
+    ports:
+      - "9002:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - STORAGE_NODE_URL=http://storage-node-1:8080
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis-master:6379
+      - NODE_IP=query-processor-2
+
+  query-processor-3:
+    <<: *qp-base
+    ports:
+      - "9003:8080"
+    environment:
+      - APP_PORT=8080
+      - ETCD_URL=http://etcd1:2379
+      - STORAGE_NODE_URL=http://storage-node-1:8080
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis-master:6379
+      - NODE_IP=query-processor-3
+
+  # --- Etcd Seeder (runs once at startup) ---
+  etcd-seeder:
+    image: quay.io/coreos/etcd:v3.5.0
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    restart: "no"
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        sleep 5
+        etcdctl --endpoints=http://etcd1:2379 put erasure_set_configurations '{"erasure_sets":[{"number":1,"n":6,"k":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]},{"number":2,"n":6,"k":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]}]}'
+        etcdctl --endpoints=http://etcd1:2379 put partition_spread_configurations '{"partition_spread":[{"erasure_set":1,"partitions":[0,1,2]},{"erasure_set":2,"partitions":[3,4,5]}]}'
+        echo "Etcd seeding complete"
+
+  # --- Kafka (KRaft mode, no Zookeeper) ---
+  kafka:
+    image: confluentinc/cp-kafka:7.7.8
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # --- Single Redis Instance ---
   redis-master:
