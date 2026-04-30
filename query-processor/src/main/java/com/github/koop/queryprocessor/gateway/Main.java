@@ -459,10 +459,13 @@ public class Main {
             String lastModified = (obj.lastModified() == null || obj.lastModified().isEmpty())
                     ? "1970-01-01T00:00:00.000Z"
                     : obj.lastModified();
+            String randomEtag = java.util.UUID.randomUUID().toString().replace("-", "");
             sb.append("  <Contents>\n");
             sb.append("    <Key>").append(escapeXml(obj.key())).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
             sb.append("    <LastModified>").append(lastModified).append("</LastModified>\n");
+            sb.append("    <ETag>\"").append(randomEtag).append("\"</ETag>\n"); // Dynamic random ETag
+            sb.append("    <StorageClass>STANDARD</StorageClass>\n");
             //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
             sb.append("  </Contents>\n");
         }
