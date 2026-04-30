@@ -55,8 +55,14 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
                         deleteData(partition, m.bucket() + "/" + m.key());
                         sendAck(m.requestID(), m.sender());
                     }
-                    case Message.CreateBucketMessage m -> sendAck(m.requestID(), m.sender());
-                    case Message.DeleteBucketMessage m -> sendAck(m.requestID(), m.sender());
+                    case Message.CreateBucketMessage m -> {
+                        addBucket(m.bucket());
+                        sendAck(m.requestID(), m.sender());
+                    }
+                    case Message.DeleteBucketMessage m -> {
+                        removeBucket(m.bucket());
+                        sendAck(m.requestID(), m.sender());
+                    }
                     default -> {}
                 }
             });

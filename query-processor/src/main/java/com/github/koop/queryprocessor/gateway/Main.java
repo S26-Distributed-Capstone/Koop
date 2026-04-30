@@ -44,14 +44,14 @@ public class Main {
      * │ GET     │ /{bucket}                    │ ListObjectsV2              │
      * │ HEAD    │ /{bucket}                    │ HeadBucket                 │
      * ├─────────┼──────────────────────────────┼────────────────────────────┤
-     * │ GET     │ /{bucket}/{key}              │ GetObject                  │
-     * │ DELETE  │ /{bucket}/{key}              │ DeleteObject               │
-     * │         │ /{bucket}/{key}?uploadId=X   │   └─ AbortMultipartUpload  │
-     * │ PUT     │ /{bucket}/{key}              │ PutObject                  │
-     * │         │ /{bucket}/{key}?partNumber=N │   └─ UploadPart            │
+     * │ GET     │ /{bucket}/<key>              │ GetObject                  │
+     * │ DELETE  │ /{bucket}/<key>              │ DeleteObject               │
+     * │         │ /{bucket}/<key>?uploadId=X   │   └─ AbortMultipartUpload  │
+     * │ PUT     │ /{bucket}/<key>              │ PutObject                  │
+     * │         │ /{bucket}/<key>?partNumber=N │   └─ UploadPart            │
      * │         │   &uploadId=X                │                            │
-     * │ POST    │ /{bucket}/{key}?uploads      │ CreateMultipartUpload      │
-     * │ POST    │ /{bucket}/{key}?uploadId=X   │ CompleteMultipartUpload    │
+     * │ POST    │ /{bucket}/<key>?uploads      │ CreateMultipartUpload      │
+     * │ POST    │ /{bucket}/<key>?uploadId=X   │ CompleteMultipartUpload    │
      * └─────────┴──────────────────────────────┴────────────────────────────┘
      */
     public static Javalin createApp(StorageService storage) {
@@ -68,17 +68,17 @@ public class Main {
             config.routes.head("/{bucket}",   ctx -> headBucketHandler(ctx, storage));
 
             // ── Object-level routes ─────────────────────────────────────────
-            // GET — plain object retrieval only (no multipart GET needed at gateway)
-            config.routes.get("/{bucket}/{key}", ctx -> getObjectHandler(ctx, storage));
+            // <key> is greedy so multi-segment S3 keys like "logs/jan.txt" match.
+            config.routes.get("/{bucket}/<key>", ctx -> getObjectHandler(ctx, storage));
 
             // DELETE — handles both DeleteObject and AbortMultipartUpload
-            config.routes.delete("/{bucket}/{key}", ctx -> deleteOrAbortHandler(ctx, storage));
+            config.routes.delete("/{bucket}/<key>", ctx -> deleteOrAbortHandler(ctx, storage));
 
             // PUT — handles both PutObject and UploadPart
-            config.routes.put("/{bucket}/{key}", ctx -> putOrUploadPartHandler(ctx, storage));
+            config.routes.put("/{bucket}/<key>", ctx -> putOrUploadPartHandler(ctx, storage));
 
             // POST — handles both CreateMultipartUpload (?uploads) and CompleteMultipartUpload (?uploadId=...)
-            config.routes.post("/{bucket}/{key}", ctx -> postObjectHandler(ctx, storage));
+            config.routes.post("/{bucket}/<key>", ctx -> postObjectHandler(ctx, storage));
         });
 
         return app;
@@ -159,7 +159,7 @@ public class Main {
             List<ObjectSummary> objects = storage.listObjects(bucket, prefix, maxKeys);
             ctx.status(200);
             ctx.header("Content-Type", "application/xml");
-            ctx.result(buildListObjectsXml(bucket, prefix, objects));
+            ctx.result(buildListObjectsXml(bucket, prefix, objects, maxKeys));
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
             ctx.header("Content-Type", "application/xml");
@@ -431,27 +431,33 @@ public class Main {
     static String buildS3ErrorXml(String code, String message, String resource) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                "<Error>\n" +
-               "  <Code>" + code + "</Code>\n" +
-               "  <Message>" + message + "</Message>\n" +
-               "  <Resource>" + resource + "</Resource>\n" +
+               "  <Code>" + escapeXml(code) + "</Code>\n" +
+               "  <Message>" + escapeXml(message) + "</Message>\n" +
+               "  <Resource>" + escapeXml(resource) + "</Resource>\n" +
                "  <RequestId>" + java.util.UUID.randomUUID() + "</RequestId>\n" +
                "</Error>";
     }
 
-    private static String buildListObjectsXml(String bucket, String prefix, List<ObjectSummary> objects) {
+    private static String buildListObjectsXml(String bucket, String prefix,
+                                               List<ObjectSummary> objects, int maxKeys) {
         StringBuilder sb = new StringBuilder();
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         sb.append("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
-        sb.append("  <Name>").append(bucket).append("</Name>\n");
-        sb.append("  <Prefix>").append(prefix).append("</Prefix>\n");
+        sb.append("  <Name>").append(escapeXml(bucket)).append("</Name>\n");
+        sb.append("  <Prefix>").append(escapeXml(prefix)).append("</Prefix>\n");
         sb.append("  <KeyCount>").append(objects.size()).append("</KeyCount>\n");
-        sb.append("  <MaxKeys>1000</MaxKeys>\n");
+        sb.append("  <MaxKeys>").append(maxKeys).append("</MaxKeys>\n");
         sb.append("  <IsTruncated>false</IsTruncated>\n");
         for (ObjectSummary obj : objects) {
+            // S3 clients require LastModified to be a valid ISO-8601 timestamp;
+            // fall back to epoch when the storage layer doesn't supply one yet.
+            String lastModified = (obj.lastModified() == null || obj.lastModified().isEmpty())
+                    ? "1970-01-01T00:00:00.000Z"
+                    : obj.lastModified();
             sb.append("  <Contents>\n");
-            sb.append("    <Key>").append(obj.key()).append("</Key>\n");
+            sb.append("    <Key>").append(escapeXml(obj.key())).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
-            sb.append("    <LastModified>").append(obj.lastModified()).append("</LastModified>\n");
+            sb.append("    <LastModified>").append(lastModified).append("</LastModified>\n");
             //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
             sb.append("  </Contents>\n");
         }
@@ -462,20 +468,30 @@ public class Main {
     private static String buildInitiateMultipartUploadXml(String bucket, String key, String uploadId) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                "<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
-               "  <Bucket>" + bucket + "</Bucket>\n" +
-               "  <Key>" + key + "</Key>\n" +
-               "  <UploadId>" + uploadId + "</UploadId>\n" +
+               "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
+               "  <Key>" + escapeXml(key) + "</Key>\n" +
+               "  <UploadId>" + escapeXml(uploadId) + "</UploadId>\n" +
                "</InitiateMultipartUploadResult>";
     }
 
     private static String buildCompleteMultipartUploadXml(String bucket, String key) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
-               "  <Location>http://localhost:8080/" + bucket + "/" + key + "</Location>\n" +
-               "  <Bucket>" + bucket + "</Bucket>\n" +
-               "  <Key>" + key + "</Key>\n" +
+               "  <Location>http://localhost:8080/" + escapeXml(bucket) + "/" + escapeXml(key) + "</Location>\n" +
+               "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
+               "  <Key>" + escapeXml(key) + "</Key>\n" +
                //"  <ETag>\"\"</ETag>\n" +
                "</CompleteMultipartUploadResult>";
+    }
+
+    /** Escapes XML special characters in text content. */
+    private static String escapeXml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
     }
 
     /**

@@ -7,7 +7,9 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -20,6 +22,7 @@ public class FakeStorageNodeServer implements Closeable {
 
     private final Javalin app;
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
+    private final Set<String> buckets = ConcurrentHashMap.newKeySet();
     private volatile boolean enabled = true;
 
     private final Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
@@ -33,6 +36,9 @@ public class FakeStorageNodeServer implements Closeable {
             config.routes.put("/store/{partition}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/<key>", this::handleGet);
             config.routes.delete("/store/{partition}/<key>", this::handleDelete);
+
+            config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
+            config.routes.get("/bucket/{bucket}", this::handleListObjects);
         });
 
         app.start(0); // OS picks a free port
@@ -102,6 +108,58 @@ public class FakeStorageNodeServer implements Closeable {
             logger.error("Error in fake DELETE", e);
             ctx.status(500).result("ERROR");
         }
+    }
+
+    private void handleHeadBucket(Context ctx) {
+        if (!enabled) {
+            ctx.status(503).result("NODE_DISABLED");
+            return;
+        }
+        String bucket = ctx.pathParam("bucket");
+        ctx.status(buckets.contains(bucket) ? 200 : 404);
+    }
+
+    private void handleListObjects(Context ctx) {
+        if (!enabled) {
+            ctx.status(503).result("NODE_DISABLED");
+            return;
+        }
+        try {
+            String bucket = ctx.pathParam("bucket");
+            if (!buckets.contains(bucket)) {
+                ctx.status(404);
+                return;
+            }
+            String prefix = ctx.queryParam("prefix");
+            String maxKeysParam = ctx.queryParam("maxKeys");
+            int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;
+
+            String scanPrefix = bucket + "/" + (prefix == null ? "" : prefix);
+
+            String body = store.keySet().stream()
+                    .map(k -> k.substring(k.indexOf('|') + 1))
+                    .filter(k -> k.startsWith(scanPrefix))
+                    .distinct()
+                    .sorted()
+                    .limit(maxKeys)
+                    .map(k -> "{\"key\":\"" + k.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}")
+                    .collect(Collectors.joining(",", "[", "]"));
+
+            ctx.status(200).header("Content-Type", "application/json").result(body);
+        } catch (NumberFormatException e) {
+            ctx.status(400).result("Invalid maxKeys parameter");
+        } catch (Exception e) {
+            logger.error("Error in fake list objects", e);
+            ctx.status(500).result("ERROR");
+        }
+    }
+
+    void addBucket(String bucket) {
+        buckets.add(bucket);
+    }
+
+    void removeBucket(String bucket) {
+        buckets.remove(bucket);
     }
 
     private static String mapKey(int partition, String key) {

@@ -565,6 +565,172 @@ public class S3GatewayE2EIT {
         log("[E2E] Large multipart upload test PASSED");
     }
 
+    // =====================================================================
+    // TEST: HeadBucket on existing bucket returns 200
+    // =====================================================================
+    @Test
+    void e2e_createBucket_thenHeadBucket_returns200() {
+        log("[E2E] CreateBucket → HeadBucket 200 test");
+
+        String bucket = "head-exists-" + System.nanoTime();
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        log("[E2E] CreateBucket completed");
+
+        try {
+            assertDoesNotThrow(() ->
+                    s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build()),
+                    "HeadBucket on existing bucket should not throw");
+            log("[E2E] HeadBucket → 200 PASSED");
+        } finally {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
+    }
+
+    // =====================================================================
+    // TEST: HeadBucket on missing bucket returns 404 NoSuchBucket
+    // =====================================================================
+    @Test
+    void e2e_headBucket_onMissingBucket_returns404() {
+        log("[E2E] HeadBucket missing → 404 test");
+
+        NoSuchBucketException ex = assertThrows(NoSuchBucketException.class, () ->
+                s3.headBucket(HeadBucketRequest.builder()
+                        .bucket("never-created-" + System.nanoTime())
+                        .build())
+        );
+        assertEquals(404, ex.statusCode(),
+                "HeadBucket on missing bucket should return 404");
+        log("[E2E] HeadBucket missing → 404 PASSED");
+    }
+
+    // =====================================================================
+    // TEST: CreateBucket → DeleteBucket → HeadBucket returns 404
+    // =====================================================================
+    @Test
+    void e2e_createThenDeleteBucket_headReturns404() {
+        log("[E2E] Create → Delete → HeadBucket 404 test");
+
+        String bucket = "lifecycle-" + System.nanoTime();
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        assertDoesNotThrow(() ->
+                s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build()),
+                "HeadBucket should succeed after create");
+
+        s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        log("[E2E] DeleteBucket completed");
+
+        NoSuchBucketException ex = assertThrows(NoSuchBucketException.class, () ->
+                s3.headBucket(HeadBucketRequest.builder().bucket(bucket).build())
+        );
+        assertEquals(404, ex.statusCode(),
+                "HeadBucket after DeleteBucket should return 404");
+        log("[E2E] Bucket lifecycle PASSED");
+    }
+
+    // =====================================================================
+    // TEST: ListObjectsV2 on empty bucket returns 0 contents
+    // =====================================================================
+    @Test
+    void e2e_listObjects_emptyBucket_returnsZeroContents() {
+        log("[E2E] ListObjects empty bucket test");
+
+        String bucket = "empty-list-" + System.nanoTime();
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+
+        try {
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).build());
+
+            assertEquals(0, resp.keyCount(), "empty bucket should have keyCount=0");
+            assertTrue(resp.contents().isEmpty(), "empty bucket should have no Contents");
+            log("[E2E] Empty list PASSED");
+        } finally {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
+    }
+
+    // =====================================================================
+    // TEST: PUT objects → ListObjectsV2 returns their keys
+    // =====================================================================
+    @Test
+    void e2e_putObjects_thenListObjects_returnsKeys() {
+        log("[E2E] PUT → ListObjects returns keys test");
+
+        String bucket = "list-keys-" + System.nanoTime();
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+
+        byte[] data = "list-test".getBytes(StandardCharsets.UTF_8);
+        List<String> keys = List.of("alpha.txt", "beta.txt", "gamma.txt");
+        try {
+            for (String k : keys) {
+                s3.putObject(
+                        PutObjectRequest.builder().bucket(bucket).key(k)
+                                .contentLength((long) data.length).build(),
+                        RequestBody.fromBytes(data));
+            }
+            log("[E2E] PUT " + keys.size() + " objects completed");
+
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).build());
+
+            assertEquals(keys.size(), resp.keyCount(),
+                    "keyCount should match number of PUTs");
+            List<String> returnedKeys = new ArrayList<>(resp.contents().stream().map(S3Object::key).toList());
+            Collections.sort(returnedKeys);
+            // The storage layer stores keys as "bucket/key"; assert each user-visible key is in the returned list.
+            for (String k : keys) {
+                String storedKey = bucket + "/" + k;
+                assertTrue(returnedKeys.contains(storedKey) || returnedKeys.contains(k),
+                        "ListObjects should return key " + k + " (looked for '" + k
+                                + "' or '" + storedKey + "' in " + returnedKeys + ")");
+            }
+            log("[E2E] ListObjects keys PASSED");
+        } finally {
+            for (String k : keys) {
+                try { s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(k).build()); } catch (Exception ignored) {}
+            }
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
+    }
+
+    // =====================================================================
+    // TEST: ListObjectsV2 with prefix only returns matching keys
+    // =====================================================================
+    @Test
+    void e2e_listObjects_withPrefix_filtersResults() {
+        log("[E2E] ListObjects with prefix test");
+
+        String bucket = "prefix-list-" + System.nanoTime();
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+
+        byte[] data = "x".getBytes(StandardCharsets.UTF_8);
+        List<String> allKeys = List.of("logs/jan.txt", "logs/feb.txt", "images/cat.png");
+        try {
+            for (String k : allKeys) {
+                s3.putObject(
+                        PutObjectRequest.builder().bucket(bucket).key(k)
+                                .contentLength((long) data.length).build(),
+                        RequestBody.fromBytes(data));
+            }
+
+            ListObjectsV2Response resp = s3.listObjectsV2(
+                    ListObjectsV2Request.builder().bucket(bucket).prefix("logs/").build());
+
+            assertEquals(2, resp.keyCount(),
+                    "prefix=logs/ should match exactly 2 keys, got: " + resp.contents());
+            for (S3Object o : resp.contents()) {
+                assertTrue(o.key().contains("logs/"),
+                        "every returned key should be under logs/ prefix, got: " + o.key());
+            }
+            log("[E2E] ListObjects prefix PASSED");
+        } finally {
+            for (String k : allKeys) {
+                try { s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(k).build()); } catch (Exception ignored) {}
+            }
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        }
+    }
+
     // -------------------------------------------------------
     // Helpers
     // -------------------------------------------------------

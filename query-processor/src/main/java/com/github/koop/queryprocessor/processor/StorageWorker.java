@@ -10,9 +10,14 @@ import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.google.protobuf.ByteString.Output;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -525,6 +530,162 @@ public final class StorageWorker {
         }
         return deleted;
     }
+
+    /**
+     * Checks whether a bucket exists by querying all nodes in the partition's
+     * erasure set concurrently. Returns {@code true} if any node returns 200
+     * (bucket exists), {@code false} only if every node returns 404 or fails.
+     *
+     * <p>This prevents false negatives when a node is stale or partitioned:
+     * even a single node reporting the bucket exists is sufficient.
+     */
+    public boolean bucketExists(String bucket) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting bucketExists", bucket);
+            return false;
+        }
+
+        List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+
+        List<Callable<Boolean>> tasks = new ArrayList<>();
+        for (InetSocketAddress node : nodes) {
+            tasks.add(() -> {
+                URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
+                        node.getHostString(), node.getPort(),
+                        URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(uri)
+                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .build();
+                try {
+                    HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
+                    int status = resp.statusCode();
+                    if (status == 200) return true;
+                    if (status == 404) {
+                        logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
+                        return false;
+                    }
+                    logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+                } catch (Exception e) {
+                    logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
+                }
+                return false;
+            });
+        }
+
+        try {
+            // Return true if ANY node reports the bucket exists
+            return executor.invokeAll(tasks).stream().anyMatch(f -> {
+                try {
+                    return f.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    logger.trace("bucketExists task error: {}", e.getMessage());
+                    return false;
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * Lists objects in a bucket by fanning out a GET to one node per partition,
+     * merging results, deduping by key, sorting, and applying maxKeys.
+     */
+    public List<ObjectInfo> listObjects(String bucket, String prefix, int maxKeys) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (maxKeys < 0) throw new IllegalArgumentException("maxKeys < 0");
+
+        ErasureRouting r = getRouting();
+        var spreads = metadataClient.get(PartitionSpreadConfiguration.class).getPartitionSpread();
+        if (spreads == null || spreads.isEmpty()) {
+            logger.error("listObjects: no partition spread");
+            return List.of();
+        }
+
+        List<Integer> partitions = spreads.stream()
+                .flatMap(s -> s.getPartitions().stream())
+                .distinct()
+                .toList();
+
+        String safePrefix = prefix == null ? "" : prefix;
+        String encodedPrefix = URLEncoder.encode(safePrefix, java.nio.charset.StandardCharsets.UTF_8);
+        String query = "?maxKeys=" + maxKeys
+                + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
+
+        List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
+        for (int partition : partitions) {
+            Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
+            if (esOpt.isEmpty()) continue;
+            List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
+                    .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+            if (nodes.isEmpty()) continue;
+            tasks.add(() -> fetchListFromAnyNode(bucket, query, nodes));
+        }
+
+        List<ObjectInfo> merged = new ArrayList<>();
+        try {
+            for (var future : executor.invokeAll(tasks)) {
+                try {
+                    merged.addAll(future.get());
+                } catch (ExecutionException e) {
+                    logger.warn("listObjects partition fetch failed: {}", e.getMessage());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        }
+
+        return merged.stream()
+                .collect(java.util.stream.Collectors.toMap(ObjectInfo::key, o -> o, (a, b) -> a))
+                .values().stream()
+                .sorted(Comparator.comparing(ObjectInfo::key))
+                .limit(maxKeys)
+                .toList();
+    }
+
+    private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
+        for (InetSocketAddress node : nodes) {
+            URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
+                    node.getHostString(), node.getPort(),
+                    URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
+            HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
+            try {
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    return parseObjectListJson(resp.body());
+                }
+                logger.trace("GET list {} → node {} HTTP {}", bucket, node, resp.statusCode());
+            } catch (Exception e) {
+                logger.trace("GET list {} → node {} failed: {}", bucket, node, e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    /** Parses the storage node's list response: [{"key":"..."},...] using Jackson. */
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    private static List<ObjectInfo> parseObjectListJson(String body) {
+        if (body == null || body.isBlank()) return List.of();
+        try {
+            List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});
+            return result != null ? result : List.of();
+        } catch (Exception e) {
+            logger.warn("Failed to parse object list JSON (body length={}): {}",
+                        body != null ? body.length() : 0, e.getMessage());
+            return List.of();
+        }
+    }
+
+    public record ObjectInfo(String key, long size, String lastModified) {}
 
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
         if (bucket == null)

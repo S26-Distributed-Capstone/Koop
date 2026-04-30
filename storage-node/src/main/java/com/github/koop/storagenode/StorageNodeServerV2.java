@@ -34,6 +34,8 @@ import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.Metadata;
+import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -555,6 +557,68 @@ public class StorageNodeServerV2 {
         return bucket + "/" + key;
     }
 
+    // ─── Bucket query handlers ────────────────────────────────────────────────
+
+    private void handleHeadBucket(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            boolean exists = storageNode.bucketExists(bucket);
+            ctx.status(exists ? 200 : 404);
+        } catch (Exception e) {
+            logger.error("Error handling HEAD /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+    private void handleListObjects(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            String prefix = ctx.queryParam("prefix");
+            String maxKeysParam = ctx.queryParam("maxKeys");
+            int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;
+
+            if (maxKeys < 0) {
+                ctx.status(400).result("maxKeys must be non-negative");
+                return;
+            }
+
+            // Return 404 if the bucket doesn't exist (matches HEAD semantics and S3 behavior)
+            if (!storageNode.bucketExists(bucket)) {
+                ctx.status(404);
+                return;
+            }
+
+            // Prefix scan: bucket + "/" ensures we only get objects inside this bucket
+            String scanPrefix = bucket + "/";
+            if (prefix != null && !prefix.isEmpty()) {
+                scanPrefix = bucket + "/" + prefix;
+            }
+
+            // try-with-resources closes the underlying RocksDB iterator
+            List<Map<String, String>> items;
+            try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
+                items = stream
+                        .filter(m -> {
+                            var versions = m.versions();
+                            if (versions == null || versions.isEmpty()) return false;
+                            return !(versions.getLast() instanceof TombstoneFileVersion);
+                        })
+                        .limit(maxKeys)
+                        .map(m -> Map.of("key", m.key()))
+                        .toList();
+            }
+
+            ctx.status(200).json(items);
+        } catch (NumberFormatException e) {
+            ctx.status(400).result("Invalid maxKeys parameter");
+        } catch (Exception e) {
+            logger.error("Error handling GET /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+
+
     public void start() {
         repairWorkerPool.start();
 
@@ -564,6 +628,10 @@ public class StorageNodeServerV2 {
             config.http.maxRequestSize = 100_000_000L;
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
+
+            // Bucket-level query endpoints (read-only, no PubSub needed)
+            config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
+            config.routes.get("/bucket/{bucket}", this::handleListObjects);
         });
 
         app.start(port);

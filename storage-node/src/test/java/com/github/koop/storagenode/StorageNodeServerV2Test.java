@@ -32,6 +32,7 @@ import io.javalin.Javalin;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class StorageNodeServerV2Test {
 
@@ -413,5 +414,253 @@ class StorageNodeServerV2Test {
         assertEquals(dataStr, getResp2.body(), "GET should return the correctly materialized data");
         assertEquals("500", getResp2.headers().firstValue("X-Koop-Version").orElse(""),
                 "The version headers should match the initial sequencer commit");
+    }
+
+    // ─── Bucket query endpoint helpers ────────────────────────────────────────
+
+    private URI bucketUri(String bucket) {
+        return URI.create("http://localhost:" + port + "/bucket/" + bucket);
+    }
+
+    private URI bucketUriWithParams(String bucket, String prefix, Integer maxKeys) {
+        StringBuilder sb = new StringBuilder("http://localhost:" + port + "/bucket/" + bucket);
+        String sep = "?";
+        if (prefix != null) { sb.append(sep).append("prefix=").append(prefix); sep = "&"; }
+        if (maxKeys != null) { sb.append(sep).append("maxKeys=").append(maxKeys); }
+        return URI.create(sb.toString());
+    }
+
+    // ─── HeadBucket tests ─────────────────────────────────────────────────────
+
+    @Test
+    void testHeadBucket_returnsNotFoundWhenBucketDoesNotExist() throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri("no-such-bucket"))
+                .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                .build();
+        HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
+        assertEquals(404, resp.statusCode(), "HEAD should return 404 for non-existent bucket");
+    }
+
+    @Test
+    void testHeadBucket_returnsOkAfterBucketCreated() throws Exception {
+        int partition = 10;
+        String bucket = "head-test-bucket";
+
+        // Create bucket via sequencer message
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-head-create", getDummySender()), 600L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                .build();
+        HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
+        assertEquals(200, resp.statusCode(), "HEAD should return 200 after bucket is created");
+    }
+
+    @Test
+    void testHeadBucket_returnsNotFoundAfterBucketDeleted() throws Exception {
+        int partition = 11;
+        String bucket = "head-delete-bucket";
+
+        // Create then delete
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-hd-create", getDummySender()), 700L);
+        server.processSequencerMessage(partition,
+                new Message.DeleteBucketMessage(bucket, "req-hd-delete", getDummySender()), 701L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                .build();
+        HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
+        assertEquals(404, resp.statusCode(), "HEAD should return 404 after bucket is deleted");
+    }
+
+    // ─── ListObjects tests ────────────────────────────────────────────────────
+
+    @Test
+    void testListObjects_returnsEmptyListWhenNoObjects() throws Exception {
+        int partition = 12;
+        String bucket = "empty-list-bucket";
+
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-empty-list", getDummySender()), 800L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertEquals("application/json", resp.headers().firstValue("Content-Type").orElse(""));
+        assertEquals("[]", resp.body().trim());
+    }
+
+    @Test
+    void testListObjects_returnsObjectsInBucket() throws Exception {
+        int partition = 13;
+        String bucket = "list-bucket";
+        String key1 = "file1.txt";
+        String key2 = "file2.txt";
+        String fullKey1 = bucket + "/" + key1;
+        String fullKey2 = bucket + "/" + key2;
+
+        // Create bucket first so that GET /bucket/{bucket} doesn't 404
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-list-create", getDummySender()), 899L);
+
+        // PUT + commit two objects
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey1, "req-list-1"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key1, "req-list-1", getDummySender()), 900L);
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey2, "req-list-2"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key2, "req-list-2", getDummySender()), 901L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertTrue(resp.body().contains(fullKey1), "Response should contain " + fullKey1);
+        assertTrue(resp.body().contains(fullKey2), "Response should contain " + fullKey2);
+    }
+
+    @Test
+    void testListObjects_respectsMaxKeysParam() throws Exception {
+        int partition = 14;
+        String bucket = "maxkeys-bucket";
+
+        // Create bucket first
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-mk-create", getDummySender()), 999L);
+
+        // Commit three objects
+        for (int i = 1; i <= 3; i++) {
+            String key = "obj" + i;
+            String fullKey = bucket + "/" + key;
+            String reqId = "req-mk-" + i;
+            http.send(HttpRequest.newBuilder()
+                    .uri(storeUriWithReq(partition, fullKey, reqId))
+                    .PUT(HttpRequest.BodyPublishers.ofString("data" + i)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            server.processSequencerMessage(partition,
+                    new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 1000L + i);
+        }
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUriWithParams(bucket, null, 1))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+
+        // Count how many "key" entries appear. With maxKeys=1, should be exactly 1 object.
+        // Simple check: split by "key" field separator
+        String body = resp.body();
+        long objectCount = body.chars().filter(ch -> ch == '{').count();
+        assertEquals(1, objectCount, "maxKeys=1 should return exactly 1 object, got: " + body);
+    }
+
+    @Test
+    void testListObjects_onlyReturnsObjectsMatchingPrefix() throws Exception {
+        int partition = 15;
+        String bucket = "prefix-bucket";
+
+        // Create both buckets first
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-pf-create", getDummySender()), 1099L);
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage("other-bucket", "req-pf-other-create", getDummySender()), 1098L);
+
+        // Two objects in "prefix-bucket", one in "other-bucket"
+        String fullKey1 = bucket + "/alpha";
+        String fullKey2 = bucket + "/beta";
+        String otherKey = "other-bucket/gamma";
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey1, "req-pf-1"))
+                .PUT(HttpRequest.BodyPublishers.ofString("a")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, "alpha", "req-pf-1", getDummySender()), 1100L);
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey2, "req-pf-2"))
+                .PUT(HttpRequest.BodyPublishers.ofString("b")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, "beta", "req-pf-2", getDummySender()), 1101L);
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, otherKey, "req-pf-3"))
+                .PUT(HttpRequest.BodyPublishers.ofString("c")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage("other-bucket", "gamma", "req-pf-3", getDummySender()), 1102L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertTrue(resp.body().contains(fullKey1));
+        assertTrue(resp.body().contains(fullKey2));
+        assertFalse(resp.body().contains(otherKey), "Should not include objects from other buckets");
+    }
+
+    @Test
+    void testListObjects_excludesDeletedObjects() throws Exception {
+        int partition = 16;
+        String bucket = "tombstone-list-bucket";
+        String key1 = "alive.txt";
+        String key2 = "deleted.txt";
+        String fullKey1 = bucket + "/" + key1;
+        String fullKey2 = bucket + "/" + key2;
+
+        // Create bucket
+        server.processSequencerMessage(partition,
+                new Message.CreateBucketMessage(bucket, "req-ts-create", getDummySender()), 1200L);
+
+        // PUT + commit both objects
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey1, "req-ts-1"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key1, "req-ts-1", getDummySender()), 1201L);
+
+        http.send(HttpRequest.newBuilder()
+                .uri(storeUriWithReq(partition, fullKey2, "req-ts-2"))
+                .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(partition,
+                new Message.FileCommitMessage(bucket, key2, "req-ts-2", getDummySender()), 1202L);
+
+        // Delete the second object (writes a tombstone)
+        server.processSequencerMessage(partition,
+                new Message.DeleteMessage(bucket, key2, "req-ts-del", getDummySender()), 1203L);
+
+        // List objects — deleted key should NOT appear
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertTrue(resp.body().contains(fullKey1), "Living object should still appear in listing");
+        assertFalse(resp.body().contains(fullKey2),
+                "Deleted (tombstoned) object should NOT appear in listing, but got: " + resp.body());
     }
 }
