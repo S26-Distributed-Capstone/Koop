@@ -1,0 +1,112 @@
+# Headless service — stable pod DNS for KRaft controller voter list and advertised listeners
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: koopdb
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+  - name: kafka
+    port: 9092
+    targetPort: 9092
+  - name: controller
+    port: 9093
+    targetPort: 9093
+---
+# Client service — apps use kafka.koopdb.svc.cluster.local:9092 for bootstrap
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: koopdb
+spec:
+  selector:
+    app: kafka
+  ports:
+  - name: kafka
+    port: 9092
+    targetPort: 9092
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: koopdb
+spec:
+  serviceName: kafka-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.7.8
+        # Derive NODE_ID (1-based) and per-pod advertised listener from hostname before
+        # handing off to the confluent run script which reads env vars.
+        command:
+        - /bin/bash
+        - -c
+        - |
+          ORDINAL="${HOSTNAME##*-}"
+          export KAFKA_NODE_ID=$((ORDINAL + 1))
+          export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.kafka-headless.koopdb.svc.cluster.local:9092"
+          exec /etc/confluent/docker/run
+        ports:
+        - containerPort: 9092
+          name: kafka
+        - containerPort: 9093
+          name: controller
+        env:
+        - name: KAFKA_PROCESS_ROLES
+          value: "broker,controller"
+        - name: KAFKA_LISTENERS
+          value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: "CONTROLLER"
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: "1@kafka-0.kafka-headless.koopdb.svc.cluster.local:9093,2@kafka-1.kafka-headless.koopdb.svc.cluster.local:9093,3@kafka-2.kafka-headless.koopdb.svc.cluster.local:9093"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "3"
+        - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+          value: "3"
+        - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+          value: "2"
+        - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+          value: "3"
+        - name: KAFKA_MIN_INSYNC_REPLICAS
+          value: "2"
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: "true"
+        - name: CLUSTER_ID
+          value: "MkU3OEVBNTcwNTJENDM2Qk"
+        readinessProbe:
+          exec:
+            command:
+            - kafka-topics
+            - --bootstrap-server
+            - localhost:9092
+            - --list
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 10
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi

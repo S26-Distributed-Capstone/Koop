@@ -1,0 +1,70 @@
+# Headless service — gives each pod stable DNS: storage-node-N.storage-node.koopdb.svc.cluster.local
+# NODE_IP must match exactly what the etcd-seeder writes as machine.ip
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-node
+  namespace: koopdb
+spec:
+  clusterIP: None
+  selector:
+    app: storage-node
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage-node
+  namespace: koopdb
+spec:
+  serviceName: storage-node
+  replicas: 18
+  selector:
+    matchLabels:
+      app: storage-node
+  template:
+    metadata:
+      labels:
+        app: storage-node
+    spec:
+      containers:
+      - name: storage-node
+        image: koopdb/storage-node:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: APP_PORT
+          value: "8080"
+        - name: STORAGE_DIR
+          value: "/storage"
+        - name: ETCD_URL
+          value: "http://etcd.koopdb.svc.cluster.local:2379"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka.koopdb.svc.cluster.local:9092"
+        # NODE_IP must match the machine.ip field written by etcd-seeder exactly
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_IP
+          value: "$(POD_NAME).storage-node.koopdb.svc.cluster.local"
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 12
+        volumeMounts:
+        - name: storage
+          mountPath: /storage
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi

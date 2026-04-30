@@ -1,0 +1,52 @@
+# Runs once to seed cluster topology into etcd.
+# Keys must match what Main.java and StorageNodeServerV2.main() read: erasure_set_configurations
+# and partition_spread_configurations (no .json suffix, plural form).
+#
+# Two erasure sets, each n=9 (k=6 data shards + m=3 parity shards).
+# Each set has its own 9 dedicated storage nodes (18 total):
+#   set 1 → storage-node-0  .. storage-node-8
+#   set 2 → storage-node-9  .. storage-node-17
+# Partition spread: set 1 → partitions 0-14, set 2 → partitions 15-29 (30 total).
+# write_quorum=7: require 7 of 9 ACKs before a PUT succeeds; reconstruction needs only 6.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etcd-seeder
+  namespace: koopdb
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+      - name: wait-for-etcd
+        image: quay.io/coreos/etcd:v3.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          until etcdctl --endpoints=http://etcd.koopdb.svc.cluster.local:2379 endpoint health; do
+            echo "Waiting for etcd..."
+            sleep 3
+          done
+      containers:
+      - name: seeder
+        image: quay.io/coreos/etcd:v3.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          ETCD=http://etcd.koopdb.svc.cluster.local:2379
+          SFX=".storage-node.koopdb.svc.cluster.local"
+
+          MACHINES_SET1='"machines":[{"ip":"storage-node-0'"${SFX}"'","port":8080},{"ip":"storage-node-1'"${SFX}"'","port":8080},{"ip":"storage-node-2'"${SFX}"'","port":8080},{"ip":"storage-node-3'"${SFX}"'","port":8080},{"ip":"storage-node-4'"${SFX}"'","port":8080},{"ip":"storage-node-5'"${SFX}"'","port":8080},{"ip":"storage-node-6'"${SFX}"'","port":8080},{"ip":"storage-node-7'"${SFX}"'","port":8080},{"ip":"storage-node-8'"${SFX}"'","port":8080}]'
+
+          MACHINES_SET2='"machines":[{"ip":"storage-node-9'"${SFX}"'","port":8080},{"ip":"storage-node-10'"${SFX}"'","port":8080},{"ip":"storage-node-11'"${SFX}"'","port":8080},{"ip":"storage-node-12'"${SFX}"'","port":8080},{"ip":"storage-node-13'"${SFX}"'","port":8080},{"ip":"storage-node-14'"${SFX}"'","port":8080},{"ip":"storage-node-15'"${SFX}"'","port":8080},{"ip":"storage-node-16'"${SFX}"'","port":8080},{"ip":"storage-node-17'"${SFX}"'","port":8080}]'
+
+          ERASURE_SETS='{"erasure_sets":[{"number":1,"n":9,"k":6,"write_quorum":7,'"${MACHINES_SET1}"'},{"number":2,"n":9,"k":6,"write_quorum":7,'"${MACHINES_SET2}"'}]}'
+
+          PARTITION_SPREAD='{"partition_spread":[{"erasure_set":1,"partitions":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]},{"erasure_set":2,"partitions":[15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]}]}'
+
+          etcdctl --endpoints="${ETCD}" put erasure_set_configurations "${ERASURE_SETS}"
+          etcdctl --endpoints="${ETCD}" put partition_spread_configurations "${PARTITION_SPREAD}"
+          echo "Etcd seeding complete."
