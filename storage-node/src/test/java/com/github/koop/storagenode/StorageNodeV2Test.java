@@ -48,7 +48,7 @@ public class StorageNodeV2Test {
 
     @AfterEach
     public void teardown() throws Exception {
-        db.close();
+        //db.close();
     }
 
     @Test
@@ -295,7 +295,10 @@ public class StorageNodeV2Test {
     @Test
     public void testRetrieveReturnEmptyForMissingBlobWithoutEnqueueingRepair() throws Exception {
         WriteTracker tracker = new WriteTracker();
-        RepairWorkerPool repairPool = new RepairWorkerPool(tracker, op -> {});
+        RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(
+                tempDir.resolve("repair-db").toAbsolutePath().toString());
+        RocksDbRepairQueue repairQueue = new RocksDbRepairQueue(strategy);
+        RepairWorkerPool repairPool = new RepairWorkerPool(repairQueue, tracker, op -> {});
         repairPool.start();
         storageNode = new StorageNodeV2(db, tempDir, tracker);
 

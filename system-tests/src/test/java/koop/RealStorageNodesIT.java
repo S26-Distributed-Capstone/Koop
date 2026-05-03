@@ -11,6 +11,7 @@ import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.StorageWorker;
+import com.github.koop.storagenode.RocksDbRepairQueue;
 import com.github.koop.storagenode.StorageNodeServerV2;
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
@@ -85,9 +86,11 @@ public class RealStorageNodesIT {
             log("Starting node " + i + " on port " + port);
 
             // Each node gets its own Database instance but shares the memory-backed control planes
-            Database db = new Database(new RocksDbStorageStrategy(dir.resolve("db").toString()));
+            RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(dir.resolve("db").toString());
+            RocksDbRepairQueue repairQueue = new RocksDbRepairQueue(strategy);
+            Database db = new Database(strategy);
             StorageNodeServerV2 server =
-                    new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"), sharedMetadataClient, sharedPubSubClient);
+                    new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"), sharedMetadataClient, sharedPubSubClient, repairQueue);
 
             servers.add(server);
             dataDirs.add(dir);
