@@ -1,5 +1,7 @@
 package com.github.koop.storagenode;
 
+import java.io.*;
+
 /**
  * Represents a single repair task to be processed by the {@link RepairWorkerPool}.
  *
@@ -11,4 +13,31 @@ package com.github.koop.storagenode;
  *                  location when writing the recovered shard to disk.
  */
 public record RepairOperation(String blobKey, long seqOffset, String requestId) {
+
+    public byte[] serialize() {
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             DataOutputStream dos = new DataOutputStream(baos)) {
+            dos.writeUTF(blobKey);
+            dos.writeLong(seqOffset);
+            dos.writeBoolean(requestId != null);
+            if (requestId != null) {
+                dos.writeUTF(requestId);
+            }
+            dos.flush();
+            return baos.toByteArray();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    public static RepairOperation deserialize(byte[] data) {
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data))) {
+            String blobKey = dis.readUTF();
+            long seqOffset = dis.readLong();
+            String requestId = dis.readBoolean() ? dis.readUTF() : null;
+            return new RepairOperation(blobKey, seqOffset, requestId);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
 }

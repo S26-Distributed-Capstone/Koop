@@ -46,6 +46,7 @@ public class StorageNodeServerV2 {
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
     private final RepairWorkerPool repairWorkerPool;
+    private final RocksDbRepairQueue repairQueue;
     private final Database db;
 
     private Javalin app;
@@ -63,14 +64,13 @@ public class StorageNodeServerV2 {
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient) {
+            PubSubClient pubSubClient, RocksDbRepairQueue repairQueue) {
         this.port = port;
         this.ip = ip;
         this.db = db;
+        this.repairQueue = repairQueue;
         WriteTracker writeTracker = new WriteTracker();
-        // Lambda captures 'this' — storageNode/config are dereferenced at call time,
-        // not at construction time, so there is no circular dependency.
-        this.repairWorkerPool = new RepairWorkerPool(writeTracker, this::repairBlob);
+        this.repairWorkerPool = new RepairWorkerPool(repairQueue, writeTracker, this::repairBlob);
         this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
@@ -96,9 +96,12 @@ public class StorageNodeServerV2 {
         }
 
         Database db;
+        RocksDbRepairQueue repairQueue;
         try {
             String dbPath = storagePath.resolve("rocksdb").toString();
-            db = new Database(new RocksDbStorageStrategy(dbPath));
+            RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(dbPath);
+            repairQueue = new RocksDbRepairQueue(strategy);
+            db = new Database(strategy);
             logger.info("RocksDB opened at {}", dbPath);
         } catch (Exception e) {
             e.printStackTrace(System.err);
@@ -134,7 +137,7 @@ public class StorageNodeServerV2 {
         logger.info(">>> PubSubClient started");
 
 
-        StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
+        StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient, repairQueue);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
@@ -353,7 +356,7 @@ public class StorageNodeServerV2 {
                     String fullKey = buildKey(m.bucket(), m.key());
                     boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
                     if (!materialized) {
-                        repairWorkerPool.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
+                        repairQueue.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
                     }
                     requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);

@@ -53,7 +53,9 @@ class StorageNodeServerV2Test {
 
     @BeforeEach
     void setUp() throws Exception {
-        db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
+        RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString());
+        RocksDbRepairQueue repairQueue = new RocksDbRepairQueue(strategy);
+        db = new Database(strategy);
         fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
         pubSub = new MemoryPubSub();
@@ -75,7 +77,7 @@ class StorageNodeServerV2Test {
             config.routes.post("/ack/{requestId}", ctx -> ctx.status(200));
         }).start(0);
 
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
 
