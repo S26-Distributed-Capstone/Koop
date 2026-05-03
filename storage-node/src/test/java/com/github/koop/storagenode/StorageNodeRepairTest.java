@@ -85,7 +85,7 @@ class StorageNodeRepairTest {
     @AfterEach
     void tearDown() throws Exception {
         if (server != null) server.stop();
-        if (db != null) db.close();
+        //if (db != null) db.close();
         if (ackServer != null) ackServer.stop();
         if (metadataClient != null) metadataClient.close();
         if (pubSubClient != null) pubSubClient.close();

@@ -93,7 +93,7 @@ class StorageNodeServerV2Test {
     @AfterEach
     void tearDown() throws Exception {
         server.stop();
-        db.close();
+        //db.close();
         ackServer.stop();
     }
 

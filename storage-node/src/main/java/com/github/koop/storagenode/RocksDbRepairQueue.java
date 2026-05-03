@@ -88,30 +88,40 @@ public class RocksDbRepairQueue implements RepairQueue {
         }
 
         String blobKey = operation.blobKey();
-        PendingEntry existing = blobKeyIndex.get(blobKey);
-        if (existing != null && existing.seqOffset() >= operation.seqOffset()) {
-            logger.debug("Discarding stale repair: key={}, incoming={}, existing={}",
-                    blobKey, operation.seqOffset(), existing.seqOffset());
-            return;
-        }
-
         byte[] rocksKey = longToBytes(sequence.incrementAndGet());
         byte[] value = operation.serialize();
 
-        try {
-            strategy.putRepairEntry(rocksKey, value);
-            PendingEntry old = blobKeyIndex.put(blobKey,
-                    new PendingEntry(rocksKey, operation.seqOffset()));
-            if (old != null) {
-                try {
-                    strategy.deleteRepairEntry(old.rocksKey());
-                } catch (Exception e) {
-                    logger.warn("Failed to delete superseded repair entry for key={}", blobKey, e);
-                }
+        // Atomic check-and-update: holds the map lock for this key so concurrent
+        // enqueues for the same blobKey are serialized.
+        final byte[][] toDelete = {null};
+        PendingEntry result = blobKeyIndex.compute(blobKey, (k, existing) -> {
+            if (existing != null && existing.seqOffset() >= operation.seqOffset()) {
+                return existing;
             }
+            try {
+                strategy.putRepairEntry(rocksKey, value);
+            } catch (Exception e) {
+                logger.error("Failed to persist repair operation for key={}", blobKey, e);
+                return existing;
+            }
+            if (existing != null) {
+                toDelete[0] = existing.rocksKey();
+            }
+            return new PendingEntry(rocksKey, operation.seqOffset());
+        });
+
+        if (toDelete[0] != null) {
+            try {
+                strategy.deleteRepairEntry(toDelete[0]);
+            } catch (Exception e) {
+                logger.warn("Failed to delete superseded repair entry for key={}", blobKey, e);
+            }
+        }
+
+        if (result != null && Arrays.equals(result.rocksKey(), rocksKey)) {
             logger.debug("Enqueued repair: key={}, seqOffset={}", blobKey, operation.seqOffset());
-        } catch (Exception e) {
-            logger.error("Failed to persist repair operation for key={}", blobKey, e);
+        } else {
+            logger.debug("Discarding stale repair: key={}, incoming={}", blobKey, operation.seqOffset());
         }
     }
 

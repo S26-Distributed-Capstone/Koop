@@ -48,7 +48,7 @@ public class StorageNodeV2Test {
 
     @AfterEach
     public void teardown() throws Exception {
-        db.close();
+        //db.close();
     }
 
     @Test

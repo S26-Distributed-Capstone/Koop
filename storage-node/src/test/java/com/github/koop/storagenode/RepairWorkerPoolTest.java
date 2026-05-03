@@ -387,4 +387,68 @@ class RepairWorkerPoolTest {
         // Should not throw — just logs a warning
         assertEquals(0, pool.pendingCount());
     }
+
+    // -------------------------------------------------------------------------
+    // Crash recovery: persistent queue survives pool restart cycles
+    // -------------------------------------------------------------------------
+
+    @Test
+    void testPersistentQueueSurvivesMultipleRestartCycles() throws Exception {
+        List<RepairOperation> executed = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(1);
+        String dbPath = tempDir.resolve("restart-db").toAbsolutePath().toString();
+
+        // --- Cycle 1: enqueue while pool is NOT running, then shut down ---
+        RocksDbStorageStrategy strategy1 = new RocksDbStorageStrategy(dbPath);
+        RocksDbRepairQueue queue1 = new RocksDbRepairQueue(strategy1);
+        // Pool never started — simulate node being offline while repairs arrive
+        queue1.enqueue(new RepairOperation("key-a", 10L, "req-a"));
+        queue1.enqueue(new RepairOperation("key-b", 20L, "req-b"));
+        assertEquals(2, queue1.size());
+        strategy1.close();
+
+        // --- Cycle 2: restart, pool runs but shuts down before completing ---
+        RocksDbStorageStrategy strategy2 = new RocksDbStorageStrategy(dbPath);
+        RocksDbRepairQueue queue2 = new RocksDbRepairQueue(strategy2);
+        assertEquals(2, queue2.size(), "Both operations should survive restart");
+
+        // Start pool with a strategy that blocks until interrupted — simulates crash mid-repair
+        CountDownLatch blockRepair = new CountDownLatch(1);
+        RepairWorkerPool pool2 = new RepairWorkerPool(queue2, new WriteTracker(), 1L, op -> {
+            try {
+                blockRepair.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("simulated crash", e);
+            }
+        });
+        pool2.start();
+        Thread.sleep(100); // let poll dispatch
+        // Shut down before repairs complete — simulates crash
+        pool2.shutdown();
+        strategy2.close();
+
+        // --- Cycle 3: final restart — operations should still be in the queue ---
+        RocksDbStorageStrategy strategy3 = new RocksDbStorageStrategy(dbPath);
+        RocksDbRepairQueue queue3 = new RocksDbRepairQueue(strategy3);
+        assertEquals(2, queue3.size(), "Operations should survive a second restart");
+
+        RepairWorkerPool pool3 = new RepairWorkerPool(queue3, new WriteTracker(), 1L, op -> {
+            executed.add(op);
+            if (executed.size() == 2) latch.countDown();
+        });
+        pool3.start();
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS), "Both operations should eventually execute");
+        assertEquals(2, executed.size());
+        assertTrue(executed.stream().anyMatch(op -> op.blobKey().equals("key-a") && op.seqOffset() == 10L));
+        assertTrue(executed.stream().anyMatch(op -> op.blobKey().equals("key-b") && op.seqOffset() == 20L));
+
+        // Queue should be drained after successful processing
+        Thread.sleep(100);
+        assertEquals(0, queue3.size(), "Queue should be empty after successful repairs");
+
+        pool3.shutdown();
+        strategy3.close();
+    }
 }

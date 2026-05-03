@@ -708,6 +708,12 @@ public class StorageNodeServerV2 {
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
 
+        try {
+            db.close();
+        } catch (Exception e) {
+            logger.error("Failed to close database", e);
+        }
+
         logger.info("StorageNodeServerV2 stopped");
     }
 
