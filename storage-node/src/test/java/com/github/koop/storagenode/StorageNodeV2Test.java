@@ -48,7 +48,7 @@ public class StorageNodeV2Test {
 
     @AfterEach
     public void teardown() throws Exception {
-        //db.close();
+        db.close();
     }
 
     @Test
@@ -314,6 +314,7 @@ public class StorageNodeV2Test {
                 "retrieve() should not enqueue repair — only the commit path triggers repair");
 
         repairPool.shutdown();
+        strategy.close();
     }
 
     @Test

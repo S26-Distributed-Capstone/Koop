@@ -142,6 +142,11 @@ public class StorageNodeServerV2 {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
             server.stop();
+            try {
+                db.close();
+            } catch (Exception e) {
+                logger.error("Failed to close database", e);
+            }
         }));
 
         server.start();
@@ -707,12 +712,6 @@ public class StorageNodeServerV2 {
 
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
-
-        try {
-            db.close();
-        } catch (Exception e) {
-            logger.error("Failed to close database", e);
-        }
 
         logger.info("StorageNodeServerV2 stopped");
     }

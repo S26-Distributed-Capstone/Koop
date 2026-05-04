@@ -19,19 +19,23 @@ class RepairWorkerPoolTest {
 
     private RepairWorkerPool pool;
     private RocksDbRepairQueue queue;
+    private RocksDbStorageStrategy strategy;
 
     @TempDir
     Path tempDir;
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws Exception {
         if (pool != null) {
             pool.shutdown();
+        }
+        if (strategy != null) {
+            strategy.close();
         }
     }
 
     private RocksDbRepairQueue createQueue() throws Exception {
-        RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(
+        strategy = new RocksDbStorageStrategy(
                 tempDir.resolve("db-" + System.nanoTime()).toAbsolutePath().toString());
         queue = new RocksDbRepairQueue(strategy);
         return queue;
