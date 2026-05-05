@@ -1,11 +1,8 @@
 # Runs once to seed cluster topology into etcd.
-# Keys must match what Main.java and StorageNodeServerV2.main() read: erasure_set_configurations
-# and partition_spread_configurations (no .json suffix, plural form).
-#
 # Two erasure sets, each n=9 (m=6 data shards + 3 parity shards).
-# Each set has its own 9 dedicated storage nodes (18 total):
-#   set 1 → storage-node-0  .. storage-node-8
-#   set 2 → storage-node-9  .. storage-node-17
+# Sets can share machines but each set's pods are on different nodes (anti-affinity).
+#   set 1 → storage-node-set1-0 .. storage-node-set1-8
+#   set 2 → storage-node-set2-0 .. storage-node-set2-8
 # Partition spread: set 1 → partitions 0-14, set 2 → partitions 15-29 (30 total).
 # write_quorum=7: require 7 of 9 ACKs before a PUT succeeds; reconstruction needs only 6.
 apiVersion: batch/v1
@@ -46,11 +43,12 @@ spec:
         - -c
         - |
           ETCD=http://etcd.koopdb.svc.cluster.local:2379
-          SFX=".storage-node.koopdb.svc.cluster.local"
+          SFX1=".storage-node-set1.koopdb.svc.cluster.local"
+          SFX2=".storage-node-set2.koopdb.svc.cluster.local"
 
-          MACHINES_SET1='"machines":[{"ip":"storage-node-0'"${SFX}"'","port":8080},{"ip":"storage-node-1'"${SFX}"'","port":8080},{"ip":"storage-node-2'"${SFX}"'","port":8080},{"ip":"storage-node-3'"${SFX}"'","port":8080},{"ip":"storage-node-4'"${SFX}"'","port":8080},{"ip":"storage-node-5'"${SFX}"'","port":8080},{"ip":"storage-node-6'"${SFX}"'","port":8080},{"ip":"storage-node-7'"${SFX}"'","port":8080},{"ip":"storage-node-8'"${SFX}"'","port":8080}]'
+          MACHINES_SET1='"machines":[{"ip":"storage-node-set1-0'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-1'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-2'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-3'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-4'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-5'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-6'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-7'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-8'"${SFX1}"'","port":8080}]'
 
-          MACHINES_SET2='"machines":[{"ip":"storage-node-9'"${SFX}"'","port":8080},{"ip":"storage-node-10'"${SFX}"'","port":8080},{"ip":"storage-node-11'"${SFX}"'","port":8080},{"ip":"storage-node-12'"${SFX}"'","port":8080},{"ip":"storage-node-13'"${SFX}"'","port":8080},{"ip":"storage-node-14'"${SFX}"'","port":8080},{"ip":"storage-node-15'"${SFX}"'","port":8080},{"ip":"storage-node-16'"${SFX}"'","port":8080},{"ip":"storage-node-17'"${SFX}"'","port":8080}]'
+          MACHINES_SET2='"machines":[{"ip":"storage-node-set2-0'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-1'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-2'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-3'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-4'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-5'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-6'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-7'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-8'"${SFX2}"'","port":8080}]'
 
           ERASURE_SETS='{"erasure_sets":[{"number":1,"n":9,"m":6,"write_quorum":7,'"${MACHINES_SET1}"'},{"number":2,"n":9,"m":6,"write_quorum":7,'"${MACHINES_SET2}"'}]}'
 

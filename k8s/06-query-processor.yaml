@@ -29,8 +29,8 @@ spec:
         koopdb/role: worker
       containers:
       - name: query-processor
-        image: koopdb/query-processor:latest
-        imagePullPolicy: IfNotPresent
+        image: ygins/query-processor:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:

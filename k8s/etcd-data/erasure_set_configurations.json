@@ -1,0 +1,38 @@
+{
+  "erasure_sets": [
+    {
+      "number": 1,
+      "n": 9,
+      "m": 6,
+      "write_quorum": 7,
+      "machines": [
+        {"ip": "storage-node-set1-0.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-1.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-2.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-3.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-4.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-5.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-6.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-7.storage-node-set1.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set1-8.storage-node-set1.koopdb.svc.cluster.local", "port": 8080}
+      ]
+    },
+    {
+      "number": 2,
+      "n": 9,
+      "m": 6,
+      "write_quorum": 7,
+      "machines": [
+        {"ip": "storage-node-set2-0.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-1.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-2.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-3.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-4.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-5.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-6.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-7.storage-node-set2.koopdb.svc.cluster.local", "port": 8080},
+        {"ip": "storage-node-set2-8.storage-node-set2.koopdb.svc.cluster.local", "port": 8080}
+      ]
+    }
+  ]
+}
