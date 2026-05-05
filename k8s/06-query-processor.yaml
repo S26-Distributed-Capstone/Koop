@@ -4,13 +4,11 @@ metadata:
   name: query-processor
   namespace: koopdb
 spec:
-  type: NodePort
   selector:
     app: query-processor
   ports:
   - port: 8080
     targetPort: 8080
-    nodePort: 30001
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -43,12 +41,10 @@ spec:
         # Always write to the primary pod; replicas are for durability, not read distribution
         - name: REDIS_URL
           value: "redis://redis-0.redis-headless.koopdb.svc.cluster.local:6379"
-        - name: POD_NAME
+        - name: NODE_IP
           valueFrom:
             fieldRef:
-              fieldPath: metadata.name
-        - name: NODE_IP
-          value: "$(POD_NAME)"
+              fieldPath: status.podIP
         readinessProbe:
           httpGet:
             path: /health

@@ -1,5 +1,14 @@
 #!/bin/bash
 # Build Docker images and import them into k3s (which uses containerd, not Docker daemon).
+# After running this script, apply manifests in order:
+#   kubectl apply -f k8s/00-namespace.yaml
+#   kubectl apply -f k8s/01-etcd.yaml
+#   kubectl apply -f k8s/02-kafka.yaml
+#   kubectl apply -f k8s/03-redis.yaml
+#   kubectl apply -f k8s/04-storage-nodes.yaml
+#   kubectl apply -f k8s/05-etcd-seeder.yaml
+#   kubectl apply -f k8s/06-query-processor.yaml
+#   kubectl apply -f k8s/07-nginx.yaml
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
