@@ -348,6 +348,50 @@ class MultipartUploadManagerTest {
         }
 
     @Test
+    void uploadPart_storageWorkerTimeout_returnsFailure() throws Exception {
+        when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
+                .thenThrow(new java.io.IOException("Connection timed out"));
+
+        String uploadId = manager.initiateMultipartUpload("bucket", "file");
+        byte[] payload = "data".getBytes(StandardCharsets.UTF_8);
+
+        MultipartUploadResult result = manager.uploadPart(
+                "bucket", "file", uploadId, 1,
+                new ByteArrayInputStream(payload), payload.length);
+
+        assertEquals(MultipartUploadResult.Status.STORAGE_FAILURE, result.status());
+        // Part reservation should be cleaned up after failure
+        assertTrue(cache.setMembers(MultipartUploadSession.partsKey(uploadId)).isEmpty()
+                || !cache.setMembers(MultipartUploadSession.partsKey(uploadId)).contains("1"));
+    }
+
+    @Test
+    void complete_commitTimeout_canRetry() throws Exception {
+        when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
+                .thenReturn(true);
+
+        String uploadId = manager.initiateMultipartUpload("bucket", "final-key");
+        byte[] p1 = "a".getBytes(StandardCharsets.UTF_8);
+        manager.uploadPart("bucket", "final-key", uploadId, 1, new ByteArrayInputStream(p1), p1.length);
+
+        reset(storageWorker);
+        // First call: simulate timeout (returns false), second call: succeeds
+        when(storageWorker.beginMultipartCommit(eq("bucket"), eq("final-key"), eq(uploadId), eq(List.of(
+                "bucket/" + MultipartUploadSession.partStorageKey("bucket", "final-key", uploadId, 1)))))
+                .thenReturn(false, true);
+
+        List<StorageService.CompletedPart> parts = List.of(new StorageService.CompletedPart(1));
+
+        MultipartUploadResult first = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+        assertEquals(MultipartUploadResult.Status.STORAGE_FAILURE, first.status(),
+                "should fail when multipart commit times out");
+
+        MultipartUploadResult second = manager.completeMultipartUpload("bucket", "final-key", uploadId, parts);
+        assertEquals(MultipartUploadResult.Status.SUCCESS, second.status(),
+                "should succeed on retry after timeout");
+    }
+
+    @Test
     void concurrent_twoPartsUploadedSimultaneously() throws Exception {
         when(storageWorker.put(any(UUID.class), anyString(), anyString(), anyLong(), any(InputStream.class)))
                 .thenReturn(true);

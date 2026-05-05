@@ -18,7 +18,7 @@ public class ErasureSetConfiguration {
     public static class ErasureSet {
         private int number;
         private int n;
-        private int k;
+        private int m;
         @JsonProperty("write_quorum")
         private int writeQuorum;
         private List<Machine> machines;
@@ -39,12 +39,17 @@ public class ErasureSetConfiguration {
             this.n = n;
         }
 
-        public int getK() {
-            return k;
+        public int getM() {
+            return m;
         }
 
-        public void setK(int k) {
-            this.k = k;
+        public void setM(int m) {
+            this.m = m;
+        }
+
+        /** Parity shard count, computed dynamically as {@code n - m}. */
+        public int getK() {
+            return n - m;
         }
 
         public int getWriteQuorum() {

@@ -308,7 +308,7 @@ public class StorageWorkerApiTest {
             boolean ok = quorumWorker.put(UUID.randomUUID(), "b", "quorumFail",
                     data.length, new ByteArrayInputStream(data));
             assertFalse(ok,
-                    "put should fail when only 6/9 nodes ACK the commit (writeQuorum=k+1=7)");
+                    "put should fail when only 6/9 nodes ACK the commit (writeQuorum=m+1=7)");
         } finally {
             quorumWorker.shutdown();
             for (AckingFakeStorageNodeServer n : quorumNodes) n.close();
@@ -499,9 +499,9 @@ public class StorageWorkerApiTest {
         bus.start();
         List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
         for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
-        bucketNodes.get(0).setEnabled(false);
-        bucketNodes.get(1).setEnabled(false);
-        bucketNodes.get(2).setEnabled(false);
+        // k = n - m = 9 - 6 = 3 parity shards; deleteQuorum = k + 1 = 4
+        // Disable 6 nodes so only 3 ACK (below quorum of 4)
+        for (int i = 0; i < 6; i++) bucketNodes.get(i).setEnabled(false);
         List<InetSocketAddress> set = bucketNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
 
         MetadataClient client = createConfiguredClient(set);
@@ -509,7 +509,7 @@ public class StorageWorkerApiTest {
         StorageWorker w = new StorageWorker(client, fastCoordinator);
         try {
             assertFalse(w.createBucket(UUID.randomUUID(), "no-quorum-bucket"),
-                    "createBucket should fail when only 6/9 nodes ACK");
+                    "createBucket should fail when only 3/9 nodes ACK (deleteQuorum=k+1=4)");
         } finally {
             w.shutdown();
             for (AckingFakeStorageNodeServer n : bucketNodes) n.close();
@@ -778,6 +778,101 @@ public class StorageWorkerApiTest {
     }
 
     // -------------------------------------------------------------------------
+    // Timeout and unresponsive node tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    void put_failsWhenCommitTimesOut() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> timeoutNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) timeoutNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = timeoutNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        // Disable all nodes so no ACKs arrive — commit should time out
+        for (AckingFakeStorageNodeServer n : timeoutNodes) n.setEnabled(false);
+        // Keep upload endpoints open so Phase 1 succeeds
+        for (AckingFakeStorageNodeServer n : timeoutNodes) n.setUploadEnabled(true);
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 2);
+        StorageWorker w = new StorageWorker(client, fastCoordinator);
+
+        try {
+            byte[] data = randomBytes(1024);
+            long start = System.currentTimeMillis();
+            boolean ok = w.put(UUID.randomUUID(), "b", "timeoutTest",
+                    data.length, new ByteArrayInputStream(data));
+            long elapsed = System.currentTimeMillis() - start;
+
+            assertFalse(ok, "put should fail when commit times out with no ACKs");
+            assertTrue(elapsed < 10_000,
+                    "should fail within reasonable time, not hang indefinitely (took " + elapsed + "ms)");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : timeoutNodes) n.close();
+        }
+    }
+
+    @Test
+    void delete_failsWhenBelowQuorum() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> deleteNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) deleteNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = deleteNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        // k = n - m = 3 parity; deleteQuorum = k + 1 = 4
+        // Disable 6 nodes → only 3 ACK → below quorum
+        for (int i = 0; i < 6; i++) deleteNodes.get(i).setEnabled(false);
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator fastCoordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 2);
+        StorageWorker w = new StorageWorker(client, fastCoordinator);
+
+        try {
+            assertFalse(w.delete(UUID.randomUUID(), "b", "deleteTimeout"),
+                    "delete should fail when only 3/9 nodes ACK (deleteQuorum=k+1=4)");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : deleteNodes) n.close();
+        }
+    }
+
+    @Test
+    void put_phase1FailsWhenAllNodesUnreachable() throws Exception {
+        PubSubClient bus = new PubSubClient(new MemoryPubSub());
+        bus.start();
+
+        List<AckingFakeStorageNodeServer> unreachableNodes = new ArrayList<>();
+        for (int i = 0; i < 9; i++) unreachableNodes.add(new AckingFakeStorageNodeServer(bus));
+        List<InetSocketAddress> set = unreachableNodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+
+        // Disable upload on all nodes so Phase 1 gets 0 shards uploaded
+        for (AckingFakeStorageNodeServer n : unreachableNodes) n.setUploadEnabled(false);
+
+        MetadataClient client = createConfiguredClient(set);
+        CommitCoordinator coordinator = new CommitCoordinator(bus, 0, /*timeoutSeconds=*/ 2);
+        StorageWorker w = new StorageWorker(client, coordinator);
+
+        try {
+            byte[] data = randomBytes(1024);
+            boolean ok = w.put(UUID.randomUUID(), "b", "phase1Fail",
+                    data.length, new ByteArrayInputStream(data));
+            assertFalse(ok,
+                    "put should fail in Phase 1 when no nodes accept shard uploads");
+        } finally {
+            w.shutdown();
+            for (AckingFakeStorageNodeServer n : unreachableNodes) n.close();
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -826,7 +921,7 @@ public class StorageWorkerApiTest {
         ErasureSet es = new ErasureSet();
         es.setNumber(number);
         es.setN(9);
-        es.setK(6);
+        es.setM(6);
         es.setWriteQuorum(7);
         es.setMachines(addresses.stream().map(addr -> {
             Machine m = new Machine();

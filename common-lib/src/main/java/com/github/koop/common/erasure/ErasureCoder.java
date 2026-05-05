@@ -13,24 +13,23 @@ import org.apache.logging.log4j.Logger;
 
 /**
  * Stateless erasure coding utility using Reed-Solomon with configurable
- * {@code k}-of-{@code n}
- * shard layouts.
+ * {@code m}-of-{@code n} shard layouts, where {@code m} is the number of
+ * data shards and {@code k = n - m} parity shards are computed dynamically.
  *
  * Sharding:
  * {@link #shard(InputStream, long, int, int)} splits a data stream into
  * {@code n} shard streams.
- * The first {@code k} shards are data shards; the remaining {@code n - k}
+ * The first {@code m} shards are data shards; the remaining {@code k}
  * shards are parity shards.
  * Each returned {@link InputStream} begins with an 8-byte original-length
- * prefix so the receiver
- * can trim padding on reconstruction.
+ * prefix so the receiver can trim padding on reconstruction.
  *
  * Reconstruction:
  * {@link #reconstruct(InputStream[], boolean[], int, int)} accepts up to
  * {@code n} shard streams
  * ({@code false} entries for missing shards) and returns the original data
  * stream.
- * At least {@code k} shards must be present.
+ * At least {@code m} shards must be present.
  */
 public final class ErasureCoder {
 
@@ -190,20 +189,20 @@ public final class ErasureCoder {
     // Sharding
     // -------------------------------------------------------------------------
 
-    public static InputStream[] shard(InputStream data, long length, int k, int n) throws IOException {
+    public static InputStream[] shard(InputStream data, long length, int m, int n) throws IOException {
         if (data == null)
             throw new IllegalArgumentException("data is null");
         if (length < 0)
             throw new IllegalArgumentException("length < 0");
-        if (k == 0)
-            throw new IllegalArgumentException("k must be > 0");
+        if (m == 0)
+            throw new IllegalArgumentException("m must be > 0");
         if (n == 0)
             throw new IllegalArgumentException("n must be > 0");
-        if (k > n)
-            throw new IllegalArgumentException("k must be <= n");
+        if (m > n)
+            throw new IllegalArgumentException("m must be <= n");
 
-        int m = n - k;
-        long numStripes = (length + (long) k * SHARD_SIZE - 1) / ((long) k * SHARD_SIZE);
+        int k = n - m;
+        long numStripes = (length + (long) m * SHARD_SIZE - 1) / ((long) m * SHARD_SIZE);
         // +2 accounts for the length-prefix chunk and the EOF marker so both fit
         // in the queue even before the consumer starts reading (avoids close() timeout
         // on zero- or single-stripe inputs).
@@ -226,8 +225,8 @@ public final class ErasureCoder {
                 for (int i = 0; i < n; i++)
                     pos[i].write(lenBytes);
 
-                ReedSolomon rs = ReedSolomon.create(k, m);
-                byte[] stripeBuf = new byte[k * SHARD_SIZE];
+                ReedSolomon rs = ReedSolomon.create(m, k);
+                byte[] stripeBuf = new byte[m * SHARD_SIZE];
                 long remaining = length;
                 boolean[] dead = new boolean[n];
 
@@ -243,7 +242,7 @@ public final class ErasureCoder {
                     // Allocate fresh arrays per stripe so each array can be enqueued
                     // directly without an extra copy inside the pipe.
                     byte[][] shards = new byte[n][SHARD_SIZE];
-                    for (int i = 0; i < k; i++) {
+                    for (int i = 0; i < m; i++) {
                         System.arraycopy(stripeBuf, i * SHARD_SIZE, shards[i], 0, SHARD_SIZE);
                     }
                     rs.encodeParity(shards, 0, SHARD_SIZE);
@@ -282,7 +281,7 @@ public final class ErasureCoder {
     // Reconstruction
     // -------------------------------------------------------------------------
 
-    public static InputStream reconstruct(InputStream[] shards, boolean[] present, int k, int n) throws IOException {
+    public static InputStream reconstruct(InputStream[] shards, boolean[] present, int m, int n) throws IOException {
         if (shards == null || shards.length != n)
             throw new IllegalArgumentException("shards must have length " + n);
         if (present == null || present.length != n)
@@ -292,17 +291,17 @@ public final class ErasureCoder {
         for (boolean b : present)
             if (b)
                 count++;
-        if (count < k)
-            throw new IllegalArgumentException("need at least " + k + " shards, got " + count);
+        if (count < m)
+            throw new IllegalArgumentException("need at least " + m + " shards, got " + count);
 
-        int m = n - k;
+        int k = n - m;
         DataInputStream[] dis = new DataInputStream[n];
         for (int i = 0; i < n; i++) {
             if (present[i])
                 dis[i] = new DataInputStream(new BufferedInputStream(shards[i]));
         }
 
-        ThreadSafePipe pipe = new ThreadSafePipe(4 * k);
+        ThreadSafePipe pipe = new ThreadSafePipe(4 * m);
         InputStream pis = pipe.in;
         OutputStream pos = pipe.out;
 
@@ -323,7 +322,7 @@ public final class ErasureCoder {
                         dis[i].readLong();
                 }
 
-                ReedSolomon rs = ReedSolomon.create(k, m);
+                ReedSolomon rs = ReedSolomon.create(m, k);
                 byte[][] stripe = new byte[n][SHARD_SIZE];
                 long remaining = originalLength;
 
@@ -335,9 +334,9 @@ public final class ErasureCoder {
 
                     rs.decodeMissing(stripe, pres, 0, SHARD_SIZE);
 
-                    int toWrite = (int) Math.min((long) k * SHARD_SIZE, remaining);
+                    int toWrite = (int) Math.min((long) m * SHARD_SIZE, remaining);
                     int left = toWrite;
-                    for (int i = 0; i < k && left > 0; i++) {
+                    for (int i = 0; i < m && left > 0; i++) {
                         int nBytes = Math.min(SHARD_SIZE, left);
                         pos.write(stripe[i], 0, nBytes);
                         left -= nBytes;
