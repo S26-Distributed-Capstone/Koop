@@ -10,8 +10,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.awaitility.Awaitility.await;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -342,24 +346,27 @@ class StorageNodeRepairTest {
             // Trigger COMMIT_MISS by processing sequencer message directly, without issuing PUT beforehand
             server.processSequencerMessage(partition, new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 100L);
 
-            // Verify completion by polling for a successful object payload
-            boolean repaired = false;
-            for (int i = 0; i < 50; i++) {
-                if (server.repairPendingCount() == 0) {
-                    HttpRequest getReq = HttpRequest.newBuilder()
-                            .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey))
-                            .GET()
-                            .build();
-                    HttpResponse<byte[]> res = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
-                    if (res.statusCode() == 200) {
-                        assertArrayEquals(shard0, res.body(), "Recovered shard should match original shard0 data");
-                        repaired = true;
-                        break;
-                    }
-                }
-                Thread.sleep(100);
-            }
-            assertTrue(repaired, "Node should have repaired the blob successfully by fetching and reconstructing from peers");
+            // Wait for repair queue to drain, then GET the recovered shard.
+            await()
+                .atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(100))
+                .until(() -> server.repairPendingCount() == 0);
+
+            HttpRequest getReq = HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey))
+                    .GET()
+                    .build();
+
+            AtomicReference<HttpResponse<byte[]>> resRef = new AtomicReference<>();
+            await()
+                .atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(100))
+                .until(() -> {
+                    HttpResponse<byte[]> r = http.send(getReq, HttpResponse.BodyHandlers.ofByteArray());
+                    resRef.set(r);
+                    return r.statusCode() == 200;
+                });
+            assertArrayEquals(shard0, resRef.get().body(), "Recovered shard should match original shard0 data");
 
         } finally {
             peer1.stop();
