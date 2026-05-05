@@ -304,7 +304,7 @@ class StorageNodeRepairTest {
             // Provide populated metadata once the server port has been determined
             var es = new ErasureSetConfiguration.ErasureSet();
             es.setNumber(1);
-            es.setK(k);
+            es.setM(k);
             es.setN(n);
             var m0 = new ErasureSetConfiguration.Machine(); m0.setIp("127.0.0.1"); m0.setPort(port);
             var m1 = new ErasureSetConfiguration.Machine(); m1.setIp("127.0.0.1"); m1.setPort(peer1.port());

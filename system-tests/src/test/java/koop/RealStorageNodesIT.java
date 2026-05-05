@@ -107,7 +107,7 @@ public class RealStorageNodesIT {
         ErasureSet es = new ErasureSet();
         es.setNumber(1);
         es.setN(9);
-        es.setK(6);
+        es.setM(6);
         es.setWriteQuorum(7);
 
         List<Machine> machines = new ArrayList<>();

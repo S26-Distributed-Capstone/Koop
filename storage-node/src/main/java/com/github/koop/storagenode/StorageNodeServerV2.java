@@ -440,7 +440,7 @@ public class StorageNodeServerV2 {
         ErasureSetConfiguration.ErasureSet es = esOpt.get();
         List<ErasureSetConfiguration.Machine> machines = es.getMachines();
         int n = es.getN();
-        int k = es.getK();
+        int m = es.getM();
 
         // 3. Determine this node's shard index (cached from last metadata update)
         int myIndex = this.myShardIndex;
@@ -479,13 +479,13 @@ public class StorageNodeServerV2 {
                 }
             }
 
-            if (fetched < k) {
-                logger.error("Repair failed: only {}/{} shards fetched for key={}", fetched, k, blobKey);
+            if (fetched < m) {
+                logger.error("Repair failed: only {}/{} shards fetched for key={}", fetched, m, blobKey);
                 return;
             }
 
             // 5. Reconstruct via erasure coding
-            try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, k, n)) {
+            try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, m, n)) {
                 // The reconstructed stream is the original data. We need to re-shard it
                 // to extract just our shard.
                 byte[] fullData = reconstructed.readAllBytes();
@@ -493,7 +493,7 @@ public class StorageNodeServerV2 {
                 // Re-shard to get this node's shard
                 InputStream[] resharded = ErasureCoder.shard(
                         new java.io.ByteArrayInputStream(fullData),
-                        fullData.length, k, n);
+                        fullData.length, m, n);
 
                 // Extract our shard
                 byte[] ourShard = resharded[myIndex].readAllBytes();

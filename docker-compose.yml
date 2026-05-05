@@ -132,7 +132,7 @@ services:
     command:
       - |
         sleep 5
-        etcdctl --endpoints=http://etcd1:2379 put erasure_set_configurations '{"erasure_sets":[{"number":1,"n":6,"k":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]},{"number":2,"n":6,"k":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]}]}'
+        etcdctl --endpoints=http://etcd1:2379 put erasure_set_configurations '{"erasure_sets":[{"number":1,"n":6,"m":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]},{"number":2,"n":6,"m":4,"write_quorum":5,"machines":[{"ip":"storage-node-1","port":8080},{"ip":"storage-node-2","port":8080},{"ip":"storage-node-3","port":8080},{"ip":"storage-node-4","port":8080},{"ip":"storage-node-5","port":8080},{"ip":"storage-node-6","port":8080}]}]}'
         etcdctl --endpoints=http://etcd1:2379 put partition_spread_configurations '{"partition_spread":[{"erasure_set":1,"partitions":[0,1,2]},{"erasure_set":2,"partitions":[3,4,5]}]}'
         echo "Etcd seeding complete"
 
