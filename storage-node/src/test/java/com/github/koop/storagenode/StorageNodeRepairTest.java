@@ -38,6 +38,7 @@ class StorageNodeRepairTest {
     private HttpClient http;
     private int port;
     private Database db;
+    private RocksDbRepairQueue repairQueue;
     private MetadataClient metadataClient;
     private MemoryFetcher fetcher;
     private PubSubClient pubSubClient;
@@ -49,7 +50,9 @@ class StorageNodeRepairTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        db = new Database(new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString()));
+        RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(tempDir.toAbsolutePath().toString());
+        repairQueue = new RocksDbRepairQueue(strategy);
+        db = new Database(strategy);
         fetcher = new MemoryFetcher();
         metadataClient = new MetadataClient(fetcher);
         pubSub = new MemoryPubSub();
@@ -91,7 +94,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testNodeServesTrafficImmediatelyAfterStart() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
 
@@ -108,7 +111,7 @@ class StorageNodeRepairTest {
     @Test
     void testExistingFunctionalityPreservedWithRepair() throws Exception {
         // Full PUT -> commit -> GET cycle should still work with repair infrastructure present
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
 
@@ -147,7 +150,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testCommitMissEnqueuesRepairWhenBlobAbsent() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
         // Deliver a commit message with no prior PUT — blob is not on disk
@@ -160,7 +163,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testNoRepairEnqueuedWhenBlobAlreadyMaterialized() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
 
@@ -189,7 +192,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testGetOnMissingBlobReturns404WithoutEnqueueingRepair() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
 
@@ -219,7 +222,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testDeleteMessageDoesNotEnqueueRepair() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
         server.processSequencerMessage(6,
@@ -231,7 +234,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testCreateBucketMessageDoesNotEnqueueRepair() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
         server.processSequencerMessage(7,
@@ -247,7 +250,7 @@ class StorageNodeRepairTest {
 
     @Test
     void testNewerCommitMissOverridesOlderForSameKey() throws Exception {
-        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+        server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
         // Two commits for the same key — second has higher seqNumber
@@ -297,7 +300,7 @@ class StorageNodeRepairTest {
 
         try {
             // Start node under test
-            server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient);
+            server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
             server.start();
             port = server.port();
 
