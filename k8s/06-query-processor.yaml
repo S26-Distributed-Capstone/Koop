@@ -25,6 +25,8 @@ spec:
       labels:
         app: query-processor
     spec:
+      nodeSelector:
+        koopdb/role: worker
       containers:
       - name: query-processor
         image: koopdb/query-processor:latest

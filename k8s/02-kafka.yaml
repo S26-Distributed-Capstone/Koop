@@ -46,6 +46,15 @@ spec:
       labels:
         app: kafka
     spec:
+      nodeSelector:
+        koopdb/role: cp
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
       containers:
       - name: kafka
         image: confluentinc/cp-kafka:7.7.8

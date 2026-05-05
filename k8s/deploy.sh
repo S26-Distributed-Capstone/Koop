@@ -1,36 +1,57 @@
 #!/bin/bash
-
-# Exit immediately if a command exits with a non-zero status
+# Labels nodes and applies k8s manifests to the cluster.
+#
+# Usage:
+#   ./deploy.sh
+#
+# Prerequisites:
+#   - k3s cluster already running
+#   - Images already pushed (run ./push-images.sh first)
+#   - sshpass installed locally
 set -e
 
-# Change to the directory where the script is located to ensure paths resolve correctly
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOSTS_FILE="${SCRIPT_DIR}/hosts.conf"
 
-echo "Starting KoopDB deployment..."
+SSH_PASS="sack"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-echo "Applying namespace..."
-kubectl apply -f 00-namespace.yaml
+do_ssh() {
+    sshpass -p "${SSH_PASS}" ssh ${SSH_OPTS} "$@"
+}
 
-echo "Deploying Etcd cluster..."
-kubectl apply -f 01-etcd.yaml
+do_scp() {
+    sshpass -p "${SSH_PASS}" scp ${SSH_OPTS} "$@"
+}
 
-# Pause to allow Etcd quorum to form before dependent services connect
-echo "Waiting 10 seconds for Etcd initialization..."
-sleep 10
+if [ ! -f "${HOSTS_FILE}" ]; then
+    echo "Error: ${HOSTS_FILE} not found."
+    exit 1
+fi
 
-echo "Deploying Kafka..."
-kubectl apply -f 02-kafka.yaml
+mapfile -t HOSTS < <(grep -v '^\s*#' "${HOSTS_FILE}" | grep -v '^\s*$')
 
-echo "Deploying Redis..."
-kubectl apply -f 03-redis.yaml
+if [ ${#HOSTS[@]} -eq 0 ]; then
+    echo "Error: No hosts found in ${HOSTS_FILE}."
+    exit 1
+fi
 
-echo "Deploying Storage Nodes..."
-kubectl apply -f 04-storage-nodes.yaml
+SERVER="${HOSTS[0]}"
 
-echo "Deploying Etcd Seeder..."
-kubectl apply -f 05-etcd-seeder.yaml
+echo "=== Labeling nodes ==="
+"${SCRIPT_DIR}/label-nodes.sh"
 
-echo "Deploying Query Processors..."
-kubectl apply -f 06-query-processor.yaml
+echo ""
+echo "=== Applying manifests from server node (${SERVER}) ==="
+do_ssh "${SERVER}" "mkdir -p /tmp/koopdb-k8s"
+do_scp -q "${SCRIPT_DIR}"/*.yaml "${SERVER}:/tmp/koopdb-k8s/"
 
-echo "Deployment sequence complete."
+do_ssh "${SERVER}" 'for f in $(ls /tmp/koopdb-k8s/*.yaml | sort); do
+    echo "  applying $(basename $f)..."
+    sudo k3s kubectl apply -f "$f"
+done
+rm -rf /tmp/koopdb-k8s'
+
+echo ""
+echo "=== Deploy complete ==="
+do_ssh "${SERVER}" "sudo k3s kubectl get pods -n koopdb -o wide"

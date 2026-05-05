@@ -29,6 +29,8 @@ spec:
       labels:
         app: storage-node
     spec:
+      nodeSelector:
+        koopdb/role: worker
       containers:
       - name: storage-node
         image: koopdb/storage-node:latest
