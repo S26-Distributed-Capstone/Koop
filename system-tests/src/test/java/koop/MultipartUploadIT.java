@@ -845,9 +845,11 @@ public class MultipartUploadIT {
                     "Part " + (i + 1) + " should succeed with healthy cluster");
         }
 
-        // Kill 4 nodes (more than erasure tolerance) — simulates "dies right here"
-        log("Killing 4 nodes mid-upload...");
-        stopNodes(0, 1, 2, 3);
+        // Kill 6 nodes (more than erasure tolerance) — simulates "dies right here"
+        // With k = n - m = 3 parity shards, multipart commit quorum = k + 1 = 4,
+        // so we need fewer than 4 alive nodes to block the commit.
+        log("Killing 6 nodes mid-upload...");
+        stopNodes(0, 1, 2, 3, 4, 5);
 
         // Attempt to upload part 3 — should fail due to insufficient nodes
         MultipartUploadResult r3 = multipartManager.uploadPart(
@@ -855,10 +857,10 @@ public class MultipartUploadIT {
                 new ByteArrayInputStream(partData[2]), partData[2].length);
         log("Part 3 after node failure: " + r3.status() + " - " + r3.message());
         assertFalse(r3.isSuccess(),
-                "Part upload should fail when nodes exceed erasure tolerance (4 of 9 down)");
+                "Part upload should fail when nodes exceed erasure tolerance (6 of 9 down)");
 
         // Completing with only the pre-failure parts should also fail since
-        // the cluster is degraded beyond tolerance
+        // the cluster is degraded beyond tolerance (3 alive < k+1=4 quorum)
         List<StorageService.CompletedPart> parts = List.of(
                 new StorageService.CompletedPart(1),
                 new StorageService.CompletedPart(2));
