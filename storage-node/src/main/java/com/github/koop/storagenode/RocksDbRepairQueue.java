@@ -36,6 +36,16 @@ public class RocksDbRepairQueue implements RepairQueue {
             long maxSeq = 0;
             while (it.isValid()) {
                 byte[] key = it.key();
+                if (key.length != 8) {
+                    logger.warn("Skipping repair queue entry with invalid key length={}", key.length);
+                    try {
+                        strategy.deleteRepairEntry(key);
+                    } catch (Exception de) {
+                        logger.warn("Failed to delete invalid-length entry", de);
+                    }
+                    it.next();
+                    continue;
+                }
                 long seq = ByteBuffer.wrap(key).getLong();
                 if (seq > maxSeq) {
                     maxSeq = seq;
@@ -126,7 +136,8 @@ public class RocksDbRepairQueue implements RepairQueue {
     }
 
     /**
-     * Returns all pending repair entries whose blobKey is not in the exclude set,
+     * Returns pending repair entries whose blobKey is not in the exclude set
+     * and whose rocksKey matches the current index entry (filtering stale rows),
      * in chronological order (oldest first).
      */
     public List<RepairEntry> pollAll(Set<String> excludeBlobKeys) {
@@ -134,6 +145,7 @@ public class RocksDbRepairQueue implements RepairQueue {
         try (RocksIterator it = strategy.newRepairQueueIterator()) {
             it.seekToFirst();
             while (it.isValid()) {
+                byte[] rocksKey = it.key();
                 RepairOperation op;
                 try {
                     op = RepairOperation.deserialize(it.value());
@@ -141,8 +153,20 @@ public class RocksDbRepairQueue implements RepairQueue {
                     it.next();
                     continue;
                 }
-                if (!excludeBlobKeys.contains(op.blobKey())) {
-                    entries.add(new RepairEntry(it.key().clone(), op));
+                if (excludeBlobKeys.contains(op.blobKey())) {
+                    it.next();
+                    continue;
+                }
+                PendingEntry current = blobKeyIndex.get(op.blobKey());
+                if (current != null && Arrays.equals(current.rocksKey(), rocksKey)) {
+                    entries.add(new RepairEntry(rocksKey.clone(), op));
+                } else if (current == null) {
+                    // Orphaned row — delete it
+                    try {
+                        strategy.deleteRepairEntry(rocksKey);
+                    } catch (Exception e) {
+                        logger.warn("Failed to delete orphaned repair entry for key={}", op.blobKey(), e);
+                    }
                 }
                 it.next();
             }

@@ -29,6 +29,7 @@ public class RepairWorkerPool {
     private static final Logger logger = LogManager.getLogger(RepairWorkerPool.class);
 
     static final long REPAIR_DELAY_MS = 2_000;
+    private static final int MAX_IN_FLIGHT = 32;
 
     private final RocksDbRepairQueue queue;
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
@@ -94,6 +95,10 @@ public class RepairWorkerPool {
         try {
             List<RocksDbRepairQueue.RepairEntry> entries = queue.pollAll(inFlight);
             for (var entry : entries) {
+                if (inFlight.size() >= MAX_IN_FLIGHT) {
+                    break;
+                }
+
                 RepairOperation op = entry.operation();
 
                 if (writeTracker.isActive(op.blobKey())) {
