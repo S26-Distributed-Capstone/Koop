@@ -285,8 +285,12 @@ public final class StorageWorker {
         ShardResponse representative = maxVersionResponses.get(0);
 
         if (representative.type() == ShardType.TOMBSTONE) {
-            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
-            throw new IOException("Object not found (deleted)");
+            // Reachable only via handleMultipartGet — a multipart chunk should never be
+            // independently tombstoned. The top-level get() handles tombstones at the
+            // object level and returns null before reaching here.
+            logger.error("Multipart chunk {} (version {}) is tombstoned — multipart object is corrupted.",
+                    storageKey, maxVersion);
+            throw new IOException("Multipart chunk " + storageKey + " is missing (tombstoned)");
         }
 
         if (representative.type() == ShardType.MULTIPART) {

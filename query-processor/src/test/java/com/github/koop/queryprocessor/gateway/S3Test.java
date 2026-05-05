@@ -1,5 +1,6 @@
 package com.github.koop.queryprocessor.gateway;
 
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageResult;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
@@ -126,7 +127,7 @@ class S3Test {
     @Test
     @Order(2)
     void sdkPutObject_returns200_noException() throws Exception {
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
 
         assertDoesNotThrow(() ->
             s3.putObject(
@@ -143,7 +144,7 @@ class S3Test {
     @Test
     @Order(3)
     void sdkPutObject_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
 
         s3.putObject(
                 PutObjectRequest.builder()
@@ -164,7 +165,7 @@ class S3Test {
         Files.write(tempFile, CONTENT_BYTES);
         long expectedLength = Files.size(tempFile);
 
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
 
         // Ensures the SDK maps the file size into Content-Length correctly, overriding chunking behavior if any
         s3.putObject(
@@ -289,7 +290,7 @@ class S3Test {
     @Test
     @Order(10)
     void sdkDeleteObject_returns204_noException() throws Exception {
-        doNothing().when(mockStorage).deleteObject(anyString(), anyString());
+        when(mockStorage.deleteObject(anyString(), anyString())).thenReturn(StorageResult.success());
 
         assertDoesNotThrow(() ->
                 s3.deleteObject(DeleteObjectRequest.builder()
@@ -302,7 +303,7 @@ class S3Test {
     @Test
     @Order(11)
     void sdkDeleteObject_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
-        doNothing().when(mockStorage).deleteObject(anyString(), anyString());
+        when(mockStorage.deleteObject(anyString(), anyString())).thenReturn(StorageResult.success());
 
         s3.deleteObject(DeleteObjectRequest.builder()
                 .bucket("videos")
@@ -333,11 +334,11 @@ class S3Test {
     void sdkFullLifecycle_putGetDelete() throws Exception {
         byte[] data = "lifecycle-test-data".getBytes(StandardCharsets.UTF_8);
 
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
         when(mockStorage.getObject(BUCKET, "lifecycle.bin"))
                 .thenReturn(new ByteArrayInputStream(data))
                 .thenReturn(null);
-        doNothing().when(mockStorage).deleteObject(anyString(), anyString());
+        when(mockStorage.deleteObject(anyString(), anyString())).thenReturn(StorageResult.success());
 
         // PUT
         assertDoesNotThrow(() -> 
@@ -418,7 +419,7 @@ class S3Test {
         byte[] streamData = "data from an input stream".getBytes(StandardCharsets.UTF_8);
         long expectedLength = streamData.length;
 
-        doNothing().when(mockStorage).putObject(anyString(), anyString(), any(), anyLong());
+        when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
 
         // Use RequestBody.fromInputStream and explicitly pass the length
         assertDoesNotThrow(() ->
@@ -440,7 +441,7 @@ class S3Test {
     @Test
     @Order(16)
     void sdkCreateBucket_returns200_noException() throws Exception {
-        doNothing().when(mockStorage).createBucket(anyString());
+        when(mockStorage.createBucket(anyString())).thenReturn(StorageResult.success());
 
         assertDoesNotThrow(() ->
                 s3.createBucket(CreateBucketRequest.builder()
@@ -452,7 +453,7 @@ class S3Test {
     @Test
     @Order(17)
     void sdkCreateBucket_delegatesCorrectBucketName_toStorageService() throws Exception {
-        doNothing().when(mockStorage).createBucket(anyString());
+        when(mockStorage.createBucket(anyString())).thenReturn(StorageResult.success());
 
         s3.createBucket(CreateBucketRequest.builder().bucket("my-new-bucket").build());
 
@@ -473,7 +474,7 @@ class S3Test {
     @Test
     @Order(19)
     void sdkDeleteBucket_returns204_noException() throws Exception {
-        doNothing().when(mockStorage).deleteBucket(anyString());
+        when(mockStorage.deleteBucket(anyString())).thenReturn(StorageResult.success());
 
         assertDoesNotThrow(() ->
                 s3.deleteBucket(DeleteBucketRequest.builder()
@@ -485,7 +486,7 @@ class S3Test {
     @Test
     @Order(20)
     void sdkDeleteBucket_delegatesCorrectBucketName_toStorageService() throws Exception {
-        doNothing().when(mockStorage).deleteBucket(anyString());
+        when(mockStorage.deleteBucket(anyString())).thenReturn(StorageResult.success());
 
         s3.deleteBucket(DeleteBucketRequest.builder().bucket("old-bucket").build());
 

@@ -9,14 +9,14 @@ public interface StorageService {
 
     // ─── Object Operations ────────────────────────────────────────────────────
 
-    void putObject(String bucket, String key, InputStream data, long length) throws Exception;
+    StorageResult putObject(String bucket, String key, InputStream data, long length) throws Exception;
     InputStream getObject(String bucket, String key) throws Exception;
-    void deleteObject(String bucket, String key) throws Exception;
+    StorageResult deleteObject(String bucket, String key) throws Exception;
 
     // ─── Bucket Operations ────────────────────────────────────────────────────
 
-    void createBucket(String bucket) throws Exception;
-    void deleteBucket(String bucket) throws Exception;
+    StorageResult createBucket(String bucket) throws Exception;
+    StorageResult deleteBucket(String bucket) throws Exception;
 
     /**
      * Returns a list of object summaries in the bucket.
