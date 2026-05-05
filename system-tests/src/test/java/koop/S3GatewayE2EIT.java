@@ -15,6 +15,7 @@ import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerServi
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
+import com.github.koop.storagenode.RocksDbRepairQueue;
 import com.github.koop.storagenode.StorageNodeServerV2;
 import com.github.koop.storagenode.db.Database;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
@@ -117,10 +118,12 @@ public class S3GatewayE2EIT {
             int port = freePort();
             Path dir = Files.createTempDirectory("e2e-storagenode-" + i + "-");
 
-            Database db = new Database(new RocksDbStorageStrategy(dir.resolve("db").toString()));
+            RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(dir.resolve("db").toString());
+            RocksDbRepairQueue repairQueue = new RocksDbRepairQueue(strategy);
+            Database db = new Database(strategy);
             StorageNodeServerV2 server =
                     new StorageNodeServerV2(port, "127.0.0.1", db, dir.resolve("data"),
-                            sharedMetadataClient, sharedPubSubClient);
+                            sharedMetadataClient, sharedPubSubClient, repairQueue);
 
             servers.add(server);
             dataDirs.add(dir);
@@ -135,7 +138,7 @@ public class S3GatewayE2EIT {
         ErasureSet es = new ErasureSet();
         es.setNumber(1);
         es.setN(9);
-        es.setK(6);
+        es.setM(6);
         es.setWriteQuorum(7);
         List<Machine> machines = new ArrayList<>();
         for (InetSocketAddress addr : addrs) {

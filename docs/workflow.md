@@ -29,7 +29,7 @@ This document displays the **planned target-state** workflow diagrams for each s
 
 ## System Component Overview
 
-The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to 9 storage nodes per erasure set. Kafka (pub/sub) provides per-partition sequencing for write/delete and multipart commit ordering. Redis (or an in-memory [`MemoryCacheClient`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java) in dev/test) is used by the Query Processor for multipart upload session tracking. Storage nodes persist shard data to disk and maintain operation metadata in RocksDB through [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java), [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java), and [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java).
+The following diagram shows the high-level components involved in every workflow. Each request enters through the S3-compatible HTTP gateway ([`Main.java`](../query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java)), is processed by the [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java), and is fanned out to the storage nodes in the target erasure set. Kafka (pub/sub) provides per-partition sequencing for write/delete and multipart commit ordering — commit messages are published to a partition-keyed topic so that all storage nodes in the erasure set apply mutations for a given partition in the same order. Redis (or an in-memory [`MemoryCacheClient`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java) in dev/test) is used by the Query Processor for multipart upload session tracking. Storage nodes persist shard data to disk and maintain operation metadata in RocksDB through [`StorageNodeServer`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServer.java), [`StorageNodeV2`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java), and [`Database`](../storage-node/src/main/java/com/github/koop/storagenode/db/Database.java).
 
 ![System Container Overview](diagrams/Containers.svg)
 
@@ -115,7 +115,7 @@ sequenceDiagram
 
 ### Conflicting Versions
 
-When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum (6/9) of nodes agree on. If no version reaches quorum, the operation fails immediately — the system does **not** wait for stabilization.
+When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum (6/9) of nodes agree on. If no version reaches quorum, the operation fails immediately with `500 InternalError` — the system does **not** wait for stabilization.
 
 ```mermaid
 flowchart TD

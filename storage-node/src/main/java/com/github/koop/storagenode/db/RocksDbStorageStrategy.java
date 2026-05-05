@@ -17,6 +17,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     private final ColumnFamilyHandle metaHandle;
     private final ColumnFamilyHandle bucketsHandle;
     private final ColumnFamilyHandle uncommittedHandle;
+    private final ColumnFamilyHandle repairQueueHandle;
     private volatile boolean closed = false;
 
     public RocksDbStorageStrategy(String dbPath) throws RocksDBException {
@@ -27,7 +28,8 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor("op_log".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("metadata".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("uncommitted_writes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
+                new ColumnFamilyDescriptor("uncommitted_writes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
+                new ColumnFamilyDescriptor("repair_queue".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
         try (DBOptions options = new DBOptions()
@@ -40,6 +42,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             metaHandle        = handles.get(2);
             bucketsHandle     = handles.get(3);
             uncommittedHandle = handles.get(4);
+            repairQueueHandle = handles.get(5);
         }
     }
 
@@ -55,6 +58,20 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         byte[] key = requestId.getBytes(StandardCharsets.UTF_8);
         byte[] val = ByteBuffer.allocate(8).putLong(timestamp).array();
         txnDb.put(uncommittedHandle, key, val);
+    }
+
+    // --- Repair Queue ---
+
+    public void putRepairEntry(byte[] key, byte[] value) throws RocksDBException {
+        txnDb.put(repairQueueHandle, key, value);
+    }
+
+    public void deleteRepairEntry(byte[] key) throws RocksDBException {
+        txnDb.delete(repairQueueHandle, key);
+    }
+
+    public RocksIterator newRepairQueueIterator() {
+        return txnDb.newIterator(repairQueueHandle);
     }
 
     @Override

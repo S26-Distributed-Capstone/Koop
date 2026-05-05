@@ -11,7 +11,7 @@ KoopDB implements a scalable architecture with the following core components:
 - **Query Processor (API Gateway)**: Exposes S3-compatible HTTP endpoints, handles request routing, orchestrates erasure coding, and manages multipart upload state via a cache abstraction layer.
 - **Storage Node**: Backend storage servers responsible for persistent shard storage, versioning, and fault tolerance.
 - **Common Libraries**: Shared classes for partition placement, replica sets, erasure configuration, pub/sub, and metadata fetching.
-- **Cluster Coordination**: Uses etcd for membership/discovery and Redis (planned; stub implemented) as a distributed cache for multipart upload state in multi-QP deployments.
+- **Cluster Coordination**: Uses etcd for cluster topology and erasure-set configuration, Redis as the distributed cache for multipart upload session state, and Kafka as the per-partition sequencer / pub-sub bus for ordered commit messages.
 
 The system uses Reed-Solomon erasure coding (default 6 data + 3 parity shards), tolerating up to 3 concurrent node failures.
 
@@ -43,11 +43,13 @@ The system uses Reed-Solomon erasure coding (default 6 data + 3 parity shards), 
 │   - Partitioning    │
 └────────┬────────────┘
          │
-   ┌─────┴──────┬───────┐
-   ▼            ▼       ▼
- ETCD      Redis      Disk
- Cluster   Cache     Storage
+   ┌─────┼─────────┬────────┬────────┐
+   ▼     ▼         ▼        ▼        ▼
+ ETCD  Kafka     Redis    Disk     RocksDB
+ Cluster (seq.)  (cache)  Storage  (metadata)
 ```
+
+Kafka carries ordered commit messages (`PutMessage`, `DeleteMessage`, `CreateBucketMessage`, `DeleteBucketMessage`, `MultipartCommitMessage`) from Query Processors to Storage Nodes, providing per-partition sequencing.
 
 Storage nodes expose a simple HTTP shard API (Javalin + virtual threads):
 - `PUT /store/{partition}/{key}?requestId=...` — store a shard
@@ -70,7 +72,7 @@ Client → Main.java (Javalin Gateway)
 ### Design Features
 
 - **S3-Compatible API**: Full PUT, GET, DELETE, HEAD, ListObjectsV2, and multipart upload (initiate/upload/complete/abort).
-- **Multipart Upload**: Complete implementation in the Query Processor layer — session state tracked via `CacheClient` abstraction; `MemoryCacheClient` for dev/test, `RedisCacheClient` stub for future multi-QP production use.
+- **Multipart Upload**: Complete implementation in the Query Processor layer — session state tracked via `CacheClient` abstraction; `MemoryCacheClient` for dev/test, `RedisCacheClient` for production multi-QP deployments.
 - **Erasure Coding**: Reed-Solomon encoding (6 data + 3 parity shards; configurable) for data durability and efficiency.
 - **Zero-Copy Streaming**: Serves large objects with high throughput using Java 21 virtual threads; shards are streamed directly to storage nodes without buffering.
 - **HTTP Shard Transport**: Query Processor communicates with storage nodes over HTTP using `java.net.http.HttpClient` with virtual-thread executor; storage nodes run Javalin.
@@ -88,7 +90,7 @@ Client → Main.java (Javalin Gateway)
 - **Erasure Coding**: Backblaze Reed-Solomon Java implementation
 - **Build**: Maven
 - **Containerization**: Docker, Docker Compose
-- **Coordination**: etcd (cluster discovery), Redis (cache — stub implemented, integration pending)
+- **Coordination**: etcd (3-node quorum, cluster topology + erasure config), Kafka (per-partition commit-message sequencer), Redis (multipart upload session cache)
 
 ---
 
@@ -119,8 +121,9 @@ curl http://localhost:9001/health
 
 - Query Processor HTTP: 9001, 9002, 9003
 - Storage Node HTTP: 8001–8009 (9-node erasure set)
+- Kafka: 9092
 - Redis: 6379
-- etcd: 2379 (client), 2380 (peer)
+- etcd: 2379 (client), 2380 (peer) — 3-node quorum (`etcd1`, `etcd2`, `etcd3`)
 
 ---
 
@@ -201,34 +204,42 @@ curl http://localhost:9001/health
 Implements:
 - S3-compatible REST endpoints (full route map in [`Main.java`](query-processor/src/main/java/com/github/koop/queryprocessor/gateway/Main.java))
 - Reed-Solomon erasure coding (encoding/decoding) via [`StorageWorker`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java)
+- Kafka-sequenced commit publishing (PUT, DELETE, CreateBucket, DeleteBucket, MultipartCommit) via [`CommitCoordinator`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/CommitCoordinator.java)
 - Multipart upload lifecycle (initiate/upload/complete/abort) via [`MultipartUploadManager`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/MultipartUploadManager.java)
-- Cache abstraction for multipart session state ([`CacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/CacheClient.java), [`MemoryCacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java), [`RedisCacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/RedisCacheClient.java) stub)
+- Cache abstraction for multipart session state ([`CacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/CacheClient.java), [`MemoryCacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/MemoryCacheClient.java), [`RedisCacheClient`](query-processor/src/main/java/com/github/koop/queryprocessor/processor/cache/RedisCacheClient.java))
 - HTTP shard dispatch to storage nodes via `java.net.http.HttpClient` (virtual-thread executor)
 - Stripe-based distribution (1 MB shards)
 
 **Main environment variables:**
 - `APP_PORT`: HTTP port (default: 8080)
-- `ETCD_ENDPOINTS`: etcd endpoints
-- `STORAGE_NODE_URL`: storage node URL(s)
+- `ETCD_URL`: etcd endpoint (e.g. `http://etcd1:2379`)
+- `KAFKA_BOOTSTRAP_SERVERS`: Kafka bootstrap servers (e.g. `kafka:9092`)
+- `REDIS_URL`: Redis URL (e.g. `redis://redis-master:6379`)
+- `STORAGE_NODE_URL`: storage node URL used during initial bootstrap
+- `NODE_IP`: this QP's identity for logging/metrics
 
 ### Storage Node
 
 Handles:
-- HTTP shard API over Javalin + virtual threads (`PUT/GET/DELETE /store/{partition}/{key}`)
-- Disk-based object storage with versioning via RocksDB ([`RocksDbStorageStrategy`](storage-node/src/main/java/com/github/koop/storagenode/db/RocksDbStorageStrategy.java)) or in-memory ([`InMemoryStorageStrategy`](storage-node/src/main/java/com/github/koop/storagenode/db/InMemoryStorageStrategy.java))
-- Partition organization and atomic updates with retry logic
-- Operation log ([`OpLog`](storage-node/src/main/java/com/github/koop/storagenode/db/OpLog.java)) for durability
+- HTTP shard API over Javalin + virtual threads (`PUT/GET/DELETE /store/{partition}/{key}`) via [`StorageNodeServerV2`](storage-node/src/main/java/com/github/koop/storagenode/StorageNodeServerV2.java) and [`StorageNodeV2`](storage-node/src/main/java/com/github/koop/storagenode/StorageNodeV2.java)
+- Kafka consumer that applies ordered commit messages (PUT / DELETE / bucket / multipart) to RocksDB atomically
+- Disk-based shard storage and metadata via the RocksDB-backed [`Database`](storage-node/src/main/java/com/github/koop/storagenode/db/Database.java) (OpLog, Metadata, Bucket tables) and [`RocksDbStorageStrategy`](storage-node/src/main/java/com/github/koop/storagenode/db/RocksDbStorageStrategy.java)
+- Operation log ([`OpLog`](storage-node/src/main/java/com/github/koop/storagenode/db/OpLog.java)) for ordering and repair
+- Background repair via [`RepairWorkerPool`](storage-node/src/main/java/com/github/koop/storagenode/RepairWorkerPool.java) which detects sequence gaps and replays missed operations from peers
 
 **Main environment variables:**
-- `PORT`: TCP port (default: 8080)
-- `STORAGE_DIR`: Storage path (default: `./storage`)
-- `ETCD_ENDPOINTS`, `REDIS_URL`
+- `APP_PORT`: HTTP port (default: 8080)
+- `ETCD_URL`: etcd endpoint
+- `REDIS_URL`: Redis URL
+- `KAFKA_BOOTSTRAP_SERVERS`: Kafka bootstrap servers
+- `NODE_IP`: this node's identity / advertised hostname
 
 ### Common Libraries
 
 - [`ErasureCoder`](common-lib/src/main/java/com/github/koop/common/erasure/ErasureCoder.java): Reed-Solomon encode/decode
 - [`MetadataClient`](common-lib/src/main/java/com/github/koop/common/metadata/MetadataClient.java): cluster metadata with etcd ([`EtcdFetcher`](common-lib/src/main/java/com/github/koop/common/metadata/EtcdFetcher.java)) and in-memory ([`MemoryFetcher`](common-lib/src/main/java/com/github/koop/common/metadata/MemoryFetcher.java)) backends
-- [`PubSubClient`](common-lib/src/main/java/com/github/koop/common/pubsub/PubSubClient.java): pub/sub abstraction with [`MemoryPubSub`](common-lib/src/main/java/com/github/koop/common/pubsub/MemoryPubSub.java) implementation
+- [`PubSubClient`](common-lib/src/main/java/com/github/koop/common/pubsub/PubSubClient.java): pub/sub abstraction with [`KafkaPubSub`](common-lib/src/main/java/com/github/koop/common/pubsub/KafkaPubSub.java) (production) and [`MemoryPubSub`](common-lib/src/main/java/com/github/koop/common/pubsub/MemoryPubSub.java) (dev/test) implementations
+- [`ErasureRouting`](common-lib/src/main/java/com/github/koop/common/metadata/ErasureRouting.java): partition → erasure-set resolution
 - [`PartitionSpreadConfiguration`](common-lib/src/main/java/com/github/koop/common/metadata/PartitionSpreadConfiguration.java), [`ReplicaSetConfiguration`](common-lib/src/main/java/com/github/koop/common/metadata/ReplicaSetConfiguration.java): cluster topology configuration
 
 ---
@@ -278,7 +289,7 @@ cd system-tests && mvn test
 ```bash
 cd query-processor
 mvn clean package
-java -jar target/query-processor-1-jar-with-dependencies.jar
+java -jar target/query-processor-1.0-jar-with-dependencies.jar
 ```
 
 **Storage Node**
@@ -286,19 +297,23 @@ java -jar target/query-processor-1-jar-with-dependencies.jar
 ```bash
 cd storage-node
 mvn clean package
-java -jar target/storage-node-1.0.0-SNAPSHOT-jar-with-dependencies.jar
+java -jar target/storage-node-1.0-jar-with-dependencies.jar
 ```
+
+The Docker images use the slim `query-processor-1.0.jar` / `storage-node-1.0.jar` artifacts; the `-jar-with-dependencies` JARs are for running standalone outside Docker.
 
 ### Directory Structure
 
 ```
 Koop/
 ├── docker-compose.yml
-├── common-lib/                          # Shared code (erasure, metadata, pub/sub)
+├── common-lib/                          # Shared code (erasure, metadata, pub/sub, messages)
 │   └── src/main/java/com/github/koop/common/
-│       ├── erasure/ErasureCoder.java
-│       ├── metadata/                    # MetadataClient, EtcdFetcher, MemoryFetcher
-│       └── pubsub/                      # PubSubClient, MemoryPubSub
+│       ├── erasure/                     # ErasureCoder
+│       ├── metadata/                    # MetadataClient, EtcdFetcher, MemoryFetcher,
+│       │                                #   ErasureRouting, PartitionSpread/ReplicaSet configs
+│       ├── messages/                    # Message types (Put/Delete/Bucket/MultipartCommit)
+│       └── pubsub/                      # PubSubClient, KafkaPubSub, MemoryPubSub
 ├── query-processor/                     # API Gateway + Query Processor
 │   ├── Dockerfile
 │   ├── pom.xml
@@ -309,18 +324,17 @@ Koop/
 │       │   │   └── StorageServices/
 │       │   │       ├── StorageService.java          # Interface
 │       │   │       ├── StorageWorkerService.java    # Production impl
-│       │   │       ├── HttpStorageService.java
-│       │   │       ├── LocalFileStorage.java
-│       │   │       └── TcpStorageService.java
+│       │   │       └── LocalFileStorage.java        # Local-only dev impl
 │       │   └── processor/
-│       │       ├── StorageWorker.java               # Erasure + node I/O
-│       │       ├── ErasureRouting.java
+│       │       ├── StorageWorker.java               # Erasure + HTTP shard I/O
+│       │       ├── CommitCoordinator.java           # Kafka commit-message publisher
 │       │       ├── MultipartUploadManager.java      # Multipart lifecycle
+│       │       ├── MultipartUploadResult.java
 │       │       └── cache/
 │       │           ├── CacheClient.java             # Interface (KV + set ops)
 │       │           ├── MemoryCacheClient.java       # In-memory (dev/test)
 │       │           ├── MultipartUploadSession.java  # Session record + cache keys
-│       │           └── RedisCacheClient.java        # Production stub
+│       │           └── RedisCacheClient.java        # Production Redis backend
 │       └── test/
 │           ├── gateway/S3Test.java
 │           └── processor/
@@ -332,9 +346,14 @@ Koop/
 │   ├── Dockerfile
 │   └── src/
 │       ├── main/java/com/github/koop/storagenode/
-│       │   ├── StorageNodeServer.java
-│       │   ├── StorageNode.java
-│       │   └── db/                      # RocksDB + in-memory strategies
+│       │   ├── StorageNodeServerV2.java # Javalin shard API + Kafka consumer wiring
+│       │   ├── StorageNodeV2.java       # Shard write/read + commit application
+│       │   ├── RepairWorkerPool.java    # Sequence-gap detection + peer replay
+│       │   ├── RepairQueue.java
+│       │   ├── RepairOperation.java
+│       │   ├── BlobRepairStrategy.java
+│       │   ├── WriteTracker.java
+│       │   └── db/                      # RocksDB-backed Database, OpLog, Metadata, Buckets
 │       └── test/
 └── system-tests/                        # Full cluster integration tests
     └── src/test/java/koop/
@@ -350,9 +369,11 @@ Deployed via Docker Compose with service discovery:
 - 3 Query Processor replicas (default)
 - 9 Storage Node replicas (6 data + 3 parity; expandable with config changes)
 - 3-node etcd quorum
+- 1 Kafka broker (KRaft mode)
 - 1 Redis instance
+- 1 one-shot `etcd-seeder` job that writes `erasure_set_configurations` and `partition_spread_configurations` into etcd at startup
 
-Expand node count and replica sets by modifying configs in `common-lib/`.
+Expand node count and replica sets by editing the seeded values in the `etcd-seeder` block of `docker-compose.yml`.
 
 ---
 

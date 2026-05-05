@@ -42,16 +42,14 @@ public class StorageWorkerService implements StorageService {
     }
 
     @Override
-    public void putObject(String bucket, String key, InputStream data, long length) throws Exception {
-        // Generate a unique request ID for this operation
+    public StorageResult putObject(String bucket, String key, InputStream data, long length) throws Exception {
         UUID requestId = UUID.randomUUID();
-        
-        // Execute directly in the calling thread (Javalin's virtual thread)
         boolean success = storageWorker.put(requestId, bucket, key, length, data);
-        
         if (!success) {
-            throw new RuntimeException("StorageWorker failed to store object");
+            return StorageResult.failure("ServiceUnavailable",
+                    "Storage backend could not reach quorum for PutObject. Please try again.", 503);
         }
+        return StorageResult.success();
     }
 
     @Override
@@ -65,34 +63,36 @@ public class StorageWorkerService implements StorageService {
     }
 
     @Override
-    public void deleteObject(String bucket, String key) throws Exception {
-        // Generate a unique request ID for this operation
+    public StorageResult deleteObject(String bucket, String key) throws Exception {
         UUID requestId = UUID.randomUUID();
-        
-        // Execute directly in the calling thread (Javalin's virtual thread)
         boolean success = storageWorker.delete(requestId, bucket, key);
-        
         if (!success) {
-            throw new RuntimeException("StorageWorker failed to delete object");
+            return StorageResult.failure("ServiceUnavailable",
+                    "Storage backend could not reach quorum for DeleteObject. Please try again.", 503);
         }
+        return StorageResult.success();
     }
 
     @Override
-    public void createBucket(String bucket) throws Exception {
+    public StorageResult createBucket(String bucket) throws Exception {
         UUID requestId = UUID.randomUUID();
         boolean success = storageWorker.createBucket(requestId, bucket);
         if (!success) {
-            throw new RuntimeException("StorageWorker failed to create bucket");
+            return StorageResult.failure("ServiceUnavailable",
+                    "Storage backend could not reach quorum for CreateBucket. Please try again.", 503);
         }
+        return StorageResult.success();
     }
 
     @Override
-    public void deleteBucket(String bucket) throws Exception {
+    public StorageResult deleteBucket(String bucket) throws Exception {
         UUID requestId = UUID.randomUUID();
         boolean success = storageWorker.deleteBucket(requestId, bucket);
         if (!success) {
-            throw new RuntimeException("StorageWorker failed to delete bucket");
+            return StorageResult.failure("ServiceUnavailable",
+                    "Storage backend could not reach quorum for DeleteBucket. Please try again.", 503);
         }
+        return StorageResult.success();
     }
 
     @Override
