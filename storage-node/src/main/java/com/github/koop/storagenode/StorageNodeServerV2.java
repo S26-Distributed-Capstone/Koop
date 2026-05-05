@@ -32,6 +32,8 @@ import com.github.koop.common.messages.Message;
 import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.github.koop.storagenode.db.Database;
+import com.github.koop.storagenode.db.Metadata;
+import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -44,6 +46,7 @@ public class StorageNodeServerV2 {
     private final MetadataClient metadataClient;
     private final PubSubClient pubSubClient;
     private final RepairWorkerPool repairWorkerPool;
+    private final RocksDbRepairQueue repairQueue;
     private final Database db;
 
     private Javalin app;
@@ -61,14 +64,13 @@ public class StorageNodeServerV2 {
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient) {
+            PubSubClient pubSubClient, RocksDbRepairQueue repairQueue) {
         this.port = port;
         this.ip = ip;
         this.db = db;
+        this.repairQueue = repairQueue;
         WriteTracker writeTracker = new WriteTracker();
-        // Lambda captures 'this' — storageNode/config are dereferenced at call time,
-        // not at construction time, so there is no circular dependency.
-        this.repairWorkerPool = new RepairWorkerPool(writeTracker, this::repairBlob);
+        this.repairWorkerPool = new RepairWorkerPool(repairQueue, writeTracker, this::repairBlob);
         this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
@@ -94,9 +96,12 @@ public class StorageNodeServerV2 {
         }
 
         Database db;
+        RocksDbRepairQueue repairQueue;
         try {
             String dbPath = storagePath.resolve("rocksdb").toString();
-            db = new Database(new RocksDbStorageStrategy(dbPath));
+            RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(dbPath);
+            repairQueue = new RocksDbRepairQueue(strategy);
+            db = new Database(strategy);
             logger.info("RocksDB opened at {}", dbPath);
         } catch (Exception e) {
             e.printStackTrace(System.err);
@@ -132,11 +137,16 @@ public class StorageNodeServerV2 {
         logger.info(">>> PubSubClient started");
 
 
-        StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient);
+        StorageNodeServerV2 server = new StorageNodeServerV2(port, ip, db, storagePath, metadataClient, pubSubClient, repairQueue);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info("Shutting down server...");
             server.stop();
+            try {
+                db.close();
+            } catch (Exception e) {
+                logger.error("Failed to close database", e);
+            }
         }));
 
         server.start();
@@ -351,7 +361,7 @@ public class StorageNodeServerV2 {
                     String fullKey = buildKey(m.bucket(), m.key());
                     boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
                     if (!materialized) {
-                        repairWorkerPool.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
+                        repairQueue.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
                     }
                     requestId = m.requestID();
                     logger.info("Committed file: {}", fullKey);
@@ -438,7 +448,7 @@ public class StorageNodeServerV2 {
         ErasureSetConfiguration.ErasureSet es = esOpt.get();
         List<ErasureSetConfiguration.Machine> machines = es.getMachines();
         int n = es.getN();
-        int k = es.getK();
+        int m = es.getM();
 
         // 3. Determine this node's shard index (cached from last metadata update)
         int myIndex = this.myShardIndex;
@@ -477,13 +487,13 @@ public class StorageNodeServerV2 {
                 }
             }
 
-            if (fetched < k) {
-                logger.error("Repair failed: only {}/{} shards fetched for key={}", fetched, k, blobKey);
+            if (fetched < m) {
+                logger.error("Repair failed: only {}/{} shards fetched for key={}", fetched, m, blobKey);
                 return;
             }
 
             // 5. Reconstruct via erasure coding
-            try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, k, n)) {
+            try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, m, n)) {
                 // The reconstructed stream is the original data. We need to re-shard it
                 // to extract just our shard.
                 byte[] fullData = reconstructed.readAllBytes();
@@ -491,7 +501,7 @@ public class StorageNodeServerV2 {
                 // Re-shard to get this node's shard
                 InputStream[] resharded = ErasureCoder.shard(
                         new java.io.ByteArrayInputStream(fullData),
-                        fullData.length, k, n);
+                        fullData.length, m, n);
 
                 // Extract our shard
                 byte[] ourShard = resharded[myIndex].readAllBytes();
@@ -590,6 +600,68 @@ public class StorageNodeServerV2 {
         return bucket + "/" + key;
     }
 
+    // ─── Bucket query handlers ────────────────────────────────────────────────
+
+    private void handleHeadBucket(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            boolean exists = storageNode.bucketExists(bucket);
+            ctx.status(exists ? 200 : 404);
+        } catch (Exception e) {
+            logger.error("Error handling HEAD /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+    private void handleListObjects(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            String prefix = ctx.queryParam("prefix");
+            String maxKeysParam = ctx.queryParam("maxKeys");
+            int maxKeys = (maxKeysParam != null) ? Integer.parseInt(maxKeysParam) : 1000;
+
+            if (maxKeys < 0) {
+                ctx.status(400).result("maxKeys must be non-negative");
+                return;
+            }
+
+            // Return 404 if the bucket doesn't exist (matches HEAD semantics and S3 behavior)
+            if (!storageNode.bucketExists(bucket)) {
+                ctx.status(404);
+                return;
+            }
+
+            // Prefix scan: bucket + "/" ensures we only get objects inside this bucket
+            String scanPrefix = bucket + "/";
+            if (prefix != null && !prefix.isEmpty()) {
+                scanPrefix = bucket + "/" + prefix;
+            }
+
+            // try-with-resources closes the underlying RocksDB iterator
+            List<Map<String, String>> items;
+            try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
+                items = stream
+                        .filter(m -> {
+                            var versions = m.versions();
+                            if (versions == null || versions.isEmpty()) return false;
+                            return !(versions.getLast() instanceof TombstoneFileVersion);
+                        })
+                        .limit(maxKeys)
+                        .map(m -> Map.of("key", m.key()))
+                        .toList();
+            }
+
+            ctx.status(200).json(items);
+        } catch (NumberFormatException e) {
+            ctx.status(400).result("Invalid maxKeys parameter");
+        } catch (Exception e) {
+            logger.error("Error handling GET /bucket", e);
+            ctx.status(500);
+        }
+    }
+
+
+
     public void start() {
         repairWorkerPool.start();
 
@@ -599,6 +671,10 @@ public class StorageNodeServerV2 {
             config.http.maxRequestSize = 100_000_000L;
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
+
+            // Bucket-level query endpoints (read-only, no PubSub needed)
+            config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
+            config.routes.get("/bucket/{bucket}", this::handleListObjects);
         });
 
         app.start(port);

@@ -10,12 +10,18 @@ import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
 import com.google.protobuf.ByteString.Output;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedList;
@@ -26,9 +32,11 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
@@ -44,6 +52,9 @@ import org.apache.logging.log4j.Logger;
 public final class StorageWorker {
 
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
+
+    private static final int SHARD_UPLOAD_TIMEOUT_SECONDS = 30;
+    private static final int SHARD_FETCH_TIMEOUT_SECONDS = 30;
 
     private final ExecutorService executor;
     private final HttpClient httpClient;
@@ -61,6 +72,7 @@ public final class StorageWorker {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
@@ -112,11 +124,11 @@ public final class StorageWorker {
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         int n = es.getN();
-        int k = es.getK();
+        int m = es.getM();
         int writeQuorum = es.getWriteQuorum();
 
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
-        InputStream[] shardStreams = ErasureCoder.shard(data, length, k, n);
+        InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
 
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -132,6 +144,7 @@ public final class StorageWorker {
                             .uri(uri)
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
+                            .timeout(Duration.ofSeconds(SHARD_UPLOAD_TIMEOUT_SECONDS))
                             .build();
                     HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
@@ -148,10 +161,11 @@ public final class StorageWorker {
 
         long uploaded;
         try {
-            uploaded = executor.invokeAll(tasks).stream().filter(f -> {
+            uploaded = executor.invokeAll(tasks, SHARD_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .stream().filter(f -> {
                 try {
                     return f.get();
-                } catch (InterruptedException | ExecutionException e) {
+                } catch (InterruptedException | ExecutionException | CancellationException e) {
                     logger.warn("Shard upload task error: {}", e.getMessage());
                     return false;
                 }
@@ -201,7 +215,7 @@ public final class StorageWorker {
         var resolvedNodes = es.getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
-        int k = es.getK();
+        int m = es.getM();
         int n = es.getN();
 
         // Synchronous probe: fetch shard metadata to detect tombstones/type
@@ -232,7 +246,7 @@ public final class StorageWorker {
                     storageKey);
             executor.execute(() -> {
                 try (pos) {
-                    handleMultipartGet(representative.chunks(), k, pos);
+                    handleMultipartGet(representative.chunks(), m, pos);
                 } catch (Exception e) {
                     logger.error("Failed to stream multipart data for key {}", storageKey, e);
                 }
@@ -241,10 +255,10 @@ public final class StorageWorker {
             // BLOB — reconstruct from erasure-coded shards
             executor.execute(() -> {
                 try (pos) {
-                    if (maxVersionResponses.size() >= k) {
-                        reconstructFromResponses(maxVersionResponses, resolvedNodes, k, n, pos);
+                    if (maxVersionResponses.size() >= m) {
+                        reconstructFromResponses(maxVersionResponses, resolvedNodes, m, n, pos);
                     } else {
-                        reconstructFromOlderVersion(resolvedPartition, storageKey, resolvedNodes, k, n, pos,
+                        reconstructFromOlderVersion(resolvedPartition, storageKey, resolvedNodes, m, n, pos,
                                 maxVersion, maxVersionResponses.size(), responses);
                     }
                 } catch (Exception e) {
@@ -256,7 +270,7 @@ public final class StorageWorker {
         return pis;
     }
 
-    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
+    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
             OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
         List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
@@ -278,26 +292,26 @@ public final class StorageWorker {
         if (representative.type() == ShardType.MULTIPART) {
             logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion,
                     storageKey);
-            handleMultipartGet(representative.chunks(), k, out);
+            handleMultipartGet(representative.chunks(), m, out);
             return;
         }
 
         // Type is BLOB
-        if (maxVersionResponses.size() >= k) {
-            reconstructFromResponses(maxVersionResponses, nodes, k, n, out);
+        if (maxVersionResponses.size() >= m) {
+            reconstructFromResponses(maxVersionResponses, nodes, m, n, out);
             return;
         }
 
-        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(),
+        reconstructFromOlderVersion(partition, storageKey, nodes, m, n, out, maxVersion, maxVersionResponses.size(),
                 responses);
     }
 
-    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k,
+    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int m,
             int n,
             OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
             throws IOException {
         logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
-                maxVersion, storageKey, maxVersionShardCount, k);
+                maxVersion, storageKey, maxVersionShardCount, m);
 
         List<Long> availableVersions = responses.stream()
                 .map(ShardResponse::version)
@@ -307,28 +321,28 @@ public final class StorageWorker {
 
         if (availableVersions.size() < 2) {
             throw new IOException("Only one version available for key " + storageKey
-                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + k + ")");
+                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + m + ")");
         }
 
         long oldVersion = availableVersions.get(1); // second-highest version
         List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
         List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
-        if (validOldResponses.size() >= k) {
+        if (validOldResponses.size() >= m) {
             logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
-                    validOldResponses.size(), k);
-            reconstructFromResponses(validOldResponses, nodes, k, n, out);
+                    validOldResponses.size(), m);
+            reconstructFromResponses(validOldResponses, nodes, m, n, out);
             return;
         }
 
         throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
     }
 
-    private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
+    private void handleMultipartGet(List<String> chunks, int m, OutputStream out) throws IOException {
         for (String chunkId : chunks) {
             var partition = getRouting().getPartition(chunkId)
                     .orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
             List<InetSocketAddress> nodes = getNodesForPartition(partition);
-            processGetConsensus(partition, chunkId, nodes, k, nodes.size(), out);
+            processGetConsensus(partition, chunkId, nodes, m, nodes.size(), out);
         }
     }
 
@@ -346,7 +360,8 @@ public final class StorageWorker {
                     uriStr += "?version=" + targetVersion.getAsLong();
                 }
 
-                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
+                        .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
                 HttpResponse<InputStream> response = httpClient.send(request,
                         HttpResponse.BodyHandlers.ofInputStream());
 
@@ -376,7 +391,7 @@ public final class StorageWorker {
         }
 
         try {
-            return executor.invokeAll(tasks).stream()
+            return executor.invokeAll(tasks, SHARD_FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
                     .map(future -> {
                         try {
                             return future.get();
@@ -392,7 +407,7 @@ public final class StorageWorker {
         }
     }
 
-    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k,
+    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int m,
             int n, OutputStream out) throws IOException {
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
@@ -404,7 +419,7 @@ public final class StorageWorker {
             }
         }
 
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, m, n)) {
             byte[] buf = new byte[64 * 1024];
             int bytesRead;
             while ((bytesRead = reconstructed.read(buf)) != -1) {
@@ -437,7 +452,7 @@ public final class StorageWorker {
 
     /**
      * Publishes a delete command via pub/sub and waits for {@code k + 1} SNs
-     * (the delete quorum) to acknowledge the tombstone.
+     * (where k = parity shards = n - m) to acknowledge the tombstone.
      */
     public boolean delete(UUID requestID, String bucket, String key) {
         if (requestID == null)
@@ -526,6 +541,162 @@ public final class StorageWorker {
         return deleted;
     }
 
+    /**
+     * Checks whether a bucket exists by querying all nodes in the partition's
+     * erasure set concurrently. Returns {@code true} if any node returns 200
+     * (bucket exists), {@code false} only if every node returns 404 or fails.
+     *
+     * <p>This prevents false negatives when a node is stale or partitioned:
+     * even a single node reporting the bucket exists is sufficient.
+     */
+    public boolean bucketExists(String bucket) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+
+        Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
+        if (resolved.isEmpty()) {
+            logger.error("Routing failed for bucket {}, aborting bucketExists", bucket);
+            return false;
+        }
+
+        List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+
+        List<Callable<Boolean>> tasks = new ArrayList<>();
+        for (InetSocketAddress node : nodes) {
+            tasks.add(() -> {
+                URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
+                        node.getHostString(), node.getPort(),
+                        URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(uri)
+                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .build();
+                try {
+                    HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
+                    int status = resp.statusCode();
+                    if (status == 200) return true;
+                    if (status == 404) {
+                        logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
+                        return false;
+                    }
+                    logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+                } catch (Exception e) {
+                    logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
+                }
+                return false;
+            });
+        }
+
+        try {
+            // Return true if ANY node reports the bucket exists
+            return executor.invokeAll(tasks).stream().anyMatch(f -> {
+                try {
+                    return f.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    logger.trace("bucketExists task error: {}", e.getMessage());
+                    return false;
+                }
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * Lists objects in a bucket by fanning out a GET to one node per partition,
+     * merging results, deduping by key, sorting, and applying maxKeys.
+     */
+    public List<ObjectInfo> listObjects(String bucket, String prefix, int maxKeys) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (maxKeys < 0) throw new IllegalArgumentException("maxKeys < 0");
+
+        ErasureRouting r = getRouting();
+        var spreads = metadataClient.get(PartitionSpreadConfiguration.class).getPartitionSpread();
+        if (spreads == null || spreads.isEmpty()) {
+            logger.error("listObjects: no partition spread");
+            return List.of();
+        }
+
+        List<Integer> partitions = spreads.stream()
+                .flatMap(s -> s.getPartitions().stream())
+                .distinct()
+                .toList();
+
+        String safePrefix = prefix == null ? "" : prefix;
+        String encodedPrefix = URLEncoder.encode(safePrefix, java.nio.charset.StandardCharsets.UTF_8);
+        String query = "?maxKeys=" + maxKeys
+                + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
+
+        List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
+        for (int partition : partitions) {
+            Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
+            if (esOpt.isEmpty()) continue;
+            List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
+                    .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+            if (nodes.isEmpty()) continue;
+            tasks.add(() -> fetchListFromAnyNode(bucket, query, nodes));
+        }
+
+        List<ObjectInfo> merged = new ArrayList<>();
+        try {
+            for (var future : executor.invokeAll(tasks)) {
+                try {
+                    merged.addAll(future.get());
+                } catch (ExecutionException e) {
+                    logger.warn("listObjects partition fetch failed: {}", e.getMessage());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        }
+
+        return merged.stream()
+                .collect(java.util.stream.Collectors.toMap(ObjectInfo::key, o -> o, (a, b) -> a))
+                .values().stream()
+                .sorted(Comparator.comparing(ObjectInfo::key))
+                .limit(maxKeys)
+                .toList();
+    }
+
+    private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
+        for (InetSocketAddress node : nodes) {
+            URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
+                    node.getHostString(), node.getPort(),
+                    URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
+            HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
+            try {
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    return parseObjectListJson(resp.body());
+                }
+                logger.trace("GET list {} → node {} HTTP {}", bucket, node, resp.statusCode());
+            } catch (Exception e) {
+                logger.trace("GET list {} → node {} failed: {}", bucket, node, e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    /** Parses the storage node's list response: [{"key":"..."},...] using Jackson. */
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    private static List<ObjectInfo> parseObjectListJson(String body) {
+        if (body == null || body.isBlank()) return List.of();
+        try {
+            List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});
+            return result != null ? result : List.of();
+        } catch (Exception e) {
+            logger.warn("Failed to parse object list JSON (body length={}): {}",
+                        body != null ? body.length() : 0, e.getMessage());
+            return List.of();
+        }
+    }
+
+    public record ObjectInfo(String key, long size, String lastModified) {}
+
     public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
@@ -558,8 +729,9 @@ public final class StorageWorker {
             return false;
         }
 
+        int multipartQuorum = erasureSetOpt.get().getK() + 1;
         return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
-                erasureSetOpt.get().getWriteQuorum());
+                multipartQuorum);
     }
 
     public void shutdown() {

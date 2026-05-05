@@ -30,7 +30,7 @@ This throughput increase aligns with the benefits of system scalability.
 
 ## Recovery & Retries
 
-- When a node returns online, it initiates a repair procedure utilizing durable message delivery via Kafka, or by reading from other nodes as a backup.
+- When a node returns online, it initiates a repair procedure utilizing durable message delivery via Kafka.
 - If an internal write or delete operation fails, the system retries the operation internally.
 - If the gateway goes down, the client handles the retry from the S3 side.
 

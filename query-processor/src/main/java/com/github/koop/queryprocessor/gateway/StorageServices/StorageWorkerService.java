@@ -79,26 +79,39 @@ public class StorageWorkerService implements StorageService {
 
     @Override
     public void createBucket(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'createBucket'");
+        UUID requestId = UUID.randomUUID();
+        boolean success = storageWorker.createBucket(requestId, bucket);
+        if (!success) {
+            throw new RuntimeException("StorageWorker failed to create bucket");
+        }
     }
 
     @Override
     public void deleteBucket(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'deleteBucket'");
+        UUID requestId = UUID.randomUUID();
+        boolean success = storageWorker.deleteBucket(requestId, bucket);
+        if (!success) {
+            throw new RuntimeException("StorageWorker failed to delete bucket");
+        }
     }
 
     @Override
     public List<ObjectSummary> listObjects(String bucket, String prefix, int maxKeys) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'listObjects'");
+        String bucketPrefix = bucket + "/";
+        return storageWorker.listObjects(bucket, prefix, maxKeys).stream()
+                .map(o -> {
+                    String key = o.key();
+                    if (key.startsWith(bucketPrefix)) {
+                        key = key.substring(bucketPrefix.length());
+                    }
+                    return new ObjectSummary(key, o.size(), o.lastModified());
+                })
+                .toList();
     }
 
     @Override
     public boolean bucketExists(String bucket) throws Exception {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'bucketExists'");
+        return storageWorker.bucketExists(bucket);
     }
 
     @Override
