@@ -5,6 +5,10 @@
 #   set 2 → storage-node-set2-0 .. storage-node-set2-8
 # Partition spread: set 1 → partitions 0-14, set 2 → partitions 15-29 (30 total).
 # write_quorum=7: require 7 of 9 ACKs before a PUT succeeds; reconstruction needs only 6.
+#
+# The etcd-seeder-config ConfigMap is generated on deploy by deploy.sh from
+# etcd-data/erasure_set_configurations.json and etcd-data/partition_spread_configurations.json.
+# Edit those files to change the cluster topology.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,6 +28,10 @@ spec:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
+      volumes:
+      - name: etcd-config
+        configMap:
+          name: etcd-seeder-config
       initContainers:
       - name: wait-for-etcd
         image: quay.io/coreos/etcd:v3.5.0
@@ -43,17 +51,14 @@ spec:
         - -c
         - |
           ETCD=http://etcd.koopdb.svc.cluster.local:2379
-          SFX1=".storage-node-set1.koopdb.svc.cluster.local"
-          SFX2=".storage-node-set2.koopdb.svc.cluster.local"
+          CONFIG_DIR=/etc/etcd-seeder
 
-          MACHINES_SET1='"machines":[{"ip":"storage-node-set1-0'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-1'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-2'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-3'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-4'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-5'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-6'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-7'"${SFX1}"'","port":8080},{"ip":"storage-node-set1-8'"${SFX1}"'","port":8080}]'
-
-          MACHINES_SET2='"machines":[{"ip":"storage-node-set2-0'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-1'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-2'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-3'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-4'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-5'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-6'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-7'"${SFX2}"'","port":8080},{"ip":"storage-node-set2-8'"${SFX2}"'","port":8080}]'
-
-          ERASURE_SETS='{"erasure_sets":[{"number":1,"n":9,"m":6,"write_quorum":7,'"${MACHINES_SET1}"'},{"number":2,"n":9,"m":6,"write_quorum":7,'"${MACHINES_SET2}"'}]}'
-
-          PARTITION_SPREAD='{"partition_spread":[{"erasure_set":1,"partitions":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]},{"erasure_set":2,"partitions":[15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]}]}'
-
-          etcdctl --endpoints="${ETCD}" put erasure_set_configurations "${ERASURE_SETS}"
-          etcdctl --endpoints="${ETCD}" put partition_spread_configurations "${PARTITION_SPREAD}"
+          etcdctl --endpoints="${ETCD}" put erasure_set_configurations \
+            "$(cat ${CONFIG_DIR}/erasure_set_configurations.json)"
+          etcdctl --endpoints="${ETCD}" put partition_spread_configurations \
+            "$(cat ${CONFIG_DIR}/partition_spread_configurations.json)"
           echo "Etcd seeding complete."
+        volumeMounts:
+        - name: etcd-config
+          mountPath: /etc/etcd-seeder
+          readOnly: true
