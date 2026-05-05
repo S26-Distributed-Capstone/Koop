@@ -23,14 +23,14 @@ KoopDB leverages a modern Java stack focused on high-performance concurrency and
 - **Log4j 2 (2.23.1):** Asynchronous logging framework.
 
 ### Distributed Coordination
-- **Etcd (via Jetcd):** Distributed key-value store for shared configuration and service discovery.
-- **Redis (via Lettuce/Jedis):** In-memory data structures for caching multipart upload state and sequencing.
-- **Kafka:** for durable message delivery AND consensus on "last write" 
+- **Etcd (via Jetcd):** Distributed key-value store holding cluster topology, erasure-set configuration, and partition→erasure-set mapping. Run as a 3-node quorum.
+- **Redis:** In-memory store used by Query Processors to track multipart upload session state (active sessions, uploaded part numbers, cached part sizes). Not used for ordering.
+- **Kafka:** Per-partition sequencer and pub/sub bus for ordered commit messages (`PutMessage`, `DeleteMessage`, `CreateBucketMessage`, `DeleteBucketMessage`, `MultipartCommitMessage`). Provides total ordering of mutations within a partition; "last write" is then determined by the sequence numbers persisted in each storage node's RocksDB metadata table, resolved at read time via read quorum.
 
 ### Testing & Verification
 - **JUnit 5:** Unit and integration testing.
-- **Testcontainers:** For spinning up Etcd, Redis, and MinIO/S3 mock containers during integration tests.
 - **AWS SDK for Java (2.x):** Used in system tests to verify S3 compatibility against the running cluster.
+- **In-process integration cluster:** End-to-end tests (e.g. `RealStorageNodesIT`) start Etcd, Redis, Kafka, and storage nodes in-process rather than via Testcontainers.
 
 ## Infrastructure
 - **Docker & Docker Compose:** Containerization of all components for consistent development and deployment environments.

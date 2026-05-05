@@ -18,6 +18,7 @@ import com.github.koop.common.metadata.MetadataClient;
 import com.github.koop.common.metadata.PartitionSpreadConfiguration;
 import com.github.koop.common.pubsub.MemoryPubSub;
 import com.github.koop.common.pubsub.PubSubClient;
+import com.github.koop.queryprocessor.gateway.StorageServices.StorageResult;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.CompletedPart;
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.ObjectSummary;
@@ -109,7 +110,11 @@ public class Main {
     private static void createBucketHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         try {
-            storage.createBucket(bucket);
+            StorageResult result = storage.createBucket(bucket);
+            if (result instanceof StorageResult.Failure f) {
+                respondStorageFailure(ctx, f, "/" + bucket);
+                return;
+            }
             ctx.status(200);
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
@@ -128,7 +133,11 @@ public class Main {
     private static void deleteBucketHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         try {
-            storage.deleteBucket(bucket);
+            StorageResult result = storage.deleteBucket(bucket);
+            if (result instanceof StorageResult.Failure f) {
+                respondStorageFailure(ctx, f, "/" + bucket);
+                return;
+            }
             ctx.status(204);
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
@@ -248,7 +257,11 @@ public class Main {
                 ctx.status(204);
             } else {
                 // ── DeleteObject ──
-                storage.deleteObject(bucket, key);
+                StorageResult result = storage.deleteObject(bucket, key);
+                if (result instanceof StorageResult.Failure f) {
+                    respondStorageFailure(ctx, f, resourcePath);
+                    return;
+                }
                 ctx.status(204);
             }
         } catch (UnsupportedOperationException e) {
@@ -302,7 +315,11 @@ public class Main {
                 // ── PutObject ──
                 InputStream data = ctx.bodyInputStream();
 
-                storage.putObject(bucket, key, data, contentLength);
+                StorageResult result = storage.putObject(bucket, key, data, contentLength);
+                if (result instanceof StorageResult.Failure f) {
+                    respondStorageFailure(ctx, f, resourcePath);
+                    return;
+                }
                 ctx.status(200);
                 //ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result("");
@@ -377,6 +394,12 @@ public class Main {
             ctx.result(buildS3ErrorXml("InternalError",
                     "We encountered an internal error. Please try again.", resourcePath));
         }
+    }
+
+    private static void respondStorageFailure(Context ctx, StorageResult.Failure failure, String resourcePath) {
+        ctx.status(failure.httpStatus());
+        ctx.header("Content-Type", "application/xml");
+        ctx.result(buildS3ErrorXml(failure.code(), failure.message(), resourcePath));
     }
 
     // ─── Multipart Error Helpers ──────────────────────────────────────────────

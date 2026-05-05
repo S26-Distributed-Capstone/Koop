@@ -21,6 +21,7 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedList;
@@ -31,9 +32,11 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
@@ -49,6 +52,9 @@ import org.apache.logging.log4j.Logger;
 public final class StorageWorker {
 
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
+
+    private static final int SHARD_UPLOAD_TIMEOUT_SECONDS = 30;
+    private static final int SHARD_FETCH_TIMEOUT_SECONDS = 30;
 
     private final ExecutorService executor;
     private final HttpClient httpClient;
@@ -66,6 +72,7 @@ public final class StorageWorker {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
@@ -117,11 +124,11 @@ public final class StorageWorker {
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
         int n = es.getN();
-        int k = es.getK();
+        int m = es.getM();
         int writeQuorum = es.getWriteQuorum();
 
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
-        InputStream[] shardStreams = ErasureCoder.shard(data, length, k, n);
+        InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
 
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -137,6 +144,7 @@ public final class StorageWorker {
                             .uri(uri)
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
+                            .timeout(Duration.ofSeconds(SHARD_UPLOAD_TIMEOUT_SECONDS))
                             .build();
                     HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
@@ -153,10 +161,11 @@ public final class StorageWorker {
 
         long uploaded;
         try {
-            uploaded = executor.invokeAll(tasks).stream().filter(f -> {
+            uploaded = executor.invokeAll(tasks, SHARD_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .stream().filter(f -> {
                 try {
                     return f.get();
-                } catch (InterruptedException | ExecutionException e) {
+                } catch (InterruptedException | ExecutionException | CancellationException e) {
                     logger.warn("Shard upload task error: {}", e.getMessage());
                     return false;
                 }
@@ -206,7 +215,7 @@ public final class StorageWorker {
         var resolvedNodes = es.getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
-        int k = es.getK();
+        int m = es.getM();
         int n = es.getN();
 
         // Synchronous probe: fetch shard metadata to detect tombstones/type
@@ -237,7 +246,7 @@ public final class StorageWorker {
                     storageKey);
             executor.execute(() -> {
                 try (pos) {
-                    handleMultipartGet(representative.chunks(), k, pos);
+                    handleMultipartGet(representative.chunks(), m, pos);
                 } catch (Exception e) {
                     logger.error("Failed to stream multipart data for key {}", storageKey, e);
                 }
@@ -246,10 +255,10 @@ public final class StorageWorker {
             // BLOB — reconstruct from erasure-coded shards
             executor.execute(() -> {
                 try (pos) {
-                    if (maxVersionResponses.size() >= k) {
-                        reconstructFromResponses(maxVersionResponses, resolvedNodes, k, n, pos);
+                    if (maxVersionResponses.size() >= m) {
+                        reconstructFromResponses(maxVersionResponses, resolvedNodes, m, n, pos);
                     } else {
-                        reconstructFromOlderVersion(resolvedPartition, storageKey, resolvedNodes, k, n, pos,
+                        reconstructFromOlderVersion(resolvedPartition, storageKey, resolvedNodes, m, n, pos,
                                 maxVersion, maxVersionResponses.size(), responses);
                     }
                 } catch (Exception e) {
@@ -261,7 +270,7 @@ public final class StorageWorker {
         return pis;
     }
 
-    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int k, int n,
+    private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
             OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
         List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
@@ -276,33 +285,37 @@ public final class StorageWorker {
         ShardResponse representative = maxVersionResponses.get(0);
 
         if (representative.type() == ShardType.TOMBSTONE) {
-            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
-            throw new IOException("Object not found (deleted)");
+            // Reachable only via handleMultipartGet — a multipart chunk should never be
+            // independently tombstoned. The top-level get() handles tombstones at the
+            // object level and returns null before reaching here.
+            logger.error("Multipart chunk {} (version {}) is tombstoned — multipart object is corrupted.",
+                    storageKey, maxVersion);
+            throw new IOException("Multipart chunk " + storageKey + " is missing (tombstoned)");
         }
 
         if (representative.type() == ShardType.MULTIPART) {
             logger.debug("Latest version {} for key {} is multipart. Streaming chunks sequentially.", maxVersion,
                     storageKey);
-            handleMultipartGet(representative.chunks(), k, out);
+            handleMultipartGet(representative.chunks(), m, out);
             return;
         }
 
         // Type is BLOB
-        if (maxVersionResponses.size() >= k) {
-            reconstructFromResponses(maxVersionResponses, nodes, k, n, out);
+        if (maxVersionResponses.size() >= m) {
+            reconstructFromResponses(maxVersionResponses, nodes, m, n, out);
             return;
         }
 
-        reconstructFromOlderVersion(partition, storageKey, nodes, k, n, out, maxVersion, maxVersionResponses.size(),
+        reconstructFromOlderVersion(partition, storageKey, nodes, m, n, out, maxVersion, maxVersionResponses.size(),
                 responses);
     }
 
-    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int k,
+    private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int m,
             int n,
             OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
             throws IOException {
         logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
-                maxVersion, storageKey, maxVersionShardCount, k);
+                maxVersion, storageKey, maxVersionShardCount, m);
 
         List<Long> availableVersions = responses.stream()
                 .map(ShardResponse::version)
@@ -312,28 +325,28 @@ public final class StorageWorker {
 
         if (availableVersions.size() < 2) {
             throw new IOException("Only one version available for key " + storageKey
-                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + k + ")");
+                    + " and it has insufficient shards (" + maxVersionShardCount + "/" + m + ")");
         }
 
         long oldVersion = availableVersions.get(1); // second-highest version
         List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
         List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
-        if (validOldResponses.size() >= k) {
+        if (validOldResponses.size() >= m) {
             logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
-                    validOldResponses.size(), k);
-            reconstructFromResponses(validOldResponses, nodes, k, n, out);
+                    validOldResponses.size(), m);
+            reconstructFromResponses(validOldResponses, nodes, m, n, out);
             return;
         }
 
         throw new IOException("Could not find any version with sufficient shards for key " + storageKey);
     }
 
-    private void handleMultipartGet(List<String> chunks, int k, OutputStream out) throws IOException {
+    private void handleMultipartGet(List<String> chunks, int m, OutputStream out) throws IOException {
         for (String chunkId : chunks) {
             var partition = getRouting().getPartition(chunkId)
                     .orElseThrow(() -> new IOException("No partition for chunk " + chunkId));
             List<InetSocketAddress> nodes = getNodesForPartition(partition);
-            processGetConsensus(partition, chunkId, nodes, k, nodes.size(), out);
+            processGetConsensus(partition, chunkId, nodes, m, nodes.size(), out);
         }
     }
 
@@ -351,7 +364,8 @@ public final class StorageWorker {
                     uriStr += "?version=" + targetVersion.getAsLong();
                 }
 
-                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
+                        .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
                 HttpResponse<InputStream> response = httpClient.send(request,
                         HttpResponse.BodyHandlers.ofInputStream());
 
@@ -381,7 +395,7 @@ public final class StorageWorker {
         }
 
         try {
-            return executor.invokeAll(tasks).stream()
+            return executor.invokeAll(tasks, SHARD_FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
                     .map(future -> {
                         try {
                             return future.get();
@@ -397,7 +411,7 @@ public final class StorageWorker {
         }
     }
 
-    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int k,
+    private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int m,
             int n, OutputStream out) throws IOException {
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
@@ -409,7 +423,7 @@ public final class StorageWorker {
             }
         }
 
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, k, n)) {
+        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, m, n)) {
             byte[] buf = new byte[64 * 1024];
             int bytesRead;
             while ((bytesRead = reconstructed.read(buf)) != -1) {
@@ -442,7 +456,7 @@ public final class StorageWorker {
 
     /**
      * Publishes a delete command via pub/sub and waits for {@code k + 1} SNs
-     * (the delete quorum) to acknowledge the tombstone.
+     * (where k = parity shards = n - m) to acknowledge the tombstone.
      */
     public boolean delete(UUID requestID, String bucket, String key) {
         if (requestID == null)
@@ -719,8 +733,9 @@ public final class StorageWorker {
             return false;
         }
 
+        int multipartQuorum = erasureSetOpt.get().getK() + 1;
         return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
-                erasureSetOpt.get().getWriteQuorum());
+                multipartQuorum);
     }
 
     public void shutdown() {
