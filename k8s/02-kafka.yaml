@@ -46,6 +46,11 @@ spec:
       labels:
         app: kafka
     spec:
+      # Disable legacy K8s service-link env vars. Without this, the `kafka` Service
+      # injects KAFKA_PORT=tcp://<clusterIP>:9092 into the kafka pods themselves,
+      # which the Confluent run script interprets as a config override and
+      # writes `port=tcp://...` into server.properties, breaking startup.
+      enableServiceLinks: false
       nodeSelector:
         koopdb/role: cp
       tolerations:
