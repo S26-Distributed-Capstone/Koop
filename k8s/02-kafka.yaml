@@ -5,6 +5,7 @@ metadata:
   name: kafka-headless
   namespace: koopdb
 spec:
+  publishNotReadyAddresses: true
   clusterIP: None
   selector:
     app: kafka
@@ -38,6 +39,7 @@ metadata:
 spec:
   serviceName: kafka-headless
   replicas: 3
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: kafka

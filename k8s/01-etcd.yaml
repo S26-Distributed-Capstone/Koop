@@ -6,6 +6,7 @@ metadata:
   namespace: koopdb
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     app: etcd
   ports:
@@ -38,6 +39,7 @@ metadata:
 spec:
   serviceName: etcd-headless
   replicas: 3
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: etcd
