@@ -38,16 +38,12 @@ public class Main {
 
             config.routes.get("/health", Main::healthHandler);
 
-            // ── Bucket-level routes ─────────────────────────────────────────
             config.routes.put("/{bucket}",    ctx -> createBucketHandler(ctx, storage));
             config.routes.delete("/{bucket}", ctx -> deleteBucketHandler(ctx, storage));
             config.routes.get("/{bucket}",    ctx -> listObjectsHandler(ctx, storage));
             config.routes.head("/{bucket}",   ctx -> headBucketHandler(ctx, storage));
 
-            // ── Object-level routes ─────────────────────────────────────────
             config.routes.get("/{bucket}/<key>", ctx -> getObjectHandler(ctx, storage));
-
-            // ADDED: HeadObject handler for S3 Browser pre-flight checks
             config.routes.head("/{bucket}/<key>", ctx -> headObjectHandler(ctx, storage));
 
             config.routes.delete("/{bucket}/<key>", ctx -> deleteOrAbortHandler(ctx, storage));
@@ -75,7 +71,6 @@ public class Main {
     }
 
     private static void createBucketHandler(Context ctx, StorageService storage) {
-        // ... (unchanged)
         String bucket = ctx.pathParam("bucket");
         try {
             StorageResult result = storage.createBucket(bucket);
@@ -91,7 +86,6 @@ public class Main {
     }
 
     private static void deleteBucketHandler(Context ctx, StorageService storage) {
-        // ... (unchanged)
         String bucket = ctx.pathParam("bucket");
         try {
             StorageResult result = storage.deleteBucket(bucket);
@@ -107,7 +101,6 @@ public class Main {
     }
 
     private static void listObjectsHandler(Context ctx, StorageService storage) {
-        // ... (unchanged)
         String bucket = ctx.pathParam("bucket");
         String prefix = ctx.queryParam("prefix") != null ? ctx.queryParam("prefix") : "";
         int maxKeys = 1000;
@@ -127,7 +120,6 @@ public class Main {
     }
 
     private static void headBucketHandler(Context ctx, StorageService storage) {
-        // ... (unchanged)
         String bucket = ctx.pathParam("bucket");
         try {
             boolean exists = storage.bucketExists(bucket);
@@ -137,14 +129,11 @@ public class Main {
         }
     }
 
-    // ─── Object Handlers ─────────────────────────────────────────────────────
-
-    // ADDED: HeadObject implementation
     private static void headObjectHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         try {
-            List<ObjectSummary> objects = storage.listObjects(bucket, key, 1);
+            List<ObjectSummary> objects = storage.listObjects(bucket, key, 5);
             var match = objects.stream().filter(o -> o.key().equals(key)).findFirst();
 
             if (match.isPresent()) {
@@ -164,7 +153,6 @@ public class Main {
         }
     }
 
-    // UPDATED: Now sets the Content-Length header
     private static void getObjectHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
@@ -174,10 +162,12 @@ public class Main {
             if (obj != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
-
-                // INJECT THE CONTENT-LENGTH HEADER
-                ctx.header("Content-Length", String.valueOf(obj.size()));
                 ctx.header("ETag", "\"dummy-etag-12345\"");
+
+                if (obj.size() >= 0) {
+                    ctx.header("Content-Length", String.valueOf(obj.size()));
+                }
+
                 ctx.result(obj.data());
             } else {
                 ctx.status(404);
@@ -193,7 +183,6 @@ public class Main {
     }
 
     private static void deleteOrAbortHandler(Context ctx, StorageService storage) {
-        // ... (unchanged)
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         String uploadId = ctx.queryParam("uploadId");

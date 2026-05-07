@@ -64,7 +64,7 @@ public class StorageNodeServerV2 {
     private static final Logger logger = LogManager.getLogger(StorageNodeServerV2.class);
 
     public StorageNodeServerV2(int port, String ip, Database db, Path dir, MetadataClient metadataClient,
-            PubSubClient pubSubClient, RocksDbRepairQueue repairQueue) {
+                               PubSubClient pubSubClient, RocksDbRepairQueue repairQueue) {
         this.port = port;
         this.ip = ip;
         this.db = db;
@@ -121,7 +121,6 @@ public class StorageNodeServerV2 {
         logger.info(">>> MetadataClient started");
 
 
-        //PubSubClient pubSubClient = null;
         logger.info(">>> Creating PubSubClient");
         String kafkaBrokers = System.getenv("KAFKA_BOOTSTRAP_SERVERS");
         PubSubClient pubSubClient;
@@ -160,15 +159,14 @@ public class StorageNodeServerV2 {
         Set<Integer> myErasureSetIds = new HashSet<>();
         int newShardIndex = -1;
 
-        // Find ALL erasure sets this node belongs to
         for (ErasureSetConfiguration.ErasureSet es : currentEsConfig.getErasureSets()) {
             List<ErasureSetConfiguration.Machine> machines = es.getMachines();
             for (int i = 0; i < machines.size(); i++) {
                 ErasureSetConfiguration.Machine machine = machines.get(i);
                 if (machine.getIp().equals(this.ip) && machine.getPort() == app.port()) {
                     myErasureSetIds.add(es.getNumber());
-                    newShardIndex = i; // Save index (identical across sets in your config)
-                    break; // Break inner loop, but keep checking other erasure sets
+                    newShardIndex = i;
+                    break;
                 }
             }
         }
@@ -181,7 +179,6 @@ public class StorageNodeServerV2 {
             logger.warn("Node {}:{} not found in any Erasure Set. Dropping all partition subscriptions.", this.ip,
                     app.port());
         } else {
-            // Add partitions for EVERY erasure set this node is a part of
             for (PartitionSpreadConfiguration.PartitionSpread spread : currentPsConfig.getPartitionSpread()) {
                 if (myErasureSetIds.contains(spread.getErasureSet())) {
                     targetPartitions.addAll(spread.getPartitions());
@@ -240,7 +237,7 @@ public class StorageNodeServerV2 {
         }
     }
 
-   private void handlePut(Context ctx) {
+    private void handlePut(Context ctx) {
         try {
             int partition = Integer.parseInt(ctx.pathParam("partition"));
             String bucket = ctx.pathParam("bucket");
@@ -291,50 +288,60 @@ public class StorageNodeServerV2 {
             if (dataOpt.isPresent()) {
                 StorageNodeV2.GetObjectResponse response = dataOpt.get();
 
-                long responseSequenceNumber = switch (response) {
-                    case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
-                    case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
-                    case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
-                };
-
-                ctx.header("X-Koop-Version", String.valueOf(responseSequenceNumber));
+                long responseSequenceNumber;
+                long logicalSize = -1;
+                String typeHeader;
 
                 if (response instanceof StorageNodeV2.FileObject fo) {
-                    ctx.header("X-Koop-Type", "BLOB");
+                    responseSequenceNumber = fo.version().sequenceNumber();
+                    logicalSize = fo.version().size();
+                    typeHeader = "BLOB";
+                } else if (response instanceof StorageNodeV2.MultipartData md) {
+                    responseSequenceNumber = md.version().sequenceNumber();
+                    logicalSize = md.version().size();
+                    typeHeader = "MULTIPART";
+                } else {
+                    responseSequenceNumber = ((StorageNodeV2.Tombstone) response).version().sequenceNumber();
+                    typeHeader = "TOMBSTONE";
+                }
+
+                ctx.header("X-Koop-Version", String.valueOf(responseSequenceNumber));
+                ctx.header("X-Koop-Type", typeHeader);
+
+                if (logicalSize >= 0) {
+                    ctx.header("X-Koop-Size", String.valueOf(logicalSize));
+                }
+
+                if (response instanceof StorageNodeV2.FileObject fo) {
                     var fc = fo.data();
                     ctx.status(200)
                             .header("Content-Type", "application/octet-stream")
                             .header("Content-Length", String.valueOf(fc.size()));
 
                     var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
-                    long size = fc.size();
+                    long physicalSize = fc.size();
                     logger.debug("GET partition={} fullKey={} version={} streaming {} bytes", partition, fullKey,
-                            responseSequenceNumber, size);
+                            responseSequenceNumber, physicalSize);
                     long position = 0L;
-                    while (position < size) {
-                        long transferred = fc.transferTo(position, size - position, outputChannel);
+                    while (position < physicalSize) {
+                        long transferred = fc.transferTo(position, physicalSize - position, outputChannel);
                         if (transferred <= 0) {
-                            logger.warn(
-                                    "Zero-byte transfer when streaming file for partition={} fullKey={} at position={} of {} bytes",
-                                    partition, fullKey, position, size);
                             break;
                         }
                         position += transferred;
                     }
                     fo.close();
                     logger.debug("GET partition={} fullKey={} version={} streamed {} bytes", partition, fullKey,
-                            responseSequenceNumber, size);
+                            responseSequenceNumber, physicalSize);
 
                 } else if (response instanceof StorageNodeV2.MultipartData md) {
-                    ctx.header("X-Koop-Type", "MULTIPART");
                     ctx.status(200)
-                       .header("Content-Type", "application/json")
-                       .json(md.version().chunks());
+                            .header("Content-Type", "application/json")
+                            .json(md.version().chunks());
                     logger.debug("GET partition={} fullKey={} version={} returned multipart chunks in body", partition, fullKey,
                             responseSequenceNumber);
 
                 } else if (response instanceof StorageNodeV2.Tombstone) {
-                    ctx.header("X-Koop-Type", "TOMBSTONE");
                     ctx.status(200).result("");
                     logger.debug("GET partition={} fullKey={} version={} hit tombstone", partition, fullKey,
                             responseSequenceNumber);
@@ -397,27 +404,6 @@ public class StorageNodeServerV2 {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Repair logic — implements BlobRepairStrategy via method reference
-    // -------------------------------------------------------------------------
-
-    /**
-     * Fetches a missing shard from peer nodes and writes it to local disk.
-     *
-     * <p>This method is passed as the {@link BlobRepairStrategy} to
-     * {@link RepairWorkerPool} via a method reference ({@code this::repairBlob}).
-     * It runs on a virtual-thread worker managed by the pool.
-     *
-     * <p>Algorithm:
-     * <ol>
-     *   <li>Determine the partition for the blob key using ErasureRouting (CRC32 hash).</li>
-     *   <li>Find the erasure set responsible for that partition.</li>
-     *   <li>Determine this node's shard index within the erasure set.</li>
-     *   <li>Fetch shards from peer nodes (excluding self).</li>
-     *   <li>Reconstruct all shards (including this node's) via Reed-Solomon.</li>
-     *   <li>Extract this node's shard and write it to disk.</li>
-     * </ol>
-     */
     private void repairBlob(RepairOperation operation) {
         String blobKey = operation.blobKey();
         long seqOffset = operation.seqOffset();
@@ -431,7 +417,6 @@ public class StorageNodeServerV2 {
 
         ErasureRouting routing = new ErasureRouting(currentPsConfig, currentEsConfig);
 
-        // 1. Determine partition via CRC32 hash (same as StorageWorker)
         var partitionOpt = routing.getPartition(blobKey);
         if (partitionOpt.isEmpty()) {
             logger.error("Repair failed: cannot determine partition for key={}", blobKey);
@@ -439,7 +424,6 @@ public class StorageNodeServerV2 {
         }
         int partition = partitionOpt.getAsInt();
 
-        // 2. Find the erasure set
         var esOpt = routing.getErasureSet(partition);
         if (esOpt.isEmpty()) {
             logger.error("Repair failed: no erasure set for partition={} key={}", partition, blobKey);
@@ -450,7 +434,6 @@ public class StorageNodeServerV2 {
         int n = es.getN();
         int m = es.getM();
 
-        // 3. Determine this node's shard index (cached from last metadata update)
         int myIndex = this.myShardIndex;
         if (myIndex == -1) {
             logger.error("Repair failed: this node {}:{} not found in erasure set {} for key={}",
@@ -458,13 +441,12 @@ public class StorageNodeServerV2 {
             return;
         }
 
-        // 4. Fetch shards from peers
         InputStream[] shardStreams = new InputStream[n];
         boolean[] present = new boolean[n];
 
         List<Callable<ShardFetchResult>> fetchTasks = new ArrayList<>();
         for (int i = 0; i < n; i++) {
-            if (i == myIndex) continue; // skip self — we're the one missing the shard
+            if (i == myIndex) continue;
             final int idx = i;
             ErasureSetConfiguration.Machine peer = machines.get(i);
             fetchTasks.add(() -> fetchShardFromPeer(peer, partition, blobKey, seqOffset, idx));
@@ -492,21 +474,15 @@ public class StorageNodeServerV2 {
                 return;
             }
 
-            // 5. Reconstruct via erasure coding
             try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, m, n)) {
-                // The reconstructed stream is the original data. We need to re-shard it
-                // to extract just our shard.
                 byte[] fullData = reconstructed.readAllBytes();
 
-                // Re-shard to get this node's shard
                 InputStream[] resharded = ErasureCoder.shard(
                         new java.io.ByteArrayInputStream(fullData),
                         fullData.length, m, n);
 
-                // Extract our shard
                 byte[] ourShard = resharded[myIndex].readAllBytes();
 
-                // 6. Write our shard to disk
                 storageNode.store(partition, blobKey, operation.requestId(),
                         Channels.newChannel(new java.io.ByteArrayInputStream(ourShard)));
 
@@ -517,7 +493,6 @@ public class StorageNodeServerV2 {
             logger.error("Repair failed for key={}: {}", blobKey, e.getMessage(), e);
         } finally {
             fetchExecutor.shutdownNow();
-            // Close any open shard streams
             for (InputStream is : shardStreams) {
                 if (is != null) {
                     try { is.close(); } catch (IOException ignored) {}
@@ -529,7 +504,7 @@ public class StorageNodeServerV2 {
     private record ShardFetchResult(int nodeIndex, InputStream data) {}
 
     private ShardFetchResult fetchShardFromPeer(ErasureSetConfiguration.Machine peer,
-            int partition, String blobKey, long seqOffset, int nodeIndex) {
+                                                int partition, String blobKey, long seqOffset, int nodeIndex) {
         try {
             URI uri = new URI("http", null, peer.getIp(), peer.getPort(),
                     "/store/" + partition + "/" + blobKey, "version=" + seqOffset, null);
@@ -559,15 +534,13 @@ public class StorageNodeServerV2 {
         return null;
     }
 
-    // -------------------------------------------------------------------------
-
     private void sendAck(String callbackAddress, String requestId) {
         if (callbackAddress == null || callbackAddress.isBlank() || requestId == null || requestId.isBlank()) {
             return;
         }
 
         try {
-            String baseUrl = callbackAddress.endsWith("/") ? 
+            String baseUrl = callbackAddress.endsWith("/") ?
                     callbackAddress.substring(0, callbackAddress.length() - 1) : callbackAddress;
             String url = baseUrl + "/ack/" + requestId;
 
@@ -625,19 +598,16 @@ public class StorageNodeServerV2 {
                 return;
             }
 
-            // Return 404 if the bucket doesn't exist (matches HEAD semantics and S3 behavior)
             if (!storageNode.bucketExists(bucket)) {
                 ctx.status(404);
                 return;
             }
 
-            // Prefix scan: bucket + "/" ensures we only get objects inside this bucket
             String scanPrefix = bucket + "/";
             if (prefix != null && !prefix.isEmpty()) {
                 scanPrefix = bucket + "/" + prefix;
             }
 
-            // try-with-resources closes the underlying RocksDB iterator
             List<Map<String, Object>> items;
             try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
                 items = stream
@@ -649,8 +619,8 @@ public class StorageNodeServerV2 {
                         .limit(maxKeys)
                         .map(m -> Map.<String, Object>of(
                                 "key", m.key(),
-                                "size", m.versions().getLast().size(), // SENDS REAL SIZE TO API
-                                "lastModified", "2024-01-01T00:00:00.000Z" // Placeholder from earlier
+                                "size", m.versions().getLast().size(),
+                                "lastModified", "1970-01-01T00:00:00.000Z"
                         ))
                         .toList();
             }
@@ -664,8 +634,6 @@ public class StorageNodeServerV2 {
         }
     }
 
-
-
     public void start() {
         repairWorkerPool.start();
 
@@ -676,7 +644,6 @@ public class StorageNodeServerV2 {
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
 
-            // Bucket-level query endpoints (read-only, no PubSub needed)
             config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
             config.routes.get("/bucket/{bucket}", this::handleListObjects);
         });
@@ -724,7 +691,6 @@ public class StorageNodeServerV2 {
         return app != null ? app.port() : port;
     }
 
-    /** Package-private accessor for tests to inspect pending repair count. */
     int repairPendingCount() {
         return repairWorkerPool.pendingCount();
     }
