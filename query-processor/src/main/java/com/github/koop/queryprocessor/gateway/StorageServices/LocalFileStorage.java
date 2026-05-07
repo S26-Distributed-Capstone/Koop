@@ -20,14 +20,15 @@ public class LocalFileStorage implements StorageService {
     }
 
     @Override
-    public void putObject(String bucket, String key, InputStream data, long length) throws Exception {
+    public StorageResult putObject(String bucket, String key, InputStream data, long length) throws Exception {
         Path bucketPath = rootDir.resolve(bucket);
         Files.createDirectories(bucketPath);
         Path dest = bucketPath.resolve(key);
         Files.copy(data, dest, StandardCopyOption.REPLACE_EXISTING);
-        System.out.println("[LocalFileStorage] Saved: " + dest);   
+        System.out.println("[LocalFileStorage] Saved: " + dest);
+        return StorageResult.success();
     }
-    
+
     @Override
     public InputStream getObject(String bucket, String key) throws Exception {
         Path filePath = rootDir.resolve(bucket).resolve(key);
@@ -39,20 +40,21 @@ public class LocalFileStorage implements StorageService {
     }
 
     @Override
-    public void deleteObject(String bucket, String key) throws Exception {
+    public StorageResult deleteObject(String bucket, String key) throws Exception {
         Path filePath = rootDir.resolve(bucket).resolve(key);
         Files.deleteIfExists(filePath);
         System.out.println("[LocalFileStorage] Deleted: " + filePath);
+        return StorageResult.success();
     }
 
     @Override
-    public void createBucket(String bucket) throws Exception {
+    public StorageResult createBucket(String bucket) throws Exception {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'createBucket'");
     }
 
     @Override
-    public void deleteBucket(String bucket) throws Exception {
+    public StorageResult deleteBucket(String bucket) throws Exception {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'deleteBucket'");
     }
