@@ -10,32 +10,15 @@ import com.github.koop.queryprocessor.processor.StorageWorker;
 import com.github.koop.queryprocessor.processor.cache.CacheClient;
 import com.github.koop.queryprocessor.processor.cache.MemoryCacheClient;
 
-/**
- * StorageWorkerService acts as a bridge between the API Gateway and the StorageWorker.
- * 
- * This service handles incoming requests from the API Gateway and delegates them to the
- * StorageWorker for processing (routing, erasure encoding, distribution to storage nodes).
- * 
- * Requests are handled directly in Javalin's virtual threads for optimal performance.
- */
 public class StorageWorkerService implements StorageService {
-    
+
     private final StorageWorker storageWorker;
     private final MultipartUploadManager multipartManager;
-    
-    /**
-     * Initializes the StorageWorkerService with the configured StorageWorker.
-     * 
-     * The StorageWorker should be initialized with the three replica sets
-     * before being passed to this constructor.
-     */
+
     public StorageWorkerService(StorageWorker storageWorker) {
-        this(storageWorker, new MemoryCacheClient()); // Use in-memory cache by default
+        this(storageWorker, new MemoryCacheClient());
     }
 
-    /**
-     * Constructor with injectable cache implementation for tests.
-     */
     public StorageWorkerService(StorageWorker storageWorker, CacheClient cache) {
         this.storageWorker = storageWorker;
         this.multipartManager = new MultipartUploadManager(storageWorker, cache);
@@ -52,14 +35,17 @@ public class StorageWorkerService implements StorageService {
         return StorageResult.success();
     }
 
+    // UPDATED: Map the StorageWorker's RetrievedObject to the Gateway's GetObjectResult
     @Override
-    public InputStream getObject(String bucket, String key) throws Exception {
-        // Generate a unique request ID for this operation
+    public GetObjectResult getObject(String bucket, String key) throws Exception {
         UUID requestId = UUID.randomUUID();
+        StorageWorker.RetrievedObject result = storageWorker.get(requestId, bucket, key);
 
-        // Deleted vs never-written is resolved inside StorageWorker and surfaced
-        // here as null for a unified not-found contract.
-        return storageWorker.get(requestId, bucket, key);
+        if (result == null) {
+            return null;
+        }
+
+        return new GetObjectResult(result.stream(), result.size());
     }
 
     @Override

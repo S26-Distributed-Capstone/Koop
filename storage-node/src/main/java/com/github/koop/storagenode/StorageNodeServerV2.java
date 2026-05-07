@@ -359,7 +359,7 @@ public class StorageNodeServerV2 {
             switch (message) {
                 case Message.FileCommitMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
-                    boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber);
+                    boolean materialized = storageNode.commit(partition, fullKey, m.requestID(), seqNumber, m.size());
                     if (!materialized) {
                         repairQueue.enqueue(new RepairOperation(fullKey, seqNumber, m.requestID()));
                     }
@@ -368,7 +368,7 @@ public class StorageNodeServerV2 {
                 }
                 case Message.MultipartCommitMessage m -> {
                     String fullKey = buildKey(m.bucket(), m.key());
-                    storageNode.multipartCommit(partition, fullKey, seqNumber, m.chunks());
+                    storageNode.multipartCommit(partition, fullKey, seqNumber, m.chunks(), m.size());
                     requestId = m.requestID();
                     logger.info("Committed multipart file: {}", fullKey);
                 }
@@ -638,7 +638,7 @@ public class StorageNodeServerV2 {
             }
 
             // try-with-resources closes the underlying RocksDB iterator
-            List<Map<String, String>> items;
+            List<Map<String, Object>> items;
             try (var stream = storageNode.listItemsInBucket(scanPrefix)) {
                 items = stream
                         .filter(m -> {
@@ -647,7 +647,11 @@ public class StorageNodeServerV2 {
                             return !(versions.getLast() instanceof TombstoneFileVersion);
                         })
                         .limit(maxKeys)
-                        .map(m -> Map.of("key", m.key()))
+                        .map(m -> Map.<String, Object>of(
+                                "key", m.key(),
+                                "size", m.versions().getLast().size(), // SENDS REAL SIZE TO API
+                                "lastModified", "2024-01-01T00:00:00.000Z" // Placeholder from earlier
+                        ))
                         .toList();
             }
 

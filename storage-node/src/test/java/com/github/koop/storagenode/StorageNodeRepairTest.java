@@ -60,7 +60,6 @@ class StorageNodeRepairTest {
         metadataClient.start();
         pubSubClient.start();
 
-        // Feed empty metadata so the waitFor completes immediately
         var emptyEs = new ErasureSetConfiguration();
         emptyEs.setErasureSets(List.of());
         var emptyPs = new PartitionSpreadConfiguration();
@@ -104,13 +103,11 @@ class StorageNodeRepairTest {
                 .build();
         HttpResponse<String> resp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // Node serves traffic immediately — no 503 gating
         assertNotEquals(503, resp.statusCode(), "Node should not return 503 after start");
     }
 
     @Test
     void testExistingFunctionalityPreservedWithRepair() throws Exception {
-        // Full PUT -> commit -> GET cycle should still work with repair infrastructure present
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
         port = server.port();
@@ -122,18 +119,15 @@ class StorageNodeRepairTest {
         String reqId = "req-normal";
         String data = "Normal Data";
 
-        // PUT
         HttpRequest putReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey + "?requestId=" + reqId))
                 .PUT(HttpRequest.BodyPublishers.ofString(data))
                 .build();
         assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode());
 
-        // Commit
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 50L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 50L);
 
-        // GET
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/store/" + partition + "/" + fullKey))
                 .GET()
@@ -144,18 +138,13 @@ class StorageNodeRepairTest {
         assertEquals(data, getResp.body());
     }
 
-    // -------------------------------------------------------------------------
-    // COMMIT_MISS repair: FileCommitMessage without prior PUT
-    // -------------------------------------------------------------------------
-
     @Test
     void testCommitMissEnqueuesRepairWhenBlobAbsent() throws Exception {
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
-        // Deliver a commit message with no prior PUT — blob is not on disk
         server.processSequencerMessage(3,
-                new Message.FileCommitMessage("bucket", "absent-key", "req-absent", getDummySender()), 200L);
+                new Message.FileCommitMessage("bucket", "absent-key", "req-absent", getDummySender(), 1024L), 200L);
 
         assertEquals(1, server.repairPendingCount(),
                 "A repair should be enqueued when the commit arrives before the blob");
@@ -172,7 +161,6 @@ class StorageNodeRepairTest {
         String fullKey = bucket + "/" + key;
         String reqId = "req-mat";
 
-        // PUT first so the blob is on disk when commit arrives
         HttpRequest putReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/store/4/" + fullKey + "?requestId=" + reqId))
                 .PUT(HttpRequest.BodyPublishers.ofString("materialized"))
@@ -180,15 +168,11 @@ class StorageNodeRepairTest {
         assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode());
 
         server.processSequencerMessage(4,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 300L);
 
         assertEquals(0, server.repairPendingCount(),
                 "No repair should be enqueued when the blob was already materialized at commit time");
     }
-
-    // -------------------------------------------------------------------------
-    // GET on committed-but-missing blob returns 404 (no read-repair)
-    // -------------------------------------------------------------------------
 
     @Test
     void testGetOnMissingBlobReturns404WithoutEnqueueingRepair() throws Exception {
@@ -196,14 +180,11 @@ class StorageNodeRepairTest {
         server.start();
         port = server.port();
 
-        // Commit without PUT — metadata exists but file is not on disk
-        // This also enqueues a COMMIT_MISS repair (count = 1)
         server.processSequencerMessage(5,
-                new Message.FileCommitMessage("rb", "ghost", "req-ghost", getDummySender()), 400L);
+                new Message.FileCommitMessage("rb", "ghost", "req-ghost", getDummySender(), 1024L), 400L);
 
         int repairCountAfterCommit = server.repairPendingCount();
 
-        // GET should return 404 but NOT enqueue additional repair (read-repair removed)
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/store/5/rb/ghost"))
                 .GET()
@@ -211,14 +192,9 @@ class StorageNodeRepairTest {
         HttpResponse<String> resp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
         assertEquals(404, resp.statusCode());
-        // Repair count should not increase from the GET — only the commit path enqueues
         assertEquals(repairCountAfterCommit, server.repairPendingCount(),
                 "GET should not enqueue additional repair; only the commit path triggers repair");
     }
-
-    // -------------------------------------------------------------------------
-    // Delete and bucket messages do NOT enqueue repair
-    // -------------------------------------------------------------------------
 
     @Test
     void testDeleteMessageDoesNotEnqueueRepair() throws Exception {
@@ -244,33 +220,22 @@ class StorageNodeRepairTest {
                 "CreateBucket messages should not trigger repairs");
     }
 
-    // -------------------------------------------------------------------------
-    // Sequence number compaction in the repair queue
-    // -------------------------------------------------------------------------
-
     @Test
     void testNewerCommitMissOverridesOlderForSameKey() throws Exception {
         server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
         server.start();
 
-        // Two commits for the same key — second has higher seqNumber
         server.processSequencerMessage(3,
-                new Message.FileCommitMessage("bucket", "dup-key", "req-dup1", getDummySender()), 100L);
+                new Message.FileCommitMessage("bucket", "dup-key", "req-dup1", getDummySender(), 1024L), 100L);
         server.processSequencerMessage(3,
-                new Message.FileCommitMessage("bucket", "dup-key", "req-dup2", getDummySender()), 200L);
+                new Message.FileCommitMessage("bucket", "dup-key", "req-dup2", getDummySender(), 1024L), 200L);
 
-        // Should compact to 1 pending repair (latest seqNumber wins)
         assertEquals(1, server.repairPendingCount(),
                 "Multiple commits for the same key should compact to 1 pending repair");
     }
 
-    // -------------------------------------------------------------------------
-    // Full E2E Repair Retrieval Integration
-    // -------------------------------------------------------------------------
-
     @Test
     void testActualBlobRepair() throws Exception {
-        // Setup original data and generate shards
         byte[] originalData = "Testing actual blob repair with erasure coding across nodes.".getBytes(StandardCharsets.UTF_8);
         int k = 2;
         int n = 3;
@@ -282,29 +247,26 @@ class StorageNodeRepairTest {
         byte[] shard1 = shards[1].readAllBytes();
         byte[] shard2 = shards[2].readAllBytes();
 
-        // Setup mocked peer nodes
         Javalin peer1 = Javalin.create(config ->{
-                config.startup.showJavalinBanner = false;
-                config.routes.get("/store/{partition}/<blobKey>", ctx -> {
-                    ctx.header("X-Koop-Type", "BLOB");
-                    ctx.result(shard1);
-                });
+            config.startup.showJavalinBanner = false;
+            config.routes.get("/store/{partition}/<blobKey>", ctx -> {
+                ctx.header("X-Koop-Type", "BLOB");
+                ctx.result(shard1);
+            });
         }).start(0);
         Javalin peer2 = Javalin.create(config ->{
-                config.startup.showJavalinBanner = false;
-                config.routes.get("/store/{partition}/<blobKey>", ctx -> {
-                    ctx.header("X-Koop-Type", "BLOB");
-                    ctx.result(shard2);
-                });
+            config.startup.showJavalinBanner = false;
+            config.routes.get("/store/{partition}/<blobKey>", ctx -> {
+                ctx.header("X-Koop-Type", "BLOB");
+                ctx.result(shard2);
+            });
         }).start(0);
 
         try {
-            // Start node under test
             server = new StorageNodeServerV2(0, "127.0.0.1", db, tempDir, metadataClient, pubSubClient, repairQueue);
             server.start();
             port = server.port();
 
-            // Provide populated metadata once the server port has been determined
             var es = new ErasureSetConfiguration.ErasureSet();
             es.setNumber(1);
             es.setM(k);
@@ -327,10 +289,8 @@ class StorageNodeRepairTest {
             fetcher.update(esConfig);
             fetcher.update(psConfig);
 
-            // Brief wait for metadata listener to recalculate node identities and subscriptions
             Thread.sleep(500);
 
-            // Establish request context
             String bucket = "repair-bucket";
             String key = "repair-key-actual";
             String fullKey = bucket + "/" + key;
@@ -339,10 +299,9 @@ class StorageNodeRepairTest {
             ErasureRouting routing = new ErasureRouting(psConfig, esConfig);
             int partition = routing.getPartition(fullKey).orElseThrow();
 
-            // Trigger COMMIT_MISS by processing sequencer message directly, without issuing PUT beforehand
-            server.processSequencerMessage(partition, new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 100L);
+            // Pass the originalData length as the logical size
+            server.processSequencerMessage(partition, new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), originalData.length), 100L);
 
-            // Verify completion by polling for a successful object payload
             boolean repaired = false;
             for (int i = 0; i < 50; i++) {
                 if (server.repairPendingCount() == 0) {

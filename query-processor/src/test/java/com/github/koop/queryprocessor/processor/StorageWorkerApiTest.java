@@ -44,10 +44,6 @@ public class StorageWorkerApiTest {
 
     @BeforeAll
     void setup() throws Exception {
-        // Build a shared PubSubClient backed by MemoryPubSub. Both the worker's
-        // CommitCoordinator and the fake SNs share this bus so that commit messages
-        // published by the coordinator are immediately visible to the fake SNs,
-        // which then POST their ACKs back to the coordinator's HTTP server.
         PubSubClient sharedPubSub = new PubSubClient(new MemoryPubSub());
         sharedPubSub.start();
 
@@ -57,7 +53,6 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = nodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Build a MetadataClient-backed worker
         memoryFetcher = new MemoryFetcher();
         MetadataClient metadataClient = new MetadataClient(memoryFetcher);
         metadataClient.start();
@@ -83,7 +78,7 @@ public class StorageWorkerApiTest {
     }
 
     // -------------------------------------------------------------------------
-    // Existing round-trip tests (updated to use AckingFakeStorageNodeServer)
+    // Existing round-trip tests
     // -------------------------------------------------------------------------
 
     @Test
@@ -94,7 +89,9 @@ public class StorageWorkerApiTest {
                 new ByteArrayInputStream(data));
         assertTrue(ok, "put should succeed");
 
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "fileA")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fileA");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             assertArrayEquals(data, in.readAllBytes());
         }
     }
@@ -109,7 +106,9 @@ public class StorageWorkerApiTest {
         nodes.get(1).setEnabled(false);
         nodes.get(2).setEnabled(false);
 
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "fileB")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fileB");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             assertArrayEquals(data, in.readAllBytes());
         }
     }
@@ -125,9 +124,12 @@ public class StorageWorkerApiTest {
         nodes.get(2).setEnabled(false);
         nodes.get(3).setEnabled(false);
 
-        byte[] got;
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "fileC")) {
-            got = in.readAllBytes();
+        byte[] got = new byte[0];
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fileC");
+        if (obj != null) {
+            try (InputStream in = obj.stream()) {
+                got = in.readAllBytes();
+            }
         }
 
         assertNotEquals(data.length, got.length,
@@ -153,15 +155,11 @@ public class StorageWorkerApiTest {
             memoryFetcher.update(buildErasureSetConfiguration(newSet, newSet, newSet));
             memoryFetcher.update(buildPartitionSpreadConfiguration());
 
-            // Wire up a fresh coordinator on the same bus so the new SNs' ACKs
-            // reach it.  We need to rebuild liveWorker's coordinator here because
-            // the old one is subscribed to the old sharedPubSub.
             MemoryFetcher freshFetcher = new MemoryFetcher();
             MetadataClient freshMetadata = new MetadataClient(freshFetcher);
             CommitCoordinator freshCoordinator = new CommitCoordinator(sharedPubSub, 0);
             StorageWorker freshLiveWorker = new StorageWorker(freshMetadata, freshCoordinator);
-            // start() must be called before update() so the worker's listeners
-            // are registered and fire when MemoryFetcher dispatches synchronously.
+
             freshMetadata.start();
             freshFetcher.update(buildErasureSetConfiguration(newSet, newSet, newSet));
             freshFetcher.update(buildPartitionSpreadConfiguration());
@@ -170,7 +168,9 @@ public class StorageWorkerApiTest {
             assertTrue(freshLiveWorker.put(UUID.randomUUID(), "b", "fileD", data.length,
                     new ByteArrayInputStream(data)), "put to updated nodes should succeed");
 
-            try (InputStream in = freshLiveWorker.get(UUID.randomUUID(), "b", "fileD")) {
+            StorageWorker.RetrievedObject obj = freshLiveWorker.get(UUID.randomUUID(), "b", "fileD");
+            assertNotNull(obj);
+            try (InputStream in = obj.stream()) {
                 assertArrayEquals(data, in.readAllBytes(),
                         "should read back from updated nodes");
             }
@@ -202,19 +202,18 @@ public class StorageWorkerApiTest {
                             new ByteArrayInputStream(data)),
                     "production constructor: put should succeed");
 
-            try (InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP")) {
+            StorageWorker.RetrievedObject obj = prodWorker.get(UUID.randomUUID(), "prod", "fileP");
+            assertNotNull(obj);
+            try (InputStream in = obj.stream()) {
                 assertArrayEquals(data, in.readAllBytes(),
                         "production constructor: round-trip data must match");
             }
 
-            // Delete — SNs tombstone metadata and remove shard data on receipt
-            // of the Kafka message, then ACK. The QP returns true on quorum.
             assertTrue(prodWorker.delete(UUID.randomUUID(), "prod", "fileP"),
                     "production constructor: delete should succeed");
 
-            // After deletion the shards are gone so get should return null.
-            InputStream in = prodWorker.get(UUID.randomUUID(), "prod", "fileP");
-            assertNull(in, "production constructor: get should return null after delete");
+            StorageWorker.RetrievedObject afterDelete = prodWorker.get(UUID.randomUUID(), "prod", "fileP");
+            assertNull(afterDelete, "production constructor: get should return null after delete");
 
             prodWorker.shutdown();
         } finally {
@@ -223,7 +222,7 @@ public class StorageWorkerApiTest {
     }
 
     // -------------------------------------------------------------------------
-    // New: commit-protocol tests
+    // Commit-protocol tests
     // -------------------------------------------------------------------------
 
     @Test
@@ -294,7 +293,6 @@ public class StorageWorkerApiTest {
         quorumNodes.get(0).setEnabled(false);
         quorumNodes.get(1).setEnabled(false);
         quorumNodes.get(2).setEnabled(false);
-        // Re-open the upload endpoint on those nodes so phase 1 sees 9/9 uploads.
         quorumNodes.get(0).setUploadEnabled(true);
         quorumNodes.get(1).setUploadEnabled(true);
         quorumNodes.get(2).setUploadEnabled(true);
@@ -340,7 +338,9 @@ public class StorageWorkerApiTest {
             assertTrue(ok,
                     "put should succeed: 8 shards uploaded, all 9 nodes ACK after commit");
 
-            try (InputStream in = w.get(UUID.randomUUID(), "b", "partialUpload")) {
+            StorageWorker.RetrievedObject obj = w.get(UUID.randomUUID(), "b", "partialUpload");
+            assertNotNull(obj);
+            try (InputStream in = obj.stream()) {
                 assertArrayEquals(data, in.readAllBytes());
             }
         } finally {
@@ -394,10 +394,15 @@ public class StorageWorkerApiTest {
                             data.length, new ByteArrayInputStream(data));
                     if (!ok) errors.add(new AssertionError("put failed for key " + key));
                     else {
-                        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
-                            byte[] got = in.readAllBytes();
-                            if (!Arrays.equals(data, got))
-                                errors.add(new AssertionError("data mismatch for key " + key));
+                        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", key);
+                        if (obj != null) {
+                            try (InputStream in = obj.stream()) {
+                                byte[] got = in.readAllBytes();
+                                if (!Arrays.equals(data, got))
+                                    errors.add(new AssertionError("data mismatch for key " + key));
+                            }
+                        } else {
+                            errors.add(new AssertionError("get returned null for key " + key));
                         }
                     }
                 } catch (Exception e) {
@@ -414,10 +419,6 @@ public class StorageWorkerApiTest {
     // Bucket operation tests
     // -------------------------------------------------------------------------
 
-    /**
-     * Subscribes a spy to all 6 partition topics and returns the lists it populates.
-     * 6 = 3 erasure sets × 2 partitions each.
-     */
     private <T extends Message> void spyOnPartitions(
             PubSubClient bus, Class<T> type,
             CopyOnWriteArrayList<String> topics,
@@ -438,7 +439,6 @@ public class StorageWorkerApiTest {
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
 
-        // worker shares the same bus as nodes — spy on it before calling createBucket
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
         bus.start();
         List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
@@ -499,8 +499,6 @@ public class StorageWorkerApiTest {
         bus.start();
         List<AckingFakeStorageNodeServer> bucketNodes = new ArrayList<>();
         for (int i = 0; i < 9; i++) bucketNodes.add(new AckingFakeStorageNodeServer(bus));
-        // k = n - m = 9 - 6 = 3 parity shards; deleteQuorum = k + 1 = 4
-        // Disable 6 nodes so only 3 ACK (below quorum of 4)
         for (int i = 0; i < 6; i++) bucketNodes.get(i).setEnabled(false);
         List<InetSocketAddress> set = bucketNodes.stream().map(AckingFakeStorageNodeServer::address).toList();
 
@@ -534,15 +532,16 @@ public class StorageWorkerApiTest {
             assertTrue(w.put(UUID.randomUUID(), "lifecycle-bucket", "obj1",
                     data.length, new ByteArrayInputStream(data)), "put should succeed");
 
-            try (InputStream in = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1")) {
+            StorageWorker.RetrievedObject obj = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1");
+            assertNotNull(obj);
+            try (InputStream in = obj.stream()) {
                 assertArrayEquals(data, in.readAllBytes(), "get should return original data");
             }
 
             assertTrue(w.delete(UUID.randomUUID(), "lifecycle-bucket", "obj1"), "delete should succeed");
 
-            // After deletion the shards are gone so get should return null.
-            InputStream deletedIn = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1");
-            assertNull(deletedIn, "data should not be retrievable after delete");
+            StorageWorker.RetrievedObject deletedObj = w.get(UUID.randomUUID(), "lifecycle-bucket", "obj1");
+            assertNull(deletedObj, "data should not be retrievable after delete");
 
             assertTrue(w.deleteBucket(UUID.randomUUID(), "lifecycle-bucket"), "deleteBucket should succeed");
         } finally {
@@ -702,42 +701,30 @@ public class StorageWorkerApiTest {
         }
     }
 
-    /**
-     * Proves that parseObjectListJson silently swallows parse errors.
-     * The method currently returns an empty list on malformed JSON with NO
-     * logging — making corrupt responses indistinguishable from empty buckets.
-     * This test locks in the current fallback behavior so the fix can safely
-     * add logging without breaking the return contract.
-     */
     @Test
     void parseObjectListJson_returnsEmptyOnMalformedInput() throws Exception {
-        // Access the private static method via reflection
         java.lang.reflect.Method method = StorageWorker.class.getDeclaredMethod(
                 "parseObjectListJson", String.class);
         method.setAccessible(true);
 
-        // Malformed JSON — not valid JSON at all
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result1 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "THIS IS NOT JSON!!!");
         assertNotNull(result1, "Should return non-null on malformed input");
         assertTrue(result1.isEmpty(), "Should return empty list on malformed JSON, got: " + result1);
 
-        // Truncated JSON — partial array
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result2 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "[{\"key\":\"test");
         assertNotNull(result2, "Should return non-null on truncated input");
         assertTrue(result2.isEmpty(), "Should return empty list on truncated JSON, got: " + result2);
 
-        // Null input
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result3 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, (String) null);
         assertNotNull(result3, "Should return non-null on null input");
         assertTrue(result3.isEmpty(), "Should return empty list on null input");
 
-        // Empty string
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result4 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "");
@@ -745,16 +732,6 @@ public class StorageWorkerApiTest {
         assertTrue(result4.isEmpty(), "Should return empty list on empty input");
     }
 
-    /**
-     * Proves that FakeStorageNodeServer returns 200 for list-objects
-     * on a bucket that was never created. In production, storage nodes would
-     * return 404 for a non-existent bucket. The fake server should do the same
-     * to prevent false-positive tests.
-     *
-     * After fixing FakeStorageNodeServer.handleListObjects() to check
-     * bucket existence, this test should still pass (empty list returned)
-     * because StorageWorker.listObjects() treats 404 the same as empty.
-     */
     @Test
     void listObjects_returnsEmptyForNonExistentBucket() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -766,7 +743,6 @@ public class StorageWorkerApiTest {
         MetadataClient client = createConfiguredClient(set);
         StorageWorker w = new StorageWorker(client, new CommitCoordinator(bus, 0));
         try {
-            // Do NOT create the bucket — go straight to listing
             List<StorageWorker.ObjectInfo> objects = w.listObjects("never-created-bucket", "", 1000);
             assertNotNull(objects, "Should return non-null even for non-existent bucket");
             assertTrue(objects.isEmpty(),
@@ -791,9 +767,7 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = timeoutNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Disable all nodes so no ACKs arrive — commit should time out
         for (AckingFakeStorageNodeServer n : timeoutNodes) n.setEnabled(false);
-        // Keep upload endpoints open so Phase 1 succeeds
         for (AckingFakeStorageNodeServer n : timeoutNodes) n.setUploadEnabled(true);
 
         MetadataClient client = createConfiguredClient(set);
@@ -826,8 +800,6 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = deleteNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // k = n - m = 3 parity; deleteQuorum = k + 1 = 4
-        // Disable 6 nodes → only 3 ACK → below quorum
         for (int i = 0; i < 6; i++) deleteNodes.get(i).setEnabled(false);
 
         MetadataClient client = createConfiguredClient(set);
@@ -853,7 +825,6 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = unreachableNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
-        // Disable upload on all nodes so Phase 1 gets 0 shards uploaded
         for (AckingFakeStorageNodeServer n : unreachableNodes) n.setUploadEnabled(false);
 
         MetadataClient client = createConfiguredClient(set);
@@ -909,7 +880,6 @@ public class StorageWorkerApiTest {
         for (int s = 0; s < 3; s++) {
             PartitionSpread spread = new PartitionSpread();
             spread.setErasureSet(s + 1);
-            // 2 partitions per erasure set — enough for routing, faster for logging/testing
             spread.setPartitions(List.of(s * 2, s * 2 + 1));
             spreads.add(spread);
         }

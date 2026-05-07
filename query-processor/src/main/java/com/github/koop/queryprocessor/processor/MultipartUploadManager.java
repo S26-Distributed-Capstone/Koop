@@ -185,6 +185,18 @@ public class MultipartUploadManager {
                 MultipartUploadResult.Status.CONFLICT,
                 "Upload " + uploadId + " was aborted");
         }
+        long totalSize = 0;
+        for (int partNumber : sortedPartNumbers) {
+            String sizeValue = cache.get(MultipartUploadSession.partSizeKey(uploadId, partNumber));
+            if (sizeValue == null) {
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT, "Missing cached size");
+            }
+            try {
+                totalSize += Long.parseLong(sizeValue);
+            } catch (NumberFormatException e) {
+                return MultipartUploadResult.failure(MultipartUploadResult.Status.CONFLICT, "Invalid cached size");
+            }
+        }
 
         // Build the chunk list using actual storage keys for each part.
         // handleMultipartGet() uses these as routing keys to fetch individual
@@ -197,7 +209,7 @@ public class MultipartUploadManager {
 
         boolean published;
         try {
-            published = storageWorker.beginMultipartCommit(sessionBucket, sessionKey, uploadId, chunkKeys);
+            published = storageWorker.beginMultipartCommit(sessionBucket, sessionKey, uploadId, chunkKeys, totalSize);
         } catch (Exception e) {
             restoreSessionToActiveIfStillCompleting(uploadId, sessionBucket, sessionKey);
             return MultipartUploadResult.failure(MultipartUploadResult.Status.STORAGE_FAILURE,

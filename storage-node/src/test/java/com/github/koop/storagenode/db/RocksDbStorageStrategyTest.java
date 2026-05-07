@@ -30,10 +30,6 @@ class RocksDbStorageStrategyTest {
         if (strategy != null) strategy.close();
     }
 
-    // =========================================================================
-    // Table #1 — Op Log
-    // =========================================================================
-
     @Test
     void testAddLogAndGetLogsRange() throws Exception {
         int partition = 1;
@@ -43,8 +39,7 @@ class RocksDbStorageStrategyTest {
             }
             txn.commit();
         }
-        
-        // Iterating backwards from 4L down to 2L
+
         try (Stream<OpLog> stream = strategy.getLogs(partition, 4L, 2L)) {
             List<OpLog> logs = stream.collect(Collectors.toList());
             assertEquals(3, logs.size());
@@ -79,15 +74,11 @@ class RocksDbStorageStrategyTest {
         }
     }
 
-    // =========================================================================
-    // Table #2 — Metadata with all three FileVersion types
-    // =========================================================================
-
     @Test
     void testUpdateAndGetMetadataRegularVersion() throws Exception {
         Metadata meta = new Metadata("animals/cat.jpg", 1,
-                List.of(new RegularFileVersion(100L, "/data/cat.blob", true)));
-        
+                List.of(new RegularFileVersion(100L, "/data/cat.blob", true, 2048L)));
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putMetadata(meta);
             txn.commit();
@@ -98,13 +89,14 @@ class RocksDbStorageStrategyTest {
         assertEquals(100L, retrieved.versions().get(0).sequenceNumber());
         assertEquals("/data/cat.blob", ((RegularFileVersion) retrieved.versions().get(0)).location());
         assertTrue(((RegularFileVersion) retrieved.versions().get(0)).materialized());
+        assertEquals(2048L, retrieved.versions().get(0).size());
     }
 
     @Test
     void testUpdateAndGetMetadataMultipartVersion() throws Exception {
         Metadata meta = new Metadata("animals/dog.jpg", 1,
-                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"))));
-        
+                List.of(new MultipartFileVersion(98L, List.of("chunk-0.blob", "chunk-1.blob"), 5000L)));
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putMetadata(meta);
             txn.commit();
@@ -119,9 +111,9 @@ class RocksDbStorageStrategyTest {
     @Test
     void testUpdateAndGetMetadataTombstoneVersion() throws Exception {
         Metadata meta = new Metadata("animals/cat.jpg", 1, List.of(
-                new RegularFileVersion(100L, "/data/cat.blob", false),
+                new RegularFileVersion(100L, "/data/cat.blob", false, 1024L),
                 new TombstoneFileVersion(101L)));
-        
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putMetadata(meta);
             txn.commit();
@@ -138,10 +130,10 @@ class RocksDbStorageStrategyTest {
     @Test
     void testUpdateAndGetMetadataAllThreeTypesRoundTrip() throws Exception {
         Metadata meta = new Metadata("mixed/key", 2, List.of(
-                new RegularFileVersion(10L, "/blob-10", true),
-                new MultipartFileVersion(20L, List.of("chunk-a")),
+                new RegularFileVersion(10L, "/blob-10", true, 1024L),
+                new MultipartFileVersion(20L, List.of("chunk-a"), 5000L),
                 new TombstoneFileVersion(30L)));
-        
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putMetadata(meta);
             txn.commit();
@@ -160,7 +152,7 @@ class RocksDbStorageStrategyTest {
         long seq = 42L;
         int partition = 2;
         String key = "atomic.txt";
-        
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putLog(new OpLog(partition, seq, key, Operation.DELETE));
             txn.putMetadata(new Metadata(key, partition, List.of(new TombstoneFileVersion(seq))));
@@ -183,9 +175,9 @@ class RocksDbStorageStrategyTest {
     @Test
     void testStreamMetadataWithPrefix() throws Exception {
         try (StorageTransaction txn = strategy.beginTransaction()) {
-            txn.putMetadata(new Metadata("photos/cat.jpg", 1, List.of(new RegularFileVersion(1L, "/l1", true))));
-            txn.putMetadata(new Metadata("photos/dog.jpg", 1, List.of(new RegularFileVersion(2L, "/l2", true))));
-            txn.putMetadata(new Metadata("videos/clip.mp4", 1, List.of(new RegularFileVersion(3L, "/l3", false))));
+            txn.putMetadata(new Metadata("photos/cat.jpg", 1, List.of(new RegularFileVersion(1L, "/l1", true, 1024L))));
+            txn.putMetadata(new Metadata("photos/dog.jpg", 1, List.of(new RegularFileVersion(2L, "/l2", true, 1024L))));
+            txn.putMetadata(new Metadata("videos/clip.mp4", 1, List.of(new RegularFileVersion(3L, "/l3", false, 1024L))));
             txn.commit();
         }
 
@@ -195,10 +187,6 @@ class RocksDbStorageStrategyTest {
             assertTrue(keys.containsAll(List.of("photos/cat.jpg", "photos/dog.jpg")));
         }
     }
-
-    // =========================================================================
-    // Table #3 — Buckets
-    // =========================================================================
 
     @Test
     void testCreateAndCheckBucketExistsInTransaction() throws Exception {
@@ -220,7 +208,7 @@ class RocksDbStorageStrategyTest {
             txn.putBucket(new Bucket("animals", 1, 5L, false));
             txn.commit();
         }
-        
+
         try (StorageTransaction txn = strategy.beginTransaction()) {
             txn.putLog(new OpLog(1, 10L, "animals", Operation.DELETE_BUCKET));
             txn.putBucket(new Bucket("animals", 1, 10L, true));
@@ -246,10 +234,6 @@ class RocksDbStorageStrategyTest {
     void testGetBucketReturnsEmptyForMissingKey() throws Exception {
         assertTrue(strategy.getBucket("nonexistent").isEmpty());
     }
-
-    // =========================================================================
-    // Table #4 — Uncommitted Writes
-    // =========================================================================
 
     @Test
     void testPutAndGetUncommittedWrite() throws Exception {

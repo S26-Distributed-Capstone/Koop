@@ -59,13 +59,9 @@ public class StorageNodeV2Test {
         int partition = 1;
         long seqNumber = 100L;
 
-        // 1. Store data
         storageNode.store(partition, key, requestID, Channels.newChannel(new ByteArrayInputStream(requestData)));
+        storageNode.commit(partition, key, requestID, seqNumber, requestData.length);
 
-        // 2. Commit metadata
-        storageNode.commit(partition, key, requestID, seqNumber);
-
-        // 3. Retrieve latest
         Optional<GetObjectResponse> responseOpt = storageNode.retrieve(key);
         assertTrue(responseOpt.isPresent(), "Response should be present");
 
@@ -88,14 +84,12 @@ public class StorageNodeV2Test {
             assertArrayEquals(requestData, readBytes);
         }
 
-        // 4. Retrieve specific version
         Optional<GetObjectResponse> specificVersionOpt = storageNode.retrieve(key, seqNumber);
         assertTrue(specificVersionOpt.isPresent(), "Response for specific version should be present");
         try (FileObject vo = (FileObject) specificVersionOpt.get()) {
             assertEquals(seqNumber, vo.version().sequenceNumber());
         }
 
-        // 5. Retrieve an unknown version
         Optional<GetObjectResponse> unknownVersionOpt = storageNode.retrieve(key, 999L);
         assertFalse(unknownVersionOpt.isPresent(), "Unknown version should not be present");
     }
@@ -104,18 +98,15 @@ public class StorageNodeV2Test {
     public void testDelete() throws Exception {
         String key = "bucket/obj-to-delete";
         String requestID = "req-del";
+        byte[] data = "data".getBytes();
 
-        // Setup existing object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
-        storageNode.commit(1, key, requestID, 10L);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream(data)));
+        storageNode.commit(1, key, requestID, 10L, data.length);
 
-        // Ensure it's there
         assertTrue(storageNode.retrieve(key).isPresent());
 
-        // Delete object
         storageNode.delete(1, key, 11L);
 
-        // Retrieve should get Tombstone
         var responseOpt = storageNode.retrieve(key);
         assertTrue(responseOpt.isPresent(), "Response should be present after deletion");
         var response = responseOpt.get();
@@ -128,19 +119,17 @@ public class StorageNodeV2Test {
     public void testPutAfterDelete() throws Exception {
         String key = "bucket/obj-recreate";
         String requestID = "req-recreate";
+        byte[] data = "data".getBytes();
 
-        // Setup existing object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
-        storageNode.commit(1, key, requestID, 10L);
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream(data)));
+        storageNode.commit(1, key, requestID, 10L, data.length);
 
-        // Delete object
         storageNode.delete(1, key, 11L);
 
-        // Recreate object
-        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream("newdata".getBytes())));
-        storageNode.commit(1, key, requestID, 12L);
+        byte[] newData = "newdata".getBytes();
+        storageNode.store(1, key, requestID, Channels.newChannel(new ByteArrayInputStream(newData)));
+        storageNode.commit(1, key, requestID, 12L, newData.length);
 
-        // Retrieve should get new data
         var responseOpt = storageNode.retrieve(key);
         assertTrue(responseOpt.isPresent(), "Response should be present after recreation");
         var response = responseOpt.get();
@@ -154,7 +143,7 @@ public class StorageNodeV2Test {
             buffer.flip();
             byte[] readBytes = new byte[buffer.remaining()];
             buffer.get(readBytes);
-            assertArrayEquals("newdata".getBytes(), readBytes);
+            assertArrayEquals(newData, readBytes);
         }
     }
 
@@ -168,7 +157,7 @@ public class StorageNodeV2Test {
         String key = "bucket/multipart-obj";
         List<String> chunks = List.of("chunk1", "chunk2", "chunk3");
 
-        storageNode.multipartCommit(1, key, 50L, chunks);
+        storageNode.multipartCommit(1, key, 50L, chunks, 5000L);
 
         Optional<GetObjectResponse> responseOpt = storageNode.retrieve(key);
         assertTrue(responseOpt.isPresent());
@@ -195,10 +184,6 @@ public class StorageNodeV2Test {
         assertFalse(storageNode.bucketExists(bucketKey));
     }
 
-    // =========================================================================
-    // isActivelyWriting
-    // =========================================================================
-
     @Test
     public void testWriteTrackerFalseWhenIdle() {
         assertFalse(writeTracker.isActive("any-key"),
@@ -212,7 +197,6 @@ public class StorageNodeV2Test {
         CountDownLatch allowComplete = new CountDownLatch(1);
         AtomicBoolean wasActiveWhileWriting = new AtomicBoolean(false);
 
-        // Run store() on a separate thread so we can observe the tracker mid-write
         var executor = Executors.newSingleThreadExecutor();
         executor.submit(() -> {
             try {
@@ -250,23 +234,20 @@ public class StorageNodeV2Test {
                 "WriteTracker should be inactive once store() returns");
     }
 
-    // =========================================================================
-    // commit() return value
-    // =========================================================================
-
     @Test
     public void testCommitReturnsTrueWhenBlobPreStored() throws Exception {
         String key = "bucket/pre-stored";
         String reqId = "req-pre";
-        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream("data".getBytes())));
+        byte[] data = "data".getBytes();
+        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream(data)));
 
-        boolean materialized = storageNode.commit(1, key, reqId, 42L);
+        boolean materialized = storageNode.commit(1, key, reqId, 42L, data.length);
         assertTrue(materialized, "commit() should return true when blob was stored first");
     }
 
     @Test
     public void testCommitReturnsFalseWhenBlobNotYetStored() throws Exception {
-        boolean materialized = storageNode.commit(1, "bucket/no-blob", "req-absent", 10L);
+        boolean materialized = storageNode.commit(1, "bucket/no-blob", "req-absent", 10L, 1024L);
         assertFalse(materialized, "commit() should return false when blob has not arrived yet");
     }
 
@@ -274,23 +255,17 @@ public class StorageNodeV2Test {
     public void testCommitReturnsTrueForLateArrivalAfterCommit() throws Exception {
         String key = "bucket/late-arrival";
         String reqId = "req-late";
+        byte[] lateData = "late".getBytes();
 
-        // Commit first (blob hasn't arrived yet)
-        boolean firstCommit = storageNode.commit(1, key, reqId, 20L);
+        boolean firstCommit = storageNode.commit(1, key, reqId, 20L, lateData.length);
         assertFalse(firstCommit, "First commit without blob should return false");
 
-        // Blob arrives after commit — registerBlobArrival should materialise the version
-        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream("late".getBytes())));
+        storageNode.store(1, key, reqId, Channels.newChannel(new ByteArrayInputStream(lateData)));
 
-        // Now the version should be retrievable (materialized=true after store updates it)
         Optional<StorageNodeV2.GetObjectResponse> resp = storageNode.retrieve(key);
         assertTrue(resp.isPresent(), "Object should be retrievable after late blob arrival");
         assertTrue(resp.get() instanceof StorageNodeV2.FileObject);
     }
-
-    // =========================================================================
-    // setRepairWorkerPool wires read-repair
-    // =========================================================================
 
     @Test
     public void testRetrieveReturnEmptyForMissingBlobWithoutEnqueueingRepair() throws Exception {
@@ -302,11 +277,8 @@ public class StorageNodeV2Test {
         repairPool.start();
         storageNode = new StorageNodeV2(db, tempDir, tracker);
 
-        // Commit without a prior store → version recorded as not materialized
-        storageNode.commit(1, "bucket/ghost", "req-ghost", 99L);
+        storageNode.commit(1, "bucket/ghost", "req-ghost", 99L, 1024L);
 
-        // retrieve() should detect missing physical file and return empty,
-        // but NOT enqueue repair (read-repair path was removed)
         var result = storageNode.retrieve("bucket/ghost");
         assertTrue(result.isEmpty(),
                 "Missing blob should return empty");
@@ -319,9 +291,7 @@ public class StorageNodeV2Test {
 
     @Test
     public void testRetrieveReturnsEmptyWhenPoolIsNull() throws Exception {
-        // storageNode constructed without a repair pool (null) — should not throw
-        storageNode.commit(1, "bucket/no-pool", "req-no-pool", 5L);
-        // retrieve() with a null repairQueue should return empty, not throw
+        storageNode.commit(1, "bucket/no-pool", "req-no-pool", 5L, 1024L);
         Optional<StorageNodeV2.GetObjectResponse> result = storageNode.retrieve("bucket/no-pool");
         assertTrue(result.isEmpty(), "Missing blob should return empty; no exception even with null repair queue");
     }
@@ -330,13 +300,13 @@ public class StorageNodeV2Test {
     public void testListItemsInBucket() throws Exception {
         String prefix = "test-bucket/";
         storageNode.store(1,prefix+"file1", "req-1", Channels.newChannel(new ByteArrayInputStream("1".getBytes())));
-        storageNode.commit(1, prefix + "file1", "req-1", 100L);
+        storageNode.commit(1, prefix + "file1", "req-1", 100L, 1L);
 
         storageNode.store(1, prefix+"file2","req-2", Channels.newChannel(new ByteArrayInputStream("2".getBytes())));
-        storageNode.commit(1, prefix + "file2", "req-2", 101L);
+        storageNode.commit(1, prefix + "file2", "req-2", 101L, 1L);
 
         storageNode.store(1,"other-bucket/file3", "req-3", Channels.newChannel(new ByteArrayInputStream("3".getBytes())));
-        storageNode.commit(1, "other-bucket/file3", "req-3", 102L);
+        storageNode.commit(1, "other-bucket/file3", "req-3", 102L, 1L);
 
         List<Metadata> items = storageNode.listItemsInBucket(prefix).toList();
 

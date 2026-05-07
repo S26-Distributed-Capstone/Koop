@@ -62,6 +62,9 @@ public final class StorageWorker {
     private final CommitCoordinator commitCoordinator;
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
+    // Wrapper record to return both the stream and its exact byte size
+    public record RetrievedObject(InputStream stream, long size) {}
+
     // Convenience constructor — creates a MemoryPubSub-backed CommitCoordinator
     // on an OS-assigned port. Useful when only a MetadataClient is available.
     public StorageWorker(MetadataClient metadataClient) {
@@ -163,13 +166,13 @@ public final class StorageWorker {
         try {
             uploaded = executor.invokeAll(tasks, SHARD_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     .stream().filter(f -> {
-                try {
-                    return f.get();
-                } catch (InterruptedException | ExecutionException | CancellationException e) {
-                    logger.warn("Shard upload task error: {}", e.getMessage());
-                    return false;
-                }
-            }).count();
+                        try {
+                            return f.get();
+                        } catch (InterruptedException | ExecutionException | CancellationException e) {
+                            logger.warn("Shard upload task error: {}", e.getMessage());
+                            return false;
+                        }
+                    }).count();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
@@ -182,15 +185,15 @@ public final class StorageWorker {
 
         logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, n, requestID);
 
-        // Phase 2 – commit.
-        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, writeQuorum);
+        // Phase 2 – commit. (Pass the exact length to the database metadata)
+        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, length, writeQuorum);
         if (!committed) {
             logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
         }
         return committed;
     }
 
-    public InputStream get(UUID requestID, String bucket, String key) throws IOException {
+    public RetrievedObject get(UUID requestID, String bucket, String key) throws IOException {
         if (requestID == null)
             throw new IllegalArgumentException("requestID is null");
         if (bucket == null)
@@ -267,11 +270,12 @@ public final class StorageWorker {
             });
         }
 
-        return pis;
+        // Return both the stream and the logical size extracted from the storage node headers
+        return new RetrievedObject(pis, representative.logicalSize());
     }
 
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
-            OutputStream out) throws IOException {
+                                     OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
         List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
 
@@ -311,8 +315,8 @@ public final class StorageWorker {
     }
 
     private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int m,
-            int n,
-            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
+                                             int n,
+                                             OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
             throws IOException {
         logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
                 maxVersion, storageKey, maxVersionShardCount, m);
@@ -351,7 +355,7 @@ public final class StorageWorker {
     }
 
     private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes,
-            OptionalLong targetVersion) {
+                                            OptionalLong targetVersion) {
         List<Callable<ShardResponse>> tasks = new ArrayList<>();
 
         for (int i = 0; i < nodes.size(); i++) {
@@ -372,6 +376,8 @@ public final class StorageWorker {
                 if (response.statusCode() == 200) {
                     long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
                     ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
+                    long logicalSize = response.headers().firstValueAsLong("X-Koop-Size").orElse(-1L);
+
                     List<String> chunks = new ArrayList<>();
                     if (type == ShardType.MULTIPART) {
                         byte[] payload = response.body().readAllBytes();
@@ -385,10 +391,10 @@ public final class StorageWorker {
                                 }
                             }
                         }
-                        return new ShardResponse(index, version, type, chunks, InputStream.nullInputStream());
+                        return new ShardResponse(index, version, type, logicalSize, chunks, InputStream.nullInputStream());
                     }
 
-                    return new ShardResponse(index, version, type, List.of(), response.body());
+                    return new ShardResponse(index, version, type, logicalSize, List.of(), response.body());
                 }
                 return null;
             });
@@ -412,7 +418,7 @@ public final class StorageWorker {
     }
 
     private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int m,
-            int n, OutputStream out) throws IOException {
+                                          int n, OutputStream out) throws IOException {
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
 
@@ -450,8 +456,8 @@ public final class StorageWorker {
         }
     }
 
-    private record ShardResponse(int nodeIndex, long version, ShardType type, List<String> chunks,
-            InputStream payload) {
+    private record ShardResponse(int nodeIndex, long version, ShardType type, long logicalSize, List<String> chunks,
+                                 InputStream payload) {
     }
 
     /**
@@ -694,14 +700,14 @@ public final class StorageWorker {
             return result != null ? result : List.of();
         } catch (Exception e) {
             logger.warn("Failed to parse object list JSON (body length={}): {}",
-                        body != null ? body.length() : 0, e.getMessage());
+                    body != null ? body.length() : 0, e.getMessage());
             return List.of();
         }
     }
 
     public record ObjectInfo(String key, long size, String lastModified) {}
 
-    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks) {
+    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks, long totalSize) {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
         if (key == null)
@@ -734,8 +740,7 @@ public final class StorageWorker {
         }
 
         int multipartQuorum = erasureSetOpt.get().getK() + 1;
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
-                multipartQuorum);
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, totalSize, multipartQuorum);
     }
 
     public void shutdown() {
@@ -785,7 +790,7 @@ public final class StorageWorker {
             logger.info("ErasureRouting rebuilt");
         } else {
             logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
-                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                            + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
                     ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }

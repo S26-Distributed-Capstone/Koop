@@ -130,14 +130,14 @@ class S3Test {
         when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
 
         assertDoesNotThrow(() ->
-            s3.putObject(
-                    PutObjectRequest.builder()
-                            .bucket(BUCKET)
-                            .key(KEY)
-                            .contentLength((long) CONTENT_BYTES.length)
-                            .build(),
-                    RequestBody.fromBytes(CONTENT_BYTES)
-            )
+                s3.putObject(
+                        PutObjectRequest.builder()
+                                .bucket(BUCKET)
+                                .key(KEY)
+                                .contentLength((long) CONTENT_BYTES.length)
+                                .build(),
+                        RequestBody.fromBytes(CONTENT_BYTES)
+                )
         );
     }
 
@@ -172,7 +172,7 @@ class S3Test {
                 PutObjectRequest.builder()
                         .bucket(BUCKET)
                         .key("file-upload.txt")
-                        .contentLength(expectedLength) 
+                        .contentLength(expectedLength)
                         .build(),
                 RequestBody.fromFile(tempFile)
         );
@@ -205,7 +205,7 @@ class S3Test {
     @Order(6)
     void sdkGetObject_returnsCorrectContent() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(CONTENT_BYTES), CONTENT_BYTES.length));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder()
@@ -222,7 +222,7 @@ class S3Test {
     @Test
     @Order(7)
     void sdkGetObject_notFound_throwsNoSuchKeyException() throws Exception {
-                when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
+        when(mockStorage.getObject(BUCKET, "missing-key")).thenReturn(null);
 
         NoSuchKeyException ex = assertThrows(NoSuchKeyException.class, () ->
                 s3.getObject(
@@ -257,8 +257,9 @@ class S3Test {
     @Test
     @Order(9)
     void sdkGetObject_delegatesCorrectBucketAndKey_toStorageService() throws Exception {
+        byte[] data = "data".getBytes();
         when(mockStorage.getObject("videos", "clip.mp4"))
-                                .thenReturn(new ByteArrayInputStream("data".getBytes()));
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(data), data.length));
 
         s3.getObject(
                 GetObjectRequest.builder().bucket("videos").key("clip.mp4").build(),
@@ -271,7 +272,7 @@ class S3Test {
     @Test
     void sdkGetObject_emptyObject_returns200_withZeroBytes() throws Exception {
         when(mockStorage.getObject(BUCKET, "empty-object"))
-                                .thenReturn(new ByteArrayInputStream(new byte[0]));
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(new byte[0]), 0));
 
         ResponseBytes<GetObjectResponse> response = s3.getObject(
                 GetObjectRequest.builder()
@@ -336,20 +337,20 @@ class S3Test {
 
         when(mockStorage.putObject(anyString(), anyString(), any(), anyLong())).thenReturn(StorageResult.success());
         when(mockStorage.getObject(BUCKET, "lifecycle.bin"))
-                .thenReturn(new ByteArrayInputStream(data))
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(data), data.length))
                 .thenReturn(null);
         when(mockStorage.deleteObject(anyString(), anyString())).thenReturn(StorageResult.success());
 
         // PUT
-        assertDoesNotThrow(() -> 
-            s3.putObject(
-                    PutObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin")
-                            .contentLength((long) data.length).build(),
-                    RequestBody.fromBytes(data)
-            )
+        assertDoesNotThrow(() ->
+                s3.putObject(
+                        PutObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin")
+                                .contentLength((long) data.length).build(),
+                        RequestBody.fromBytes(data)
+                )
         );
 
-        // GET 
+        // GET
         ResponseBytes<GetObjectResponse> getResp = s3.getObject(
                 GetObjectRequest.builder().bucket(BUCKET).key("lifecycle.bin").build(),
                 ResponseTransformer.toBytes()
@@ -377,7 +378,7 @@ class S3Test {
     @Order(14)
     void sdkGetObject_contentType_isOctetStream() throws Exception {
         when(mockStorage.getObject(BUCKET, KEY))
-                                .thenReturn(new ByteArrayInputStream(CONTENT_BYTES));
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(CONTENT_BYTES), CONTENT_BYTES.length));
 
         ResponseBytes<GetObjectResponse> result = s3.getObject(
                 GetObjectRequest.builder().bucket(BUCKET).key(KEY).build(),
@@ -423,13 +424,13 @@ class S3Test {
 
         // Use RequestBody.fromInputStream and explicitly pass the length
         assertDoesNotThrow(() ->
-            s3.putObject(
-                    PutObjectRequest.builder()
-                            .bucket(BUCKET)
-                            .key("stream-upload.txt")
-                            .build(),
-                    RequestBody.fromInputStream(new ByteArrayInputStream(streamData), expectedLength)
-            )
+                s3.putObject(
+                        PutObjectRequest.builder()
+                                .bucket(BUCKET)
+                                .key("stream-upload.txt")
+                                .build(),
+                        RequestBody.fromInputStream(new ByteArrayInputStream(streamData), expectedLength)
+                )
         );
 
         // Verify that the exact stream size was passed to the storage worker backend
@@ -532,7 +533,7 @@ class S3Test {
     @Test
     @Order(24)
     void sdkListObjects_withObjects_returnsCorrectKeys() throws Exception {
-        // ETag is omitted from the ObjectSummary 
+        // ETag is omitted from the ObjectSummary
         List<ObjectSummary> summaries = List.of(
                 new ObjectSummary("file-a.txt", 100L, "2025-01-01T00:00:00Z"),
                 new ObjectSummary("file-b.txt", 200L, "2025-01-02T00:00:00Z")
@@ -597,7 +598,7 @@ class S3Test {
 
         // This should NOT throw — if XML is invalid the SDK will throw S3Exception
         ListObjectsV2Response response = assertDoesNotThrow(() ->
-                s3.listObjectsV2(ListObjectsV2Request.builder().bucket(BUCKET).build()),
+                        s3.listObjectsV2(ListObjectsV2Request.builder().bucket(BUCKET).build()),
                 "Keys with XML special characters should not break the XML response"
         );
 
@@ -659,25 +660,25 @@ class S3Test {
     @Test
     @Order(31)
     void sdkUploadPart_completesWithoutException() throws Exception {
-        byte[] partData = new byte[5 * 1024 * 1024]; 
+        byte[] partData = new byte[5 * 1024 * 1024];
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-                        return MultipartUploadResult.success();
+            return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
                 eq(1), any(), anyLong());
 
-        assertDoesNotThrow(() -> 
-            s3.uploadPart(
-                    UploadPartRequest.builder()
-                            .bucket(BUCKET)
-                            .key(KEY)
-                            .uploadId("upload-id-xyz")
-                            .partNumber(1)
-                            .contentLength((long) partData.length)
-                            .build(),
-                    RequestBody.fromBytes(partData)
-            )
+        assertDoesNotThrow(() ->
+                s3.uploadPart(
+                        UploadPartRequest.builder()
+                                .bucket(BUCKET)
+                                .key(KEY)
+                                .uploadId("upload-id-xyz")
+                                .partNumber(1)
+                                .contentLength((long) partData.length)
+                                .build(),
+                        RequestBody.fromBytes(partData)
+                )
         );
     }
 
@@ -688,7 +689,7 @@ class S3Test {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-                        return MultipartUploadResult.success();
+            return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(anyString(), anyString(), anyString(), anyInt(), any(), anyLong());
 
         s3.uploadPart(
@@ -709,21 +710,21 @@ class S3Test {
     @Order(33)
     void sdkCompleteMultipartUpload_completesWithoutException() throws Exception {
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq("upload-id-xyz"), anyList()))
-                                .thenReturn(MultipartUploadResult.success());
+                .thenReturn(MultipartUploadResult.success());
 
         CompletedPart sdkPart = CompletedPart.builder().partNumber(1).build();
 
-        assertDoesNotThrow(() -> 
-            s3.completeMultipartUpload(
-                    CompleteMultipartUploadRequest.builder()
-                            .bucket(BUCKET)
-                            .key(KEY)
-                            .uploadId("upload-id-xyz")
-                            .multipartUpload(CompletedMultipartUpload.builder()
-                                    .parts(sdkPart)
-                                    .build())
-                            .build()
-            )
+        assertDoesNotThrow(() ->
+                s3.completeMultipartUpload(
+                        CompleteMultipartUploadRequest.builder()
+                                .bucket(BUCKET)
+                                .key(KEY)
+                                .uploadId("upload-id-xyz")
+                                .multipartUpload(CompletedMultipartUpload.builder()
+                                        .parts(sdkPart)
+                                        .build())
+                                .build()
+                )
         );
     }
 
@@ -731,7 +732,7 @@ class S3Test {
     @Order(34)
     void sdkCompleteMultipartUpload_delegatesCorrectUploadIdAndParts_toStorageService() throws Exception {
         when(mockStorage.completeMultipartUpload(anyString(), anyString(), anyString(), anyList()))
-                                .thenReturn(MultipartUploadResult.success());
+                .thenReturn(MultipartUploadResult.success());
 
         CompletedPart part1 = CompletedPart.builder().partNumber(1).build();
         CompletedPart part2 = CompletedPart.builder().partNumber(2).build();
@@ -746,8 +747,8 @@ class S3Test {
                 eq(BUCKET), eq(KEY), eq("upload-id-xyz"),
                 argThat(parts ->
                         parts.size() == 2
-                        && parts.get(0).partNumber() == 1
-                        && parts.get(1).partNumber() == 2
+                                && parts.get(0).partNumber() == 1
+                                && parts.get(1).partNumber() == 2
                 )
         );
     }
@@ -794,17 +795,19 @@ class S3Test {
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-                        return MultipartUploadResult.success();
+            return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(1), any(), anyLong());
         doAnswer(invocation -> {
             java.io.InputStream is = invocation.getArgument(4);
             is.readAllBytes();
-                        return MultipartUploadResult.success();
+            return MultipartUploadResult.success();
         }).when(mockStorage).uploadPart(eq(BUCKET), eq(KEY), eq(uploadId), eq(2), any(), anyLong());
         when(mockStorage.completeMultipartUpload(eq(BUCKET), eq(KEY), eq(uploadId), anyList()))
-                                .thenReturn(MultipartUploadResult.success());
+                .thenReturn(MultipartUploadResult.success());
+
+        byte[] assembled = "assembled".getBytes(StandardCharsets.UTF_8);
         when(mockStorage.getObject(BUCKET, KEY))
-                .thenReturn(new ByteArrayInputStream("assembled".getBytes(StandardCharsets.UTF_8)));
+                .thenReturn(new StorageService.GetObjectResult(new ByteArrayInputStream(assembled), assembled.length));
 
         // Step 1: initiate
         CreateMultipartUploadResponse initResp = s3.createMultipartUpload(
@@ -825,16 +828,16 @@ class S3Test {
         );
 
         // Step 3: complete (ETags omitted from parts)
-        assertDoesNotThrow(() -> 
-            s3.completeMultipartUpload(
-                    CompleteMultipartUploadRequest.builder()
-                            .bucket(BUCKET).key(KEY).uploadId(uploadId)
-                            .multipartUpload(CompletedMultipartUpload.builder().parts(
-                                    CompletedPart.builder().partNumber(1).build(),
-                                    CompletedPart.builder().partNumber(2).build()
-                            ).build())
-                            .build()
-            )
+        assertDoesNotThrow(() ->
+                s3.completeMultipartUpload(
+                        CompleteMultipartUploadRequest.builder()
+                                .bucket(BUCKET).key(KEY).uploadId(uploadId)
+                                .multipartUpload(CompletedMultipartUpload.builder().parts(
+                                        CompletedPart.builder().partNumber(1).build(),
+                                        CompletedPart.builder().partNumber(2).build()
+                                ).build())
+                                .build()
+                )
         );
 
         // Step 4: verify assembled object is retrievable
