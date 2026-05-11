@@ -27,6 +27,10 @@ import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
+/**
+ * The API Gateway entrypoint. It uses Javalin to map incoming HTTP requests
+ * (following the Amazon S3 REST protocol) to the internal distributed Koop storage system.
+ */
 public class Main {
 
     private static final Logger logger = Logger.getLogger(Main.class.getName());
@@ -34,18 +38,19 @@ public class Main {
     public static Javalin createApp(StorageService storage) {
         var app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
-            config.http.maxRequestSize = 100_000_000L;
+            config.http.maxRequestSize = 100_000_000L; // 100 MB
 
             config.routes.get("/health", Main::healthHandler);
 
+            // ── Bucket-level routes ─────────────────────────────────────────
             config.routes.put("/{bucket}",    ctx -> createBucketHandler(ctx, storage));
             config.routes.delete("/{bucket}", ctx -> deleteBucketHandler(ctx, storage));
             config.routes.get("/{bucket}",    ctx -> listObjectsHandler(ctx, storage));
             config.routes.head("/{bucket}",   ctx -> headBucketHandler(ctx, storage));
 
+            // ── Object-level routes ─────────────────────────────────────────
             config.routes.get("/{bucket}/<key>", ctx -> getObjectHandler(ctx, storage));
             config.routes.head("/{bucket}/<key>", ctx -> headObjectHandler(ctx, storage));
-
             config.routes.delete("/{bucket}/<key>", ctx -> deleteOrAbortHandler(ctx, storage));
             config.routes.put("/{bucket}/<key>", ctx -> putOrUploadPartHandler(ctx, storage));
             config.routes.post("/{bucket}/<key>", ctx -> postObjectHandler(ctx, storage));
@@ -66,9 +71,13 @@ public class Main {
         return true;
     }
 
+    // ─── Health ───────────────────────────────────────────────────────────────
+
     private static void healthHandler(Context ctx) {
         ctx.result("API Gateway is healthy!");
     }
+
+    // ─── Bucket Handlers ──────────────────────────────────────────────────────
 
     private static void createBucketHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
@@ -79,9 +88,17 @@ public class Main {
                 return;
             }
             ctx.status(200);
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "CreateBucket is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in PUT /" + bucket, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", "/" + bucket));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", "/" + bucket));
         }
     }
 
@@ -94,9 +111,17 @@ public class Main {
                 return;
             }
             ctx.status(204);
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "DeleteBucket is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in DELETE /" + bucket, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", "/" + bucket));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", "/" + bucket));
         }
     }
 
@@ -108,14 +133,23 @@ public class Main {
             try { maxKeys = Integer.parseInt(ctx.queryParam("max-keys")); }
             catch (NumberFormatException ignored) {}
         }
+
         try {
             List<ObjectSummary> objects = storage.listObjects(bucket, prefix, maxKeys);
             ctx.status(200);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildListObjectsXml(bucket, prefix, objects, maxKeys));
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "ListObjects is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in GET /" + bucket, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", "/" + bucket));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", "/" + bucket));
         }
     }
 
@@ -124,10 +158,15 @@ public class Main {
         try {
             boolean exists = storage.bucketExists(bucket);
             ctx.status(exists ? 200 : 404);
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in HEAD /" + bucket, e);
             ctx.status(500);
         }
     }
+
+    // ─── Object Handlers ─────────────────────────────────────────────────────
 
     private static void headObjectHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
@@ -147,6 +186,8 @@ public class Main {
             } else {
                 ctx.status(404);
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in HEAD /" + bucket + "/" + key, e);
             ctx.status(500);
@@ -159,6 +200,7 @@ public class Main {
         String resourcePath = "/" + bucket + "/" + key;
         try {
             StorageService.GetObjectResult obj = storage.getObject(bucket, key);
+
             if (obj != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
@@ -172,13 +214,20 @@ public class Main {
             } else {
                 ctx.status(404);
                 ctx.header("Content-Type", "application/xml");
-                ctx.result(buildS3ErrorXml("NoSuchKey", "The specified key does not exist.", resourcePath));
+                ctx.result(buildS3ErrorXml("NoSuchKey",
+                        "The specified key does not exist.", resourcePath));
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "GetObject is not yet implemented.", resourcePath));
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in GET " + resourcePath, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
-            ctx.result(buildS3ErrorXml("InternalError", "We encountered an internal error. Please try again.", resourcePath));
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", resourcePath));
         }
     }
 
@@ -193,6 +242,7 @@ public class Main {
                 MultipartUploadResult result = storage.abortMultipartUpload(bucket, key, uploadId);
                 if (!result.isSuccess()) {
                     ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
                     ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
                     return;
                 }
@@ -205,9 +255,17 @@ public class Main {
                 }
                 ctx.status(204);
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "Delete/Abort is not yet implemented.", resourcePath));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in DELETE " + resourcePath, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", resourcePath));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", resourcePath));
         }
     }
 
@@ -217,24 +275,30 @@ public class Main {
         String uploadId = ctx.queryParam("uploadId");
         String partNumberStr = ctx.queryParam("partNumber");
         String resourcePath = "/" + bucket + "/" + key;
+
         long contentLength = ctx.contentLength();
         if (!verifyContentLength(ctx)) {
             return;
         }
+
         try {
             if (uploadId != null && partNumberStr != null) {
                 int partNumber = Integer.parseInt(partNumberStr);
                 InputStream data = ctx.bodyInputStream();
+
                 MultipartUploadResult result = storage.uploadPart(bucket, key, uploadId, partNumber, data, contentLength);
                 if (!result.isSuccess()) {
                     ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
                     ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
                     return;
                 }
+
                 ctx.status(200);
                 ctx.result("");
             } else {
                 InputStream data = ctx.bodyInputStream();
+
                 StorageResult result = storage.putObject(bucket, key, data, contentLength);
                 if (result instanceof StorageResult.Failure f) {
                     respondStorageFailure(ctx, f, resourcePath);
@@ -243,9 +307,17 @@ public class Main {
                 ctx.status(200);
                 ctx.result("");
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "Put/UploadPart is not yet implemented.", resourcePath));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in PUT " + resourcePath, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", resourcePath));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", resourcePath));
         }
     }
 
@@ -253,6 +325,7 @@ public class Main {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         String resourcePath = "/" + bucket + "/" + key;
+
         boolean isInitiate = ctx.queryParamMap().containsKey("uploads");
         String uploadId = ctx.queryParam("uploadId");
 
@@ -262,24 +335,37 @@ public class Main {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildInitiateMultipartUploadXml(bucket, key, newUploadId));
+
             } else if (uploadId != null) {
                 List<CompletedPart> parts = parseCompletedPartsXml(ctx.body());
                 MultipartUploadResult result = storage.completeMultipartUpload(bucket, key, uploadId, parts);
                 if (!result.isSuccess()) {
                     ctx.status(multipartHttpStatus(result.status()));
+                    ctx.header("Content-Type", "application/xml");
                     ctx.result(buildS3ErrorXml(multipartS3ErrorCode(result.status()), result.message(), resourcePath));
                     return;
                 }
                 ctx.status(200);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildCompleteMultipartUploadXml(bucket, key));
+
             } else {
                 ctx.status(400);
-                ctx.result(buildS3ErrorXml("InvalidRequest", "POST requires ?uploads or ?uploadId.", resourcePath));
+                ctx.header("Content-Type", "application/xml");
+                ctx.result(buildS3ErrorXml("InvalidRequest",
+                        "POST requires either ?uploads or ?uploadId query parameter.", resourcePath));
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "Multipart POST operations are not yet implemented.", resourcePath));
         } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in POST " + resourcePath, e);
             ctx.status(500);
-            ctx.result(buildS3ErrorXml("InternalError", "Internal error.", resourcePath));
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("InternalError",
+                    "We encountered an internal error. Please try again.", resourcePath));
         }
     }
 
@@ -288,6 +374,8 @@ public class Main {
         ctx.header("Content-Type", "application/xml");
         ctx.result(buildS3ErrorXml(failure.code(), failure.message(), resourcePath));
     }
+
+    // ─── Multipart Error Helpers ──────────────────────────────────────────────
 
     private static int multipartHttpStatus(MultipartUploadResult.Status status) {
         return switch (status) {
@@ -307,6 +395,8 @@ public class Main {
         };
     }
 
+    // ─── Entry Point ─────────────────────────────────────────────────────────
+
     public static void main(String[] args) {
         var pubSubClient = new PubSubClient(new KafkaPubSub());
         pubSubClient.start();
@@ -324,6 +414,8 @@ public class Main {
         StorageService storage = new StorageWorkerService(storageWorker, cacheClient);
         createApp(storage).start(8080);
     }
+
+    // ─── XML Builders ─────────────────────────────────────────────────────────
 
     static String buildS3ErrorXml(String code, String message, String resource) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
