@@ -48,6 +48,9 @@ public class StorageNodeServerV2 {
     private final RepairWorkerPool repairWorkerPool;
     private final RocksDbRepairQueue repairQueue;
     private final Database db;
+    private final ActiveSequenceTracker sequenceTracker;
+    private final GossipService gossipService;
+    private final GarbageCollectionWorker gcWorker;
 
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
@@ -74,6 +77,10 @@ public class StorageNodeServerV2 {
         this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
+        this.sequenceTracker = new ActiveSequenceTracker();
+        String nodeIdentity = ip + ":" + port;
+        this.gossipService = new GossipService(nodeIdentity, pubSubClient, sequenceTracker);
+        this.gcWorker = new GarbageCollectionWorker(db, storageNode, gossipService, writeTracker);
     }
 
     public static void main(String[] args) {
@@ -286,62 +293,50 @@ public class StorageNodeServerV2 {
             }
             logger.debug("GET partition={} fullKey={} targetVersion={}", partition, fullKey, targetVersion);
 
-            Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(fullKey, targetVersion);
+            // For explicit-version GETs we know up-front which seq we need to
+            // protect from concurrent garbage collection. Pin it BEFORE the
+            // retrieve so the window between metadata lookup and response
+            // streaming can't race with GC. For "latest" requests we don't
+            // know the seq until retrieve resolves it, but the latest version
+            // of a key is always at or above this node's high-water mark and
+            // therefore above the gossip safe-watermark, so GC won't touch it.
+            boolean explicitlyPinned = targetVersion != -1;
+            if (explicitlyPinned) {
+                sequenceTracker.beginGet(partition, targetVersion);
+            }
+            try {
+                Optional<StorageNodeV2.GetObjectResponse> dataOpt =
+                        storageNode.retrieve(fullKey, targetVersion);
 
-            if (dataOpt.isPresent()) {
-                StorageNodeV2.GetObjectResponse response = dataOpt.get();
+                if (dataOpt.isPresent()) {
+                    StorageNodeV2.GetObjectResponse response = dataOpt.get();
 
-                long responseSequenceNumber = switch (response) {
-                    case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
-                    case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
-                    case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
-                };
+                    long responseSequenceNumber = switch (response) {
+                        case StorageNodeV2.FileObject fo -> fo.version().sequenceNumber();
+                        case StorageNodeV2.MultipartData md -> md.version().sequenceNumber();
+                        case StorageNodeV2.Tombstone t -> t.version().sequenceNumber();
+                    };
 
-                ctx.header("X-Koop-Version", String.valueOf(responseSequenceNumber));
-
-                if (response instanceof StorageNodeV2.FileObject fo) {
-                    ctx.header("X-Koop-Type", "BLOB");
-                    var fc = fo.data();
-                    ctx.status(200)
-                            .header("Content-Type", "application/octet-stream")
-                            .header("Content-Length", String.valueOf(fc.size()));
-
-                    var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
-                    long size = fc.size();
-                    logger.debug("GET partition={} fullKey={} version={} streaming {} bytes", partition, fullKey,
-                            responseSequenceNumber, size);
-                    long position = 0L;
-                    while (position < size) {
-                        long transferred = fc.transferTo(position, size - position, outputChannel);
-                        if (transferred <= 0) {
-                            logger.warn(
-                                    "Zero-byte transfer when streaming file for partition={} fullKey={} at position={} of {} bytes",
-                                    partition, fullKey, position, size);
-                            break;
-                        }
-                        position += transferred;
+                    if (!explicitlyPinned) {
+                        sequenceTracker.beginGet(partition, responseSequenceNumber);
                     }
-                    fo.close();
-                    logger.debug("GET partition={} fullKey={} version={} streamed {} bytes", partition, fullKey,
-                            responseSequenceNumber, size);
-
-                } else if (response instanceof StorageNodeV2.MultipartData md) {
-                    ctx.header("X-Koop-Type", "MULTIPART");
-                    ctx.status(200)
-                       .header("Content-Type", "application/json")
-                       .json(md.version().chunks());
-                    logger.debug("GET partition={} fullKey={} version={} returned multipart chunks in body", partition, fullKey,
-                            responseSequenceNumber);
-
-                } else if (response instanceof StorageNodeV2.Tombstone) {
-                    ctx.header("X-Koop-Type", "TOMBSTONE");
-                    ctx.status(200).result("");
-                    logger.debug("GET partition={} fullKey={} version={} hit tombstone", partition, fullKey,
-                            responseSequenceNumber);
+                    try {
+                        serveGetResponse(ctx, partition, fullKey, responseSequenceNumber, response);
+                    } finally {
+                        if (!explicitlyPinned) {
+                            sequenceTracker.endGet(partition, responseSequenceNumber);
+                        }
+                    }
+                    return;
+                } else {
+                    ctx.status(404).result("NOT_FOUND");
+                    logger.debug("GET partition={} fullKey={} targetVersion={} not found",
+                            partition, fullKey, targetVersion);
                 }
-            } else {
-                ctx.status(404).result("NOT_FOUND");
-                logger.debug("GET partition={} fullKey={} targetVersion={} not found", partition, fullKey, targetVersion);
+            } finally {
+                if (explicitlyPinned) {
+                    sequenceTracker.endGet(partition, targetVersion);
+                }
             }
         } catch (Exception e) {
             logger.error("Error handling GET", e);
@@ -349,7 +344,57 @@ public class StorageNodeServerV2 {
         }
     }
 
+    private void serveGetResponse(Context ctx, int partition, String fullKey,
+                                  long responseSequenceNumber, StorageNodeV2.GetObjectResponse response)
+            throws Exception {
+        ctx.header("X-Koop-Version", String.valueOf(responseSequenceNumber));
+
+        if (response instanceof StorageNodeV2.FileObject fo) {
+            ctx.header("X-Koop-Type", "BLOB");
+            var fc = fo.data();
+            ctx.status(200)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Content-Length", String.valueOf(fc.size()));
+
+            var outputChannel = Channels.newChannel(ctx.res().getOutputStream());
+            long size = fc.size();
+            logger.debug("GET partition={} fullKey={} version={} streaming {} bytes", partition, fullKey,
+                    responseSequenceNumber, size);
+            long position = 0L;
+            while (position < size) {
+                long transferred = fc.transferTo(position, size - position, outputChannel);
+                if (transferred <= 0) {
+                    logger.warn(
+                            "Zero-byte transfer when streaming file for partition={} fullKey={} at position={} of {} bytes",
+                            partition, fullKey, position, size);
+                    break;
+                }
+                position += transferred;
+            }
+            fo.close();
+            logger.debug("GET partition={} fullKey={} version={} streamed {} bytes", partition, fullKey,
+                    responseSequenceNumber, size);
+
+        } else if (response instanceof StorageNodeV2.MultipartData md) {
+            ctx.header("X-Koop-Type", "MULTIPART");
+            ctx.status(200)
+               .header("Content-Type", "application/json")
+               .json(md.version().chunks());
+            logger.debug("GET partition={} fullKey={} version={} returned multipart chunks in body", partition, fullKey,
+                    responseSequenceNumber);
+
+        } else if (response instanceof StorageNodeV2.Tombstone) {
+            ctx.header("X-Koop-Type", "TOMBSTONE");
+            ctx.status(200).result("");
+            logger.debug("GET partition={} fullKey={} version={} hit tombstone", partition, fullKey,
+                    responseSequenceNumber);
+        }
+    }
+
     public void processSequencerMessage(int partition, Message message, long seqNumber) {
+        // Advance the per-partition high-water mark so the gossip layer can
+        // publish that this node is "up to" at least this sequence.
+        sequenceTracker.recordProcessedSeq(partition, seqNumber);
         try {
             String requestId = null;
             String callbackHost = message.sender().getHostString();
@@ -664,6 +709,8 @@ public class StorageNodeServerV2 {
 
     public void start() {
         repairWorkerPool.start();
+        gossipService.start();
+        gcWorker.start();
 
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
@@ -708,6 +755,8 @@ public class StorageNodeServerV2 {
             app.stop();
         }
 
+        gcWorker.shutdown();
+        gossipService.stop();
         repairWorkerPool.shutdown();
 
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);

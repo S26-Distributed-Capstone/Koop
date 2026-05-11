@@ -15,6 +15,7 @@ public interface StorageStrategy extends AutoCloseable {
     // --- Table #2: Metadata (includes version history) ---
     Optional<Metadata> getMetadata(String key) throws Exception;
     Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception;
+    Stream<Metadata> streamAllMetadata() throws Exception;
 
     // --- Table #3: Buckets ---
     Optional<Bucket> getBucket(String key) throws Exception;

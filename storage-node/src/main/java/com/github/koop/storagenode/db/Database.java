@@ -194,6 +194,57 @@ public class Database implements AutoCloseable {
     }
 
     // -------------------------------------------------------------------------
+    // METADATA COMPACTION — for garbage collection
+    // -------------------------------------------------------------------------
+
+    /**
+     * Stream every metadata row in the local database. Used by the
+     * {@link com.github.koop.storagenode.GarbageCollectionWorker} to find
+     * stale {@link FileVersion} entries.
+     */
+    public Stream<Metadata> streamAllMetadata() throws Exception {
+        return strategy.streamAllMetadata();
+    }
+
+    /**
+     * Compacts the metadata row for {@code key} by removing every
+     * {@link FileVersion} whose sequence number is strictly less than
+     * {@code watermark}. If no versions survive compaction, the metadata row
+     * itself is deleted from the database.
+     *
+     * <p>Returns the list of {@link FileVersion}s that were removed so the
+     * caller can clean up the physical blob/chunk files they reference.
+     */
+    public List<FileVersion> compactMetadata(String key, long watermark) throws Exception {
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            Optional<Metadata> metadataOpt = txn.getMetadata(key);
+            if (metadataOpt.isEmpty()) {
+                return List.of();
+            }
+            Metadata metadata = metadataOpt.get();
+            List<FileVersion> kept = new ArrayList<>();
+            List<FileVersion> removed = new ArrayList<>();
+            for (FileVersion v : metadata.versions()) {
+                if (v.sequenceNumber() < watermark) {
+                    removed.add(v);
+                } else {
+                    kept.add(v);
+                }
+            }
+            if (removed.isEmpty()) {
+                return List.of();
+            }
+            if (kept.isEmpty()) {
+                txn.deleteMetadata(key);
+            } else {
+                txn.putMetadata(new Metadata(metadata.key(), metadata.partition(), kept));
+            }
+            txn.commit();
+            return removed;
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
 

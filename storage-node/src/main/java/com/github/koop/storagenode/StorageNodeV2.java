@@ -67,6 +67,24 @@ public class StorageNodeV2 {
         this.writeTracker = writeTracker;
     }
 
+    /**
+     * Resolves the on-disk path for a stored blob/chunk. Exposed for the
+     * garbage-collection worker so it can physically delete orphaned files.
+     */
+    Path resolveBlobPath(String id) {
+        return getObjectPath(id);
+    }
+
+    /**
+     * Physically deletes the blob file for {@code id} if it exists. Used by
+     * the {@link GarbageCollectionWorker} to clean up orphans referenced by
+     * versions that have fallen below the gossip safe-deletion watermark.
+     */
+    void deleteBlobFile(String id) throws java.io.IOException {
+        Path path = getObjectPath(id);
+        java.nio.file.Files.deleteIfExists(path);
+    }
+
     private Path getObjectPath(String id) {
         // Use the first three characters of the ID to create a sharded subdirectory
         // structure.

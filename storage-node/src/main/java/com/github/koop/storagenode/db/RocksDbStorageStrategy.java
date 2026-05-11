@@ -137,6 +137,18 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         }).onClose(iterator::close).takeWhile(m -> m != null);
     }
 
+    @Override
+    public Stream<Metadata> streamAllMetadata() throws Exception {
+        RocksIterator iterator = txnDb.newIterator(metaHandle);
+        iterator.seekToFirst();
+        return Stream.generate(() -> {
+            if (!iterator.isValid()) return null;
+            Metadata m = Metadata.from(iterator.value());
+            iterator.next();
+            return m;
+        }).onClose(iterator::close).takeWhile(m -> m != null);
+    }
+
     // --- Table #3: Buckets ---
 
     @Override
@@ -199,6 +211,11 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         @Override
         public void putMetadata(Metadata metadata) throws Exception {
             txn.put(metaHandle, metadata.key().getBytes(StandardCharsets.UTF_8), metadata.serialize());
+        }
+
+        @Override
+        public void deleteMetadata(String key) throws Exception {
+            txn.delete(metaHandle, key.getBytes(StandardCharsets.UTF_8));
         }
 
         @Override
