@@ -1,0 +1,104 @@
+# Headless service — provides stable DNS for StatefulSet pods (etcd-N.etcd-headless.koopdb.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-headless
+  namespace: koopdb
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: etcd
+  ports:
+  - name: peer
+    port: 2380
+    targetPort: 2380
+  - name: client
+    port: 2379
+    targetPort: 2379
+---
+# Client service — apps connect via http://etcd.koopdb.svc.cluster.local:2379
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: koopdb
+spec:
+  selector:
+    app: etcd
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: koopdb
+spec:
+  serviceName: etcd-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      nodeSelector:
+        koopdb/role: cp
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: etcd
+        image: quay.io/coreos/etcd:v3.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          NAME=$(hostname)
+          DOMAIN="${NAME}.etcd-headless.koopdb.svc.cluster.local"
+          exec etcd \
+            --name="${NAME}" \
+            --data-dir=/data \
+            --initial-advertise-peer-urls="http://${DOMAIN}:2380" \
+            --listen-peer-urls="http://0.0.0.0:2380" \
+            --listen-client-urls="http://0.0.0.0:2379" \
+            --advertise-client-urls="http://${DOMAIN}:2379" \
+            --initial-cluster-token="etcd-cluster-1" \
+            --initial-cluster="etcd-0=http://etcd-0.etcd-headless.koopdb.svc.cluster.local:2380,etcd-1=http://etcd-1.etcd-headless.koopdb.svc.cluster.local:2380,etcd-2=http://etcd-2.etcd-headless.koopdb.svc.cluster.local:2380" \
+            --initial-cluster-state="new"
+        ports:
+        - containerPort: 2379
+          name: client
+        - containerPort: 2380
+          name: peer
+        readinessProbe:
+          exec:
+            command:
+            - etcdctl
+            - --endpoints=http://localhost:2379
+            - endpoint
+            - health
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 10
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
