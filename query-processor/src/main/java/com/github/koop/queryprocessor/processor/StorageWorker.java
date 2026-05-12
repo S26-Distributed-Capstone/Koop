@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -138,23 +139,33 @@ public final class StorageWorker {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = resolvedNodes.get(index);
-                URI uri = URI.create(String.format(
-                        "http://%s:%d/store/%d/%s?requestId=%s",
-                        node.getHostString(), node.getPort(),
-                        resolvedPartition, storageKey, requestID));
                 try {
+                    // Safe URI Construction: Encodes special characters in storageKey automatically
+                    URI uri = new URI(
+                            "http",
+                            null,
+                            node.getHostString(),
+                            node.getPort(),
+                            "/store/" + resolvedPartition + "/" + storageKey,
+                            "requestId=" + requestID,
+                            null
+                    );
+
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
                             .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                             .header("Content-Type", "application/octet-stream")
                             .timeout(Duration.ofSeconds(SHARD_UPLOAD_TIMEOUT_SECONDS))
                             .build();
+
                     HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
                         logger.trace("PUT shard {} → node {} succeeded", index, node);
                         return true;
                     }
                     logger.trace("PUT shard {} → node {} HTTP {}", index, node, response.statusCode());
+                } catch (URISyntaxException e) {
+                    logger.error("PUT shard {} → node {} invalid URI: {}", index, node, e.getMessage());
                 } catch (Exception e) {
                     logger.trace("PUT shard {} → node {} exception: {}", index, node, e.getMessage());
                 }
@@ -362,41 +373,54 @@ public final class StorageWorker {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = nodes.get(index);
-                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
-                        partition, storageKey);
-                if (targetVersion.isPresent()) {
-                    uriStr += "?version=" + targetVersion.getAsLong();
-                }
+                try {
+                    // Safe URI Construction
+                    String query = targetVersion.isPresent() ? "version=" + targetVersion.getAsLong() : null;
+                    URI uri = new URI(
+                            "http",
+                            null,
+                            node.getHostString(),
+                            node.getPort(),
+                            "/store/" + partition + "/" + storageKey,
+                            query,
+                            null
+                    );
 
-                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
-                        .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
-                HttpResponse<InputStream> response = httpClient.send(request,
-                        HttpResponse.BodyHandlers.ofInputStream());
+                    HttpRequest request = HttpRequest.newBuilder().uri(uri).GET()
+                            .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
+                    HttpResponse<InputStream> response = httpClient.send(request,
+                            HttpResponse.BodyHandlers.ofInputStream());
 
-                if (response.statusCode() == 200) {
-                    long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
-                    ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
-                    long logicalSize = response.headers().firstValueAsLong("X-Koop-Size").orElse(-1L);
+                    if (response.statusCode() == 200) {
+                        long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
+                        ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
+                        long logicalSize = response.headers().firstValueAsLong("X-Koop-Size").orElse(-1L);
 
-                    List<String> chunks = new ArrayList<>();
-                    if (type == ShardType.MULTIPART) {
-                        byte[] payload = response.body().readAllBytes();
-                        String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
-                        // Parse simple JSON array: ["chunk1","chunk2"]
-                        if (json.startsWith("[") && json.endsWith("]")) {
-                            String content = json.substring(1, json.length() - 1);
-                            if (!content.isEmpty()) {
-                                for (String token : content.split(",")) {
-                                    chunks.add(token.trim().replace("\"", ""));
+                        List<String> chunks = new ArrayList<>();
+                        if (type == ShardType.MULTIPART) {
+                            byte[] payload = response.body().readAllBytes();
+                            String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
+                            // Parse simple JSON array: ["chunk1","chunk2"]
+                            if (json.startsWith("[") && json.endsWith("]")) {
+                                String content = json.substring(1, json.length() - 1);
+                                if (!content.isEmpty()) {
+                                    for (String token : content.split(",")) {
+                                        chunks.add(token.trim().replace("\"", ""));
+                                    }
                                 }
                             }
+                            return new ShardResponse(index, version, type, logicalSize, chunks, InputStream.nullInputStream());
                         }
-                        return new ShardResponse(index, version, type, logicalSize, chunks, InputStream.nullInputStream());
-                    }
 
-                    return new ShardResponse(index, version, type, logicalSize, List.of(), response.body());
+                        return new ShardResponse(index, version, type, logicalSize, List.of(), response.body());
+                    }
+                    return null;
+                } catch (URISyntaxException e) {
+                    logger.error("fetchShards → node {} invalid URI: {}", node, e.getMessage());
+                    return null;
+                } catch (Exception e) {
+                    return null;
                 }
-                return null;
             });
         }
 
@@ -574,14 +598,23 @@ public final class StorageWorker {
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (InetSocketAddress node : nodes) {
             tasks.add(() -> {
-                URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
-                        node.getHostString(), node.getPort(),
-                        URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(uri)
-                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
-                        .build();
                 try {
+                    // Safe URI Construction
+                    URI uri = new URI(
+                            "http",
+                            null,
+                            node.getHostString(),
+                            node.getPort(),
+                            "/bucket/" + bucket,
+                            null,
+                            null
+                    );
+
+                    HttpRequest req = HttpRequest.newBuilder()
+                            .uri(uri)
+                            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                            .build();
+
                     HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
                     int status = resp.statusCode();
                     if (status == 200) return true;
@@ -590,6 +623,8 @@ public final class StorageWorker {
                         return false;
                     }
                     logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+                } catch (URISyntaxException e) {
+                    logger.error("HEAD bucket {} → node {} invalid URI: {}", bucket, node, e.getMessage());
                 } catch (Exception e) {
                     logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
                 }
@@ -634,9 +669,10 @@ public final class StorageWorker {
                 .toList();
 
         String safePrefix = prefix == null ? "" : prefix;
+
+        // Encode the prefix and manually construct the query string
         String encodedPrefix = URLEncoder.encode(safePrefix, java.nio.charset.StandardCharsets.UTF_8);
-        String query = "?maxKeys=" + maxKeys
-                + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
+        String query = "?maxKeys=" + maxKeys + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
 
         List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
         for (int partition : partitions) {
@@ -672,12 +708,20 @@ public final class StorageWorker {
 
     private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
         for (InetSocketAddress node : nodes) {
-            URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
-                    node.getHostString(), node.getPort(),
-                    URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
-            HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
             try {
+                // To avoid double-encoding issues with the multi-argument URI constructor,
+                // we manually encode the path and append the pre-encoded query string.
+                // Note: URLEncoder uses '+' for spaces, which must be replaced with '%20' in paths.
+                String encodedBucket = URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)
+                        .replace("+", "%20");
+
+                URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
+                        node.getHostString(), node.getPort(),
+                        encodedBucket, query));
+
+                HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
                 if (resp.statusCode() == 200) {
                     return parseObjectListJson(resp.body());
                 }
@@ -807,7 +851,6 @@ public final class StorageWorker {
     private static String toStorageKey(String bucket, String key) {
         return bucket + "/" + key;
     }
-
 
     private List<InetSocketAddress> getNodesForPartition(int partition) {
         ErasureRouting r = getRouting();
