@@ -1,6 +1,5 @@
 package com.github.koop.storagenode.gc;
 
-import java.util.Iterator;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.TreeMap;
@@ -151,17 +150,21 @@ public class ActiveReadTracker {
      * Evict every handle whose lease has exceeded {@code maxLeaseMs}. Returns
      * the number of handles forcibly closed. Safe to call concurrently with
      * {@link #begin(int, long)} and {@link Handle#close()}.
+     *
+     * <p>Concurrency: a racing {@code Handle.close()} may remove the same
+     * entry. We use the conditional {@code remove(id, entry)} so only the
+     * thread that actually evicts the entry decrements the refcount —
+     * guaranteeing exactly-once decrement per handle even if multiple handles
+     * share the same {@code (partition, seqNum)}.
      */
     public int prune() {
         if (maxLeaseMs == Long.MAX_VALUE) return 0;
         long cutoff = clock.getAsLong() - maxLeaseMs;
         int evicted = 0;
-        Iterator<Map.Entry<Long, HandleEntry>> it = liveHandles.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<Long, HandleEntry> e = it.next();
+        for (Map.Entry<Long, HandleEntry> e : liveHandles.entrySet()) {
             HandleEntry entry = e.getValue();
-            if (entry.startedAtMs() <= cutoff) {
-                it.remove();
+            if (entry.startedAtMs() <= cutoff
+                    && liveHandles.remove(e.getKey(), entry)) {
                 decrement(entry.partition(), entry.seqNum());
                 evicted++;
             }

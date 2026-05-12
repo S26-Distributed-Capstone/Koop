@@ -1,6 +1,5 @@
 package com.github.koop.storagenode.gc;
 
-import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -56,6 +55,7 @@ public class GarbageCollectorWorker {
     private final long staleAfterMs;
     private final long gcIntervalMs;
     private final ScheduledExecutorService scheduler;
+    private boolean running = false;
 
     public GarbageCollectorWorker(Database db,
                                   PartitionWatermarks watermarks,
@@ -72,11 +72,14 @@ public class GarbageCollectorWorker {
     }
 
     public synchronized void start() {
+        if (running) return;
+        running = true;
         scheduler.scheduleAtFixedRate(this::runOnceQuiet,
                 gcIntervalMs, gcIntervalMs, TimeUnit.MILLISECONDS);
     }
 
     public synchronized void stop() {
+        running = false;
         scheduler.shutdownNow();
         try {
             scheduler.awaitTermination(2, TimeUnit.SECONDS);
@@ -124,29 +127,31 @@ public class GarbageCollectorWorker {
             return 0;
         }
 
-        List<OpLog> candidates;
+        // Stream-and-process so the iterator does not have to hold every
+        // candidate in memory. A large cursor→watermark gap (e.g. after extended
+        // downtime) could otherwise produce a multi-GB list.
+        int removed = 0;
         try (var stream = db.streamOpLog(partition, cursor)) {
-            candidates = stream
+            var it = stream
                     .takeWhile(op -> op.seqNum() < watermark)
                     .filter(op -> op.operation() == Operation.PUT || op.operation() == Operation.DELETE)
-                    .toList();
+                    .iterator();
+            while (it.hasNext()) {
+                OpLog op = it.next();
+                try {
+                    Optional<GcResult> result = db.gcCleanupKey(op.key(), partition, op.seqNum(), watermark);
+                    if (result.isPresent()) {
+                        removed += result.get().versionsRemoved();
+                    }
+                } catch (Exception e) {
+                    logger.warn("GC: failed to clean key={} partition={} seq={}: {}",
+                            op.key(), partition, op.seqNum(), e.getMessage());
+                }
+            }
         } catch (Exception e) {
             logger.warn("GC: failed to scan oplog for partition {} from cursor {}: {}",
                     partition, cursor, e.getMessage());
-            return 0;
-        }
-
-        int removed = 0;
-        for (OpLog op : candidates) {
-            try {
-                Optional<GcResult> result = db.gcCleanupKey(op.key(), partition, op.seqNum(), watermark);
-                if (result.isPresent()) {
-                    removed += result.get().versionsRemoved();
-                }
-            } catch (Exception e) {
-                logger.warn("GC: failed to clean key={} partition={} seq={}: {}",
-                        op.key(), partition, op.seqNum(), e.getMessage());
-            }
+            return removed;
         }
 
         // Advance the cursor to the watermark — every oplog entry in

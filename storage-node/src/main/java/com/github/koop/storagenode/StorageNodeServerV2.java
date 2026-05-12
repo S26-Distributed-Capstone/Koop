@@ -335,6 +335,18 @@ public class StorageNodeServerV2 {
 
             long readSeq;
             if (targetVersion >= 0) {
+                // Validate before pinning: an unchecked targetVersion lets a client
+                // hold the watermark down on an arbitrarily-low seqNum (e.g. 0)
+                // by just keeping the socket open. Refuse versions that don't
+                // exist in metadata so the lease tracks a real version.
+                boolean exists = meta.versions().stream()
+                        .anyMatch(v -> v.sequenceNumber() == targetVersion);
+                if (!exists) {
+                    ctx.status(404).result("NOT_FOUND");
+                    logger.debug("GET partition={} fullKey={} targetVersion={} no such version",
+                            partition, fullKey, targetVersion);
+                    return;
+                }
                 readSeq = targetVersion;
             } else if (!meta.versions().isEmpty()) {
                 readSeq = meta.versions().get(meta.versions().size() - 1).sequenceNumber();

@@ -17,10 +17,17 @@ import java.util.Map;
  * partition) keeps gossip traffic O(nodes) instead of O(partitions), so the
  * protocol scales to clusters with tens of thousands of partitions.
  *
+ * <p><b>Staleness is measured strictly by the receiver's clock.</b> Receivers
+ * stamp each entry with their own {@code System.currentTimeMillis()} on
+ * arrival and ignore the sender-provided {@code timestampMs} for eviction
+ * decisions — this neutralizes peer clock drift. The wire field is retained
+ * for diagnostics (e.g. RTT measurement) only.
+ *
  * @param nodeId         sender identifier (typically {@code ip:port})
  * @param partitionMins  map of partition → sender's local min over
  *                       (currentPartitionSeq, lowestActiveGet)
- * @param timestampMs    wall-clock send time, used by receivers for staleness eviction
+ * @param timestampMs    sender wall-clock send time. <b>Diagnostic only</b> —
+ *                       receivers do not use this for staleness eviction
  */
 public record WatermarkGossipMessage(String nodeId, Map<Integer, Long> partitionMins, long timestampMs) {
 

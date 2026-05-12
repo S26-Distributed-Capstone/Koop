@@ -127,9 +127,18 @@ public class GossipService {
             try {
                 WatermarkGossipMessage msg = WatermarkGossipMessage.deserialize(bytes);
                 // Stamp lastSeen with the receiver's local clock — the sender's
-                // wire timestamp is ignored to neutralize peer clock drift.
+                // wire timestamp is diagnostic only.
+                //
+                // Filter to partitions this node currently owns. Other partitions'
+                // entries are never queried (the GC worker only consults owned
+                // partitions) and would never be evicted (staleness eviction
+                // runs lazily on watermarkFor calls), so admitting them here
+                // grows PartitionWatermarks unboundedly in large clusters.
+                Set<Integer> owned = ownedPartitions.apply(0);
                 for (Map.Entry<Integer, Long> e : msg.partitionMins().entrySet()) {
-                    watermarks.update(msg.nodeId(), e.getKey(), e.getValue());
+                    if (owned.contains(e.getKey())) {
+                        watermarks.update(msg.nodeId(), e.getKey(), e.getValue());
+                    }
                 }
             } catch (Exception e) {
                 logger.warn("Failed to process gossip on {} at {}: {}", incomingTopic, offset, e.getMessage());
