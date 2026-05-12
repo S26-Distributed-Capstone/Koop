@@ -15,7 +15,7 @@ import com.github.koop.storagenode.db.Database;
 
 /**
  * Disk reconciliation worker that drains the durable {@code pending_deletes}
- * queue maintained by {@link Database#gcCleanupVersion(String, int, long)}.
+ * queue maintained by {@link Database#gcCleanupKey(String, int, long, long)}.
  *
  * <p>Decoupling physical blob deletion from metadata cleanup makes the system
  * crash-consistent: if the node dies between the metadata commit and the

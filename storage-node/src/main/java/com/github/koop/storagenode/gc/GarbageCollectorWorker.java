@@ -22,21 +22,26 @@ import com.github.koop.storagenode.db.Operation;
  * physically removes obsolete records from RocksDB based on the current gossip-
  * computed watermark.
  *
- * <p>For each partition, the worker:
+ * <p>Each partition keeps a persistent {@code gc_cursor} (a seqNum) so each
+ * pass only examines oplog entries that have arrived since the previous tick.
+ * This bounds work per cycle to O(new operations) instead of
+ * O(total historical operations) — the cursor lives in its own RocksDB column
+ * family and survives restarts.
+ *
+ * <p>For each partition the worker:
  * <ol>
- *   <li>Looks up the partition's global watermark; if absent it skips that
- *       partition (no consensus yet).</li>
- *   <li>Walks the partition's oplog forward, stopping at the first entry whose
- *       {@code seqNum >= watermark}.</li>
- *   <li>For each candidate, asks the database to GC that specific version. The
- *       database enforces the "keep active latest live version" invariant and
- *       atomically updates metadata + oplog + pending-deletion queue.</li>
+ *   <li>Looks up the partition's gossip-derived watermark; skips if absent.</li>
+ *   <li>Reads the persisted GC cursor (defaults to 0).</li>
+ *   <li>Streams the oplog forward from the cursor, takeWhile {@code seqNum < watermark}.</li>
+ *   <li>For each oplog entry, asks {@link Database#gcCleanupKey} to reap stale
+ *       versions for that key in a transaction.</li>
+ *   <li>Advances the persisted cursor to the watermark so the next pass starts
+ *       there.</li>
  * </ol>
  *
- * <p>Physical blob deletion is decoupled: {@code gcCleanupVersion} enqueues an
+ * <p>Physical blob deletion is decoupled: {@code gcCleanupKey} enqueues an
  * entry into a durable {@code pending_deletes} column family, and
- * {@link BlobDeletionWorker} sweeps that queue separately. This avoids leaking
- * orphan blobs if the node crashes between metadata removal and file unlink.
+ * {@link BlobDeletionWorker} sweeps that queue separately.
  *
  * <p>The single shared RocksDB instance means partitions are processed
  * sequentially within a tick; a single-threaded scheduler is fine.
@@ -80,7 +85,7 @@ public class GarbageCollectorWorker {
         }
     }
 
-    /** One pass over all owned partitions. Returns total records removed. */
+    /** One pass over all owned partitions. Returns total versions removed. */
     public int runOnce() {
         int total = 0;
         for (Integer partition : ownedPartitions.apply(0)) {
@@ -106,31 +111,56 @@ public class GarbageCollectorWorker {
     }
 
     private int runPartition(int partition, long watermark) {
-        int removed = 0;
+        long cursor;
+        try {
+            cursor = db.getGcCursor(partition);
+        } catch (Exception e) {
+            logger.warn("GC: failed to read cursor for partition {}: {}", partition, e.getMessage());
+            return 0;
+        }
+
+        if (cursor >= watermark) {
+            // Nothing new to examine since the last cycle.
+            return 0;
+        }
+
         List<OpLog> candidates;
-        try (var stream = db.streamOpLog(partition)) {
+        try (var stream = db.streamOpLog(partition, cursor)) {
             candidates = stream
                     .takeWhile(op -> op.seqNum() < watermark)
                     .filter(op -> op.operation() == Operation.PUT || op.operation() == Operation.DELETE)
                     .toList();
         } catch (Exception e) {
-            logger.warn("GC: failed to scan oplog for partition {}: {}", partition, e.getMessage());
+            logger.warn("GC: failed to scan oplog for partition {} from cursor {}: {}",
+                    partition, cursor, e.getMessage());
             return 0;
         }
 
+        int removed = 0;
         for (OpLog op : candidates) {
             try {
-                Optional<GcResult> result = db.gcCleanupVersion(op.key(), partition, op.seqNum());
+                Optional<GcResult> result = db.gcCleanupKey(op.key(), partition, op.seqNum(), watermark);
                 if (result.isPresent()) {
-                    removed++;
+                    removed += result.get().versionsRemoved();
                 }
             } catch (Exception e) {
                 logger.warn("GC: failed to clean key={} partition={} seq={}: {}",
                         op.key(), partition, op.seqNum(), e.getMessage());
             }
         }
+
+        // Advance the cursor to the watermark — every oplog entry in
+        // [cursor, watermark) has been examined. If we crash mid-pass, the
+        // next cycle re-scans from the old cursor; gcCleanupKey is idempotent.
+        try {
+            db.setGcCursor(partition, watermark);
+        } catch (Exception e) {
+            logger.warn("GC: failed to persist cursor for partition {}: {}", partition, e.getMessage());
+        }
+
         if (removed > 0) {
-            logger.debug("GC partition={} watermark={} removed={}", partition, watermark, removed);
+            logger.debug("GC partition={} cursor {}→{} removed={}",
+                    partition, cursor, watermark, removed);
         }
         return removed;
     }

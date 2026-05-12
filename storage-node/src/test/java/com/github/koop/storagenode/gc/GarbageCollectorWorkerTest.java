@@ -179,6 +179,89 @@ public class GarbageCollectorWorkerTest {
     }
 
     @Test
+    public void cursorPreventsRescanOfHistoricalOplog() throws Exception {
+        // Write a stale chain so there is real work to do on the first pass.
+        String key = "bkt/cur";
+        db.putItem(key, PARTITION, 100L, "req-v1");
+        db.putItem(key, PARTITION, 200L, "req-v2");
+
+        gossipSelf();
+        assertEquals(0L, db.getGcCursor(PARTITION), "cursor starts unset");
+
+        int removed = gc.runOnce();
+        assertEquals(1, removed, "first pass reaps stale v1");
+        long cursorAfterFirst = db.getGcCursor(PARTITION);
+        assertEquals(200L, cursorAfterFirst,
+                "cursor advances to the watermark (=localMin=max seq=200)");
+
+        // No new writes since last pass — gossipSelf again, then runOnce. Worker
+        // should see cursor == watermark and short-circuit without iterating.
+        gossipSelf();
+        removed = gc.runOnce();
+        assertEquals(0, removed, "second pass does nothing — cursor already at watermark");
+
+        // New PUT arrives. Watermark advances. Next pass scans only the new entry.
+        db.putItem("bkt/new", PARTITION, 300L, "req-new");
+        gossipSelf();
+        removed = gc.runOnce();
+        assertEquals(0, removed, "new entry's key has only one live version — nothing to reap");
+        assertEquals(300L, db.getGcCursor(PARTITION), "cursor advanced again");
+    }
+
+    @Test
+    public void cursorCatchesStaleVersionWhenNewerArrivesAfterScan() throws Exception {
+        // Verifies the holistic-key invariant: when the cursor has advanced
+        // past an oplog entry that was retained as "live latest" in an
+        // earlier pass, a subsequent scan won't re-visit that entry — but
+        // visiting the newer entry must still reap the now-stale older
+        // version from metadata.
+        String key = "bkt/hist";
+        db.putItem(key, PARTITION, 50L, "req-v50");
+
+        // Simulate the cursor having already moved past 50 in some prior pass,
+        // so seq=50 will NOT be re-visited by future scans.
+        db.setGcCursor(PARTITION, 51L);
+
+        // A newer version supersedes v50.
+        db.putItem(key, PARTITION, 100L, "req-v100");
+        // Filler to push the max seqNum past 100 so the watermark covers v100.
+        db.putItem("bkt/filler", PARTITION, 110L, "req-filler");
+
+        gossipSelf();
+        int removed = gc.runOnce();
+
+        // The scan runs from cursor=51 and stops before watermark=110, so the
+        // (50, key) oplog row is never re-visited. But visiting (100, key)
+        // holistically reaps the now-stale v50 from metadata anyway.
+        assertEquals(1, removed,
+                "visiting (100, key) reaps the now-stale v50 even though seq=50's oplog row was skipped");
+        Metadata meta = db.getItem(key).orElseThrow();
+        assertEquals(1, meta.versions().size());
+        assertEquals(100L, meta.versions().get(0).sequenceNumber());
+        assertFalse(strategy.getLog(PARTITION, 50L).isPresent(),
+                "v50's oplog row is removed by the holistic cleanup");
+    }
+
+    @Test
+    public void cursorSurvivesRestart() throws Exception {
+        db.putItem("bkt/r", PARTITION, 10L, "req");
+        db.putItem("bkt/r", PARTITION, 20L, "req2");
+
+        gossipSelf();
+        gc.runOnce();
+        long persisted = db.getGcCursor(PARTITION);
+        assertEquals(20L, persisted);
+
+        // Simulate process restart by closing and reopening the strategy.
+        db.close();
+        strategy = new RocksDbStorageStrategy(tempDir.resolve("db").toAbsolutePath().toString());
+        db = new Database(strategy);
+
+        assertEquals(20L, db.getGcCursor(PARTITION),
+                "cursor survives a restart and is read from RocksDB");
+    }
+
+    @Test
     public void liveLatestRegularVersionIsNeverDeleted() throws Exception {
         String key = "bkt/single";
         db.putItem(key, PARTITION, 1L, "req");

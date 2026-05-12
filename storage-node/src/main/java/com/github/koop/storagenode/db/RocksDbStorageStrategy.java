@@ -19,6 +19,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     private final ColumnFamilyHandle uncommittedHandle;
     private final ColumnFamilyHandle repairQueueHandle;
     private final ColumnFamilyHandle pendingDeletesHandle;
+    private final ColumnFamilyHandle gcCursorsHandle;
     private volatile boolean closed = false;
 
     public RocksDbStorageStrategy(String dbPath) throws RocksDBException {
@@ -31,7 +32,8 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("uncommitted_writes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("repair_queue".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("pending_deletes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
+                new ColumnFamilyDescriptor("pending_deletes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
+                new ColumnFamilyDescriptor("gc_cursors".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
         try (DBOptions options = new DBOptions()
@@ -46,6 +48,7 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             uncommittedHandle = handles.get(4);
             repairQueueHandle = handles.get(5);
             pendingDeletesHandle = handles.get(6);
+            gcCursorsHandle = handles.get(7);
         }
     }
 
@@ -139,8 +142,8 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     }
 
     @Override
-    public Stream<OpLog> streamLogsForward(int partition) throws Exception {
-        byte[] startKey = opLogKey(partition, 0L);
+    public Stream<OpLog> streamLogsForward(int partition, long startSeq) throws Exception {
+        byte[] startKey = opLogKey(partition, startSeq);
         RocksIterator iterator = txnDb.newIterator(logHandle);
         iterator.seek(startKey);
         return Stream.generate(() -> {
@@ -152,6 +155,22 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             iterator.next();
             return log;
         }).onClose(iterator::close).takeWhile(log -> log != null);
+    }
+
+    private byte[] cursorKey(int partition) {
+        return ByteBuffer.allocate(4).putInt(partition).array();
+    }
+
+    @Override
+    public long getGcCursor(int partition) throws Exception {
+        byte[] value = txnDb.get(gcCursorsHandle, cursorKey(partition));
+        return value == null ? 0L : ByteBuffer.wrap(value).getLong();
+    }
+
+    @Override
+    public void setGcCursor(int partition, long nextSeq) throws Exception {
+        byte[] value = ByteBuffer.allocate(Long.BYTES).putLong(nextSeq).array();
+        txnDb.put(gcCursorsHandle, cursorKey(partition), value);
     }
 
     @Override
