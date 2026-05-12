@@ -137,8 +137,8 @@ public class BlobDeletionWorkerTest {
         Path v1Blob = writeBlob(v1Loc, "v1-data");
         Path v2Blob = writeBlob(v2Loc, "v2-data");
 
-        db.putItem(key, PARTITION, 100L, v1Loc);
-        db.putItem(key, PARTITION, 200L, v2Loc);
+        db.putItem(key, PARTITION, 100L, v1Loc, 0L);
+        db.putItem(key, PARTITION, 200L, v2Loc, 0L);
 
         // Drive GC for v1 directly.
         PartitionWatermarks wm = new PartitionWatermarks();

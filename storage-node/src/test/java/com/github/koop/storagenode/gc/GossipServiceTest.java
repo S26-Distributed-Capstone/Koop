@@ -70,8 +70,8 @@ public class GossipServiceTest {
     @Test
     public void gossipConvergesToMinOfPeers() throws Exception {
         // A has progressed to seq=100, B is still at 30.
-        dbA.putItem("bkt/x", PARTITION, 100L, "rA");
-        dbB.putItem("bkt/y", PARTITION, 30L, "rB");
+        dbA.putItem("bkt/x", PARTITION, 100L, "rA", 0L);
+        dbB.putItem("bkt/y", PARTITION, 30L, "rB", 0L);
 
         // Both nodes need to be subscribed to the shared cluster topic before either
         // broadcasts payloads the other should see. MemoryPubSub only delivers to
@@ -90,7 +90,7 @@ public class GossipServiceTest {
 
     @Test
     public void activeReadLowersLocalMinimum() throws Exception {
-        dbA.putItem("bkt/z", PARTITION, 100L, "rA");
+        dbA.putItem("bkt/z", PARTITION, 100L, "rA", 0L);
 
         ActiveReadTracker readsA = new ActiveReadTracker();
         PartitionWatermarks wmA2 = new PartitionWatermarks();
