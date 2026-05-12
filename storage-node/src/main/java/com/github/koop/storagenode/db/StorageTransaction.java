@@ -15,6 +15,15 @@ public interface StorageTransaction extends AutoCloseable {
     Optional<Long> getUncommitted(String requestId) throws Exception;
     void deleteUncommitted(String requestId) throws Exception;
 
+    /**
+     * Atomically record an intent to physically delete a blob from disk.
+     * The pending-deletion entry is durably committed alongside the rest of
+     * the transaction; a background worker drains the queue, deletes the
+     * on-disk file, and only then removes the entry. This keeps metadata
+     * cleanup and disk reclamation crash-consistent.
+     */
+    void enqueueBlobDeletion(String location) throws Exception;
+
     void commit() throws Exception;
     void rollback() throws Exception;
     @Override void close() throws Exception;

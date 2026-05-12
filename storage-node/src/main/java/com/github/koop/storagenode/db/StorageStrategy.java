@@ -25,4 +25,11 @@ public interface StorageStrategy extends AutoCloseable {
     // --- Table #3: Buckets ---
     Optional<Bucket> getBucket(String key) throws Exception;
     Stream<Bucket> streamBuckets() throws Exception;
+
+    // --- Table #4: Pending Blob Deletions ---
+    /** Forward scan of all durably-queued blob locations awaiting on-disk deletion. */
+    Stream<String> streamPendingDeletions() throws Exception;
+
+    /** Remove a pending-deletion entry after the corresponding on-disk blob is gone. */
+    void removePendingDeletion(String location) throws Exception;
 }

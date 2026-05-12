@@ -1,8 +1,5 @@
 package com.github.koop.storagenode.gc;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -33,9 +30,13 @@ import com.github.koop.storagenode.db.Operation;
  *       {@code seqNum >= watermark}.</li>
  *   <li>For each candidate, asks the database to GC that specific version. The
  *       database enforces the "keep active latest live version" invariant and
- *       atomically updates metadata + oplog.</li>
- *   <li>Deletes the on-disk blob file if a regular version was removed.</li>
+ *       atomically updates metadata + oplog + pending-deletion queue.</li>
  * </ol>
+ *
+ * <p>Physical blob deletion is decoupled: {@code gcCleanupVersion} enqueues an
+ * entry into a durable {@code pending_deletes} column family, and
+ * {@link BlobDeletionWorker} sweeps that queue separately. This avoids leaking
+ * orphan blobs if the node crashes between metadata removal and file unlink.
  *
  * <p>The single shared RocksDB instance means partitions are processed
  * sequentially within a tick; a single-threaded scheduler is fine.
@@ -47,7 +48,6 @@ public class GarbageCollectorWorker {
     private final Database db;
     private final PartitionWatermarks watermarks;
     private final IntFunction<Set<Integer>> ownedPartitions;
-    private final Path storageDir;
     private final long staleAfterMs;
     private final long gcIntervalMs;
     private final ScheduledExecutorService scheduler;
@@ -55,13 +55,11 @@ public class GarbageCollectorWorker {
     public GarbageCollectorWorker(Database db,
                                   PartitionWatermarks watermarks,
                                   IntFunction<Set<Integer>> ownedPartitions,
-                                  Path storageDir,
                                   long staleAfterMs,
                                   long gcIntervalMs) {
         this.db = db;
         this.watermarks = watermarks;
         this.ownedPartitions = ownedPartitions;
-        this.storageDir = storageDir;
         this.staleAfterMs = staleAfterMs;
         this.gcIntervalMs = gcIntervalMs;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(
@@ -109,7 +107,6 @@ public class GarbageCollectorWorker {
 
     private int runPartition(int partition, long watermark) {
         int removed = 0;
-        // Snapshot candidates first so we don't iterate-and-mutate the same column family.
         List<OpLog> candidates;
         try (var stream = db.streamOpLog(partition)) {
             candidates = stream
@@ -126,7 +123,6 @@ public class GarbageCollectorWorker {
                 Optional<GcResult> result = db.gcCleanupVersion(op.key(), partition, op.seqNum());
                 if (result.isPresent()) {
                     removed++;
-                    result.get().blobLocation().ifPresent(this::deleteBlobFile);
                 }
             } catch (Exception e) {
                 logger.warn("GC: failed to clean key={} partition={} seq={}: {}",
@@ -137,20 +133,5 @@ public class GarbageCollectorWorker {
             logger.debug("GC partition={} watermark={} removed={}", partition, watermark, removed);
         }
         return removed;
-    }
-
-    private void deleteBlobFile(String location) {
-        if (location == null || location.isBlank()) return;
-        if (location.contains("..") || location.contains("/") || location.contains("\\")) {
-            logger.warn("GC: refusing to delete blob with suspicious location: {}", location);
-            return;
-        }
-        String prefixDir = location.length() >= 3 ? location.substring(0, 3) : "000";
-        Path path = storageDir.normalize().resolve("blobs").resolve(prefixDir).resolve(location).normalize();
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            logger.warn("GC: failed to delete blob file {}: {}", path, e.getMessage());
-        }
     }
 }

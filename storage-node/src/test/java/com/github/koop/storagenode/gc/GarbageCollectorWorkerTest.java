@@ -51,7 +51,7 @@ public class GarbageCollectorWorkerTest {
         watermarks = new PartitionWatermarks();
         IntFunction<Set<Integer>> owned = ignored -> Set.of(PARTITION);
         // GC interval is irrelevant — we drive runOnce() manually for deterministic checks.
-        gc = new GarbageCollectorWorker(db, watermarks, owned, tempDir,
+        gc = new GarbageCollectorWorker(db, watermarks, owned,
                 STALE_AFTER_MS, /*gcIntervalMs=*/3_600_000L);
     }
 

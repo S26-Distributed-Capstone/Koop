@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import com.github.koop.common.metadata.*;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
 import com.github.koop.storagenode.gc.ActiveReadTracker;
+import com.github.koop.storagenode.gc.BlobDeletionWorker;
 import com.github.koop.storagenode.gc.GarbageCollectorWorker;
 import com.github.koop.storagenode.gc.GossipService;
 import com.github.koop.storagenode.gc.PartitionWatermarks;
@@ -56,6 +57,7 @@ public class StorageNodeServerV2 {
     private final PartitionWatermarks watermarks;
     private final GossipService gossipService;
     private final GarbageCollectorWorker gcWorker;
+    private final BlobDeletionWorker blobDeletionWorker;
 
     /** Eviction window: peers silent for longer than this are excluded from the watermark. */
     static final long GOSSIP_STALE_AFTER_MS = 30_000L;
@@ -63,6 +65,8 @@ public class StorageNodeServerV2 {
     static final long GOSSIP_INTERVAL_MS = 2_000L;
     /** Frequency of background GC passes. */
     static final long GC_INTERVAL_MS = 10_000L;
+    /** Frequency of disk reconciliation passes draining the pending-deletes queue. */
+    static final long BLOB_DELETION_INTERVAL_MS = 5_000L;
 
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
@@ -95,7 +99,8 @@ public class StorageNodeServerV2 {
         this.gossipService = new GossipService(nodeId, db, activeReads, watermarks, pubSubClient,
                 ignored -> snapshotSubscribedPartitions(), GOSSIP_INTERVAL_MS);
         this.gcWorker = new GarbageCollectorWorker(db, watermarks,
-                ignored -> snapshotSubscribedPartitions(), dir, GOSSIP_STALE_AFTER_MS, GC_INTERVAL_MS);
+                ignored -> snapshotSubscribedPartitions(), GOSSIP_STALE_AFTER_MS, GC_INTERVAL_MS);
+        this.blobDeletionWorker = new BlobDeletionWorker(db, dir, BLOB_DELETION_INTERVAL_MS);
     }
 
     public static void main(String[] args) {
@@ -718,6 +723,7 @@ public class StorageNodeServerV2 {
         repairWorkerPool.start();
         gossipService.start();
         gcWorker.start();
+        blobDeletionWorker.start();
 
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
@@ -765,6 +771,7 @@ public class StorageNodeServerV2 {
         repairWorkerPool.shutdown();
         gossipService.stop();
         gcWorker.stop();
+        blobDeletionWorker.stop();
 
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
@@ -799,5 +806,10 @@ public class StorageNodeServerV2 {
     /** Test hook: expose the GC worker. */
     public GarbageCollectorWorker gcWorker() {
         return gcWorker;
+    }
+
+    /** Test hook: expose the disk-reconciliation worker. */
+    public BlobDeletionWorker blobDeletionWorker() {
+        return blobDeletionWorker;
     }
 }

@@ -22,9 +22,8 @@ public class Database implements AutoCloseable {
      * Result of garbage-collecting a single version entry.
      *
      * @param deletedMetadata true if the row's metadata was removed because no versions remain
-     * @param blobLocation    blob storage location to remove from disk, if the GC'd version was a regular file
      */
-    public record GcResult(boolean deletedMetadata, Optional<String> blobLocation) {}
+    public record GcResult(boolean deletedMetadata) {}
 
     /** Maximum oplog seqNum recorded for {@code partition}, or 0 if none. */
     public long getMaxSeqNum(int partition) throws Exception {
@@ -83,10 +82,6 @@ public class Database implements AutoCloseable {
                 return Optional.empty();
             }
 
-            Optional<String> blobLoc = (target instanceof RegularFileVersion r)
-                    ? Optional.of(r.location())
-                    : Optional.empty();
-
             List<FileVersion> newVersions = new ArrayList<>(versions);
             newVersions.remove(idx);
 
@@ -98,12 +93,29 @@ public class Database implements AutoCloseable {
                 txn.putMetadata(new Metadata(metadata.key(), metadata.partition(), newVersions));
             }
             txn.deleteLog(partition, seqNum);
+
+            // Durably enqueue the blob for physical deletion in the same txn as the
+            // metadata removal — crash between metadata commit and disk unlink would
+            // otherwise leak the blob.
+            if (target instanceof RegularFileVersion r) {
+                txn.enqueueBlobDeletion(r.location());
+            }
             txn.commit();
 
             logger.debug("GC removed version key={} partition={} seq={} (tombstone={} latest={} metaDeleted={})",
                     key, partition, seqNum, isTombstone, isLatest, deletedMeta);
-            return Optional.of(new GcResult(deletedMeta, blobLoc));
+            return Optional.of(new GcResult(deletedMeta));
         }
+    }
+
+    /** Stream all blob locations awaiting on-disk deletion. */
+    public Stream<String> pendingBlobDeletions() throws Exception {
+        return strategy.streamPendingDeletions();
+    }
+
+    /** Remove a pending-deletion entry after the on-disk blob has been deleted. */
+    public void removePendingBlobDeletion(String location) throws Exception {
+        strategy.removePendingDeletion(location);
     }
 
     public void putUncommittedWrite(String requestID, long timestamp) throws Exception {
