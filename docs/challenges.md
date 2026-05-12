@@ -39,6 +39,13 @@ This throughput increase aligns with the benefits of system scalability.
 - The system is fault-tolerant and continues to operate even if nodes are missing.
 - Returning nodes can retrieve missed operations from Kafka or other nodes.
 
+### Discovery Cache for Dead Storage Nodes
+
+- **Challenge:** Without health awareness, every QP request paid the full per-node HTTP timeout (10 s connect + 30 s read) for each unreachable storage node. One dead node added up to 30 s to every GET/PUT; three dead nodes (still within fault tolerance) inflated sub-second requests to 90 s+.
+- **Sub-challenge — stale health cache:** A cached "DOWN" marking can become wrong: the node may have recovered, or a transient network blip may have falsely marked a healthy node as down. A naive hard-exclusion cache would prevent recovery indefinitely (false negative) or shed load unnecessarily (false positive).
+- **Solution:** Each QP runs a [`NodeHealthTracker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/NodeHealthTracker.java) (state machine: `HEALTHY → SUSPECT → DOWN`) fed by both a periodic [`NodeHealthProbe`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/NodeHealthProbe.java) (5 s interval, `GET /health`) and outcomes of real data-path requests. Data-path operations **soft-exclude** DOWN nodes — they are skipped only while enough healthy peers remain to make quorum; otherwise the path falls back to contacting every node. Any successful response from a DOWN-marked node immediately promotes it back to `HEALTHY` (opportunistic recovery).
+- **Benefit:** Dead-node latency drops from ~30 s to sub-second on the fast path, the quorum denominator is never reduced, and the cache self-heals against both false positives (probe re-detects recovery) and false negatives (data-path successes override stale DOWN markings).
+
 ## Write Consistency
 
 - **Challenge:** Ensuring shards are successfully written to a write quorum of nodes.

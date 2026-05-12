@@ -24,6 +24,7 @@ This document displays the **planned target-state** workflow diagrams for each s
 12. [Multipart Upload — Abort](#11-multipart-upload--abort)
 13. [Storage Node Repair Flow](#12-storage-node-repair-flow)
 14. [Gossip-Based Garbage Collection](#13-gossip-based-garbage-collection)
+15. [Node Discovery / Health Probing](#14-node-discovery--health-probing)
 
 ---
 
@@ -452,6 +453,48 @@ sequenceDiagram
     SN3->>Disk: Physically delete shards with seq < global_min
     Note over SN1,Disk: Shards at seq ≥ global_min are retained\n(may be needed by in-flight GETs)
 ```
+
+---
+
+## 14. Node Discovery / Health Probing
+
+Each Query Processor maintains a local [`NodeHealthTracker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/NodeHealthTracker.java) that classifies every known storage node as `HEALTHY`, `SUSPECT`, or `DOWN`. A background [`NodeHealthProbe`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/NodeHealthProbe.java) refreshes the cache every 5 s by issuing `GET /health` to every machine in the current `ErasureSetConfiguration`. Data-path operations (`put`, `fetchShards`, `bucketExists`, `fetchListFromAnyNode` in [`StorageWorker`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java)) consult the tracker to skip nodes known to be down — eliminating the 30 s per-request timeout penalty for dead peers — while keeping the quorum denominator unchanged.
+
+Soft-exclusion semantics: if too few healthy nodes remain to make progress (e.g. fewer than `m` for reads or fewer than `writeQuorum` for writes), the path falls back to contacting every node so a recovered-but-still-marked-DOWN node has a chance to succeed. Any successful response to a DOWN-marked node immediately promotes it back to HEALTHY.
+
+```mermaid
+flowchart LR
+    subgraph QP[Query Processor]
+        Probe[NodeHealthProbe<br/>scheduled tick · 5s]
+        Tracker[(NodeHealthTracker<br/>HEALTHY → SUSPECT → DOWN)]
+        Worker[StorageWorker<br/>put / get / bucketExists / list]
+        Probe -- recordSuccess /<br/>recordFailure --> Tracker
+        Worker -- getHealthyNodes /<br/>isHealthy --> Tracker
+        Worker -- recordSuccess /<br/>recordFailure on data-path<br/>outcomes --> Tracker
+    end
+
+    SN1[Storage Node 1<br/>GET /health → 200]
+    SN2[Storage Node 2<br/>connection refused]
+    SN3[Storage Node 3…N]
+
+    Probe -- HTTP GET /health<br/>2s timeout --> SN1
+    Probe -- HTTP GET /health<br/>2s timeout --> SN2
+    Probe -- HTTP GET /health<br/>2s timeout --> SN3
+
+    Worker -- shard / bucket /<br/>list HTTP calls<br/>(DOWN nodes skipped<br/>if enough healthy) --> SN1
+    Worker -- skipped while DOWN<br/>(fallback contacts<br/>everyone) --> SN2
+    Worker --> SN3
+```
+
+State transitions:
+
+| From → To | Trigger |
+|---|---|
+| `HEALTHY` → `SUSPECT` | 1 consecutive probe or data-path failure |
+| `SUSPECT` → `DOWN` | 1 additional failure (default threshold = 2) |
+| `SUSPECT` / `DOWN` → `HEALTHY` | Any successful probe or data-path response |
+
+The QP `/health` endpoint surfaces the live counts (`API Gateway is healthy! / Storage Nodes: H healthy, S suspect, D down`) for monitoring.
 
 ---
 

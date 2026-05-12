@@ -13,6 +13,7 @@ The architecture consists of four primary services:
     - **Erasure Coding:** Encodes incoming data into `k` data + `(n-k)` parity shards and distributes them to storage nodes. Reconstructs data from any `k` available shards on retrieval.
     - **Routing:** Maps each `(bucket, key)` to a partition and to an erasure set using configuration loaded from Etcd (`erasure_set_configurations`, `partition_spread_configurations`).
     - **Multipart Manager:** Coordinates multipart upload sessions, tracking parts and publishing the final commit message.
+    - **Discovery Cache (`NodeHealthTracker` + `NodeHealthProbe`):** Each QP maintains a local cache of storage-node liveness. A background probe issues `GET /health` to every known storage node every 5 s (2 s timeout) and drives a `HEALTHY → SUSPECT → DOWN` state machine. Data-path operations (`put`, `fetchShards`, `bucketExists`, `fetchListFromAnyNode`) consult the cache to **soft-exclude** DOWN nodes, eliminating the per-request 30 s timeout penalty for known-dead peers. The cache is advisory only — quorum math is unchanged, and the path falls back to the full node list when too few healthy nodes remain or when a request to a DOWN-marked node succeeds (opportunistic recovery).
 
 2.  **Storage Nodes:**
     - **Stateful Backend:** Receives erasure-coded shards over HTTP and persists them to disk.
