@@ -43,12 +43,13 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
     private static byte[] encodeVersion(FileVersion v) {
         if (v instanceof RegularFileVersion r) {
             byte[] locBytes = r.location().getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + 4 + locBytes.length + 1);
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + 4 + locBytes.length + 1 + Long.BYTES);
             buf.put(TAG_REGULAR);
             buf.putLong(r.sequenceNumber());
             buf.putInt(locBytes.length);
             buf.put(locBytes);
             buf.put((byte) (r.materialized() ? 1 : 0));
+            buf.putLong(r.size()); // WRITE SIZE
             return buf.array();
         } else if (v instanceof MultipartFileVersion m) {
             List<byte[]> chunkBytes = new ArrayList<>(m.chunks().size());
@@ -58,11 +59,12 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
                 chunkBytes.add(cb);
                 chunksPayload += 4 + cb.length;
             }
-            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + chunksPayload);
+            ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + chunksPayload + Long.BYTES);
             buf.put(TAG_MULTIPART);
             buf.putLong(m.sequenceNumber());
             buf.putInt(m.chunks().size());
             for (byte[] cb : chunkBytes) { buf.putInt(cb.length); buf.put(cb); }
+            buf.putLong(m.size()); // WRITE SIZE
             return buf.array();
         } else if (v instanceof TombstoneFileVersion t) {
             ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES);
@@ -81,13 +83,15 @@ public record Metadata(String key, int partition, List<FileVersion> versions) {
             case TAG_REGULAR   -> {
                 String loc = readString(buffer);
                 boolean materialized = buffer.get() == 1;
-                yield new RegularFileVersion(seqNum, loc, materialized);
+                long size = buffer.getLong(); // READ SIZE
+                yield new RegularFileVersion(seqNum, loc, materialized, size);
             }
             case TAG_MULTIPART -> {
                 int count = buffer.getInt();
                 List<String> chunks = new ArrayList<>(count);
                 for (int i = 0; i < count; i++) chunks.add(readString(buffer));
-                yield new MultipartFileVersion(seqNum, chunks);
+                long size = buffer.getLong(); // READ SIZE
+                yield new MultipartFileVersion(seqNum, chunks, size);
             }
             case TAG_TOMBSTONE -> new TombstoneFileVersion(seqNum);
             default            -> throw new IllegalArgumentException("Unknown FileVersion tag: " + tag);

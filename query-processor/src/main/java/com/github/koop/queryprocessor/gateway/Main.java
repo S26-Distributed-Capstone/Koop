@@ -27,36 +27,14 @@ import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
 import com.github.koop.queryprocessor.processor.StorageWorker;
 
+/**
+ * The API Gateway entrypoint. It uses Javalin to map incoming HTTP requests
+ * (following the Amazon S3 REST protocol) to the internal distributed Koop storage system.
+ */
 public class Main {
 
     private static final Logger logger = Logger.getLogger(Main.class.getName());
 
-    /**
-     * Creates and configures the Javalin app with all S3-compatible routes.
-     * Accepts a StorageService so tests can inject a mock.
-     *
-     * ┌─────────────────────────────────────────────────────────────────────┐
-     * │  S3 Route Map                                                       │
-     * ├─────────┬──────────────────────────────┬────────────────────────────┤
-     * │ Method  │ Path / Query                 │ Operation                  │
-     * ├─────────┼──────────────────────────────┼────────────────────────────┤
-     * │ GET     │ /health                      │ Health check               │
-     * ├─────────┼──────────────────────────────┼────────────────────────────┤
-     * │ PUT     │ /{bucket}                    │ CreateBucket               │
-     * │ DELETE  │ /{bucket}                    │ DeleteBucket               │
-     * │ GET     │ /{bucket}                    │ ListObjectsV2              │
-     * │ HEAD    │ /{bucket}                    │ HeadBucket                 │
-     * ├─────────┼──────────────────────────────┼────────────────────────────┤
-     * │ GET     │ /{bucket}/<key>              │ GetObject                  │
-     * │ DELETE  │ /{bucket}/<key>              │ DeleteObject               │
-     * │         │ /{bucket}/<key>?uploadId=X   │   └─ AbortMultipartUpload  │
-     * │ PUT     │ /{bucket}/<key>              │ PutObject                  │
-     * │         │ /{bucket}/<key>?partNumber=N │   └─ UploadPart            │
-     * │         │   &uploadId=X                │                            │
-     * │ POST    │ /{bucket}/<key>?uploads      │ CreateMultipartUpload      │
-     * │ POST    │ /{bucket}/<key>?uploadId=X   │ CompleteMultipartUpload    │
-     * └─────────┴──────────────────────────────┴────────────────────────────┘
-     */
     public static Javalin createApp(StorageService storage) {
         var app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
@@ -71,16 +49,10 @@ public class Main {
             config.routes.head("/{bucket}",   ctx -> headBucketHandler(ctx, storage));
 
             // ── Object-level routes ─────────────────────────────────────────
-            // <key> is greedy so multi-segment S3 keys like "logs/jan.txt" match.
             config.routes.get("/{bucket}/<key>", ctx -> getObjectHandler(ctx, storage));
-
-            // DELETE — handles both DeleteObject and AbortMultipartUpload
+            config.routes.head("/{bucket}/<key>", ctx -> headObjectHandler(ctx, storage));
             config.routes.delete("/{bucket}/<key>", ctx -> deleteOrAbortHandler(ctx, storage));
-
-            // PUT — handles both PutObject and UploadPart
             config.routes.put("/{bucket}/<key>", ctx -> putOrUploadPartHandler(ctx, storage));
-
-            // POST — handles both CreateMultipartUpload (?uploads) and CompleteMultipartUpload (?uploadId=...)
             config.routes.post("/{bucket}/<key>", ctx -> postObjectHandler(ctx, storage));
         });
 
@@ -153,10 +125,6 @@ public class Main {
         }
     }
 
-    /**
-     * ListObjectsV2 — supports ?prefix and ?max-keys query params.
-     * Returns an S3-compatible XML listing.
-     */
     private static void listObjectsHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String prefix = ctx.queryParam("prefix") != null ? ctx.queryParam("prefix") : "";
@@ -185,10 +153,6 @@ public class Main {
         }
     }
 
-    /**
-     * HeadBucket — used by S3 clients to check bucket existence and ownership.
-     * Returns 200 if the bucket exists, 404 if not.
-     */
     private static void headBucketHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         try {
@@ -204,25 +168,60 @@ public class Main {
 
     // ─── Object Handlers ─────────────────────────────────────────────────────
 
+    private static void headObjectHandler(Context ctx, StorageService storage) {
+        String bucket = ctx.pathParam("bucket");
+        String key = ctx.pathParam("key");
+        try {
+            List<ObjectSummary> objects = storage.listObjects(bucket, key, 5);
+            var match = objects.stream().filter(o -> o.key().equals(key)).findFirst();
+
+            if (match.isPresent()) {
+                ctx.status(200);
+                ctx.header("Content-Type", "application/octet-stream");
+                ctx.header("Content-Length", String.valueOf(match.get().size()));
+
+                String lastMod = match.get().lastModified();
+                ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
+                ctx.header("ETag", "\"dummy-etag-12345\"");
+            } else {
+                ctx.status(404);
+            }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+        } catch (Exception e) {
+            logger.log(Level.SEVERE, "Error in HEAD /" + bucket + "/" + key, e);
+            ctx.status(500);
+        }
+    }
+
     private static void getObjectHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         String resourcePath = "/" + bucket + "/" + key;
         try {
-            InputStream data = storage.getObject(bucket, key);
-            if (data != null) {
+            StorageService.GetObjectResult obj = storage.getObject(bucket, key);
+
+            if (obj != null) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
-                // Provide a stable, per-object ETag derived from bucket and key.
-                //String etag = "\"" + Integer.toHexString((bucket + "/" + key).hashCode()) + "\"";
-                //ctx.header("ETag", etag); //Ignore Etag for now. 
-                ctx.result(data);
+                ctx.header("ETag", "\"dummy-etag-12345\"");
+
+                if (obj.size() >= 0) {
+                    ctx.header("Content-Length", String.valueOf(obj.size()));
+                }
+
+                ctx.result(obj.data());
             } else {
                 ctx.status(404);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildS3ErrorXml("NoSuchKey",
                         "The specified key does not exist.", resourcePath));
             }
+        } catch (UnsupportedOperationException e) {
+            ctx.status(501);
+            ctx.header("Content-Type", "application/xml");
+            ctx.result(buildS3ErrorXml("NotImplemented",
+                    "GetObject is not yet implemented.", resourcePath));
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in GET " + resourcePath, e);
             ctx.status(500);
@@ -232,12 +231,6 @@ public class Main {
         }
     }
 
-    /**
-     * Handles DELETE /{bucket}/{key}.
-     *
-     * If {@code ?uploadId=X} is present → AbortMultipartUpload.
-     * Otherwise              → DeleteObject.
-     */
     private static void deleteOrAbortHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
@@ -246,7 +239,6 @@ public class Main {
 
         try {
             if (uploadId != null) {
-                // ── AbortMultipartUpload ──
                 MultipartUploadResult result = storage.abortMultipartUpload(bucket, key, uploadId);
                 if (!result.isSuccess()) {
                     ctx.status(multipartHttpStatus(result.status()));
@@ -256,7 +248,6 @@ public class Main {
                 }
                 ctx.status(204);
             } else {
-                // ── DeleteObject ──
                 StorageResult result = storage.deleteObject(bucket, key);
                 if (result instanceof StorageResult.Failure f) {
                     respondStorageFailure(ctx, f, resourcePath);
@@ -268,7 +259,7 @@ public class Main {
             ctx.status(501);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("NotImplemented",
-                    "AbortMultipartUpload is not yet implemented.", resourcePath));
+                    "Delete/Abort is not yet implemented.", resourcePath));
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in DELETE " + resourcePath, e);
             ctx.status(500);
@@ -278,25 +269,20 @@ public class Main {
         }
     }
 
-    /**
-     * Handles PUT /{bucket}/{key}.
-     *
-     * If {@code ?partNumber=N&uploadId=X} are both present → UploadPart.
-     * Otherwise                                            → PutObject.
-     */
     private static void putOrUploadPartHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         String uploadId = ctx.queryParam("uploadId");
         String partNumberStr = ctx.queryParam("partNumber");
         String resourcePath = "/" + bucket + "/" + key;
+
         long contentLength = ctx.contentLength();
         if (!verifyContentLength(ctx)) {
             return;
         }
+
         try {
             if (uploadId != null && partNumberStr != null) {
-                // ── UploadPart ──
                 int partNumber = Integer.parseInt(partNumberStr);
                 InputStream data = ctx.bodyInputStream();
 
@@ -309,10 +295,8 @@ public class Main {
                 }
 
                 ctx.status(200);
-                //ctx.header("ETag", "\"" + etag + "\"");
                 ctx.result("");
             } else {
-                // ── PutObject ──
                 InputStream data = ctx.bodyInputStream();
 
                 StorageResult result = storage.putObject(bucket, key, data, contentLength);
@@ -321,14 +305,13 @@ public class Main {
                     return;
                 }
                 ctx.status(200);
-                //ctx.header("ETag", "\"dummy-etag-12345\"");
                 ctx.result("");
             }
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("NotImplemented",
-                    "UploadPart is not yet implemented.", resourcePath));
+                    "Put/UploadPart is not yet implemented.", resourcePath));
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in PUT " + resourcePath, e);
             ctx.status(500);
@@ -338,32 +321,22 @@ public class Main {
         }
     }
 
-    /**
-     * Handles POST /{bucket}/{key}.
-     *
-     * {@code ?uploads}    (no value, key just present) → CreateMultipartUpload.
-     * {@code ?uploadId=X}                              → CompleteMultipartUpload.
-     */
     private static void postObjectHandler(Context ctx, StorageService storage) {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         String resourcePath = "/" + bucket + "/" + key;
 
-        // Javalin returns "" for a valueless query param key, null if absent.
         boolean isInitiate = ctx.queryParamMap().containsKey("uploads");
         String uploadId = ctx.queryParam("uploadId");
 
         try {
             if (isInitiate) {
-                // ── CreateMultipartUpload ──
                 String newUploadId = storage.initiateMultipartUpload(bucket, key);
                 ctx.status(200);
                 ctx.header("Content-Type", "application/xml");
                 ctx.result(buildInitiateMultipartUploadXml(bucket, key, newUploadId));
 
             } else if (uploadId != null) {
-                // ── CompleteMultipartUpload ──
-                // Parse the XML body: <CompleteMultipartUpload><Part><PartNumber>N</PartNumber><ETag>...</ETag></Part>...</CompleteMultipartUpload>
                 List<CompletedPart> parts = parseCompletedPartsXml(ctx.body());
                 MultipartUploadResult result = storage.completeMultipartUpload(bucket, key, uploadId, parts);
                 if (!result.isSuccess()) {
@@ -386,7 +359,7 @@ public class Main {
             ctx.status(501);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("NotImplemented",
-                    "Multipart upload is not yet implemented.", resourcePath));
+                    "Multipart POST operations are not yet implemented.", resourcePath));
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Error in POST " + resourcePath, e);
             ctx.status(500);
@@ -404,14 +377,6 @@ public class Main {
 
     // ─── Multipart Error Helpers ──────────────────────────────────────────────
 
-    /**
-     * Maps a multipart operation status to the appropriate HTTP status code.
-     * <pre>
-     *   NOT_FOUND       → 404
-     *   CONFLICT        → 409
-     *   STORAGE_FAILURE → 500
-     * </pre>
-     */
     private static int multipartHttpStatus(MultipartUploadResult.Status status) {
         return switch (status) {
             case SUCCESS -> 200;
@@ -421,10 +386,6 @@ public class Main {
         };
     }
 
-    /**
-     * Maps a multipart operation status to the S3 error code string used in
-     * the XML error response body.
-     */
     private static String multipartS3ErrorCode(MultipartUploadResult.Status status) {
         return switch (status) {
             case SUCCESS -> "";
@@ -440,8 +401,8 @@ public class Main {
         var pubSubClient = new PubSubClient(new KafkaPubSub());
         pubSubClient.start();
         var metadataFetcherMap =Map.of(
-            ErasureSetConfiguration.class, "erasure_set_configurations",
-            PartitionSpreadConfiguration.class, "partition_spread_configurations"
+                ErasureSetConfiguration.class, "erasure_set_configurations",
+                PartitionSpreadConfiguration.class, "partition_spread_configurations"
         );
         var metadataClient = new MetadataClient(new EtcdFetcher(metadataFetcherMap));
         metadataClient.start();
@@ -458,16 +419,16 @@ public class Main {
 
     static String buildS3ErrorXml(String code, String message, String resource) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-               "<Error>\n" +
-               "  <Code>" + escapeXml(code) + "</Code>\n" +
-               "  <Message>" + escapeXml(message) + "</Message>\n" +
-               "  <Resource>" + escapeXml(resource) + "</Resource>\n" +
-               "  <RequestId>" + java.util.UUID.randomUUID() + "</RequestId>\n" +
-               "</Error>";
+                "<Error>\n" +
+                "  <Code>" + escapeXml(code) + "</Code>\n" +
+                "  <Message>" + escapeXml(message) + "</Message>\n" +
+                "  <Resource>" + escapeXml(resource) + "</Resource>\n" +
+                "  <RequestId>" + java.util.UUID.randomUUID() + "</RequestId>\n" +
+                "</Error>";
     }
 
     private static String buildListObjectsXml(String bucket, String prefix,
-                                               List<ObjectSummary> objects, int maxKeys) {
+                                              List<ObjectSummary> objects, int maxKeys) {
         StringBuilder sb = new StringBuilder();
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         sb.append("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
@@ -477,8 +438,6 @@ public class Main {
         sb.append("  <MaxKeys>").append(maxKeys).append("</MaxKeys>\n");
         sb.append("  <IsTruncated>false</IsTruncated>\n");
         for (ObjectSummary obj : objects) {
-            // S3 clients require LastModified to be a valid ISO-8601 timestamp;
-            // fall back to epoch when the storage layer doesn't supply one yet.
             String lastModified = (obj.lastModified() == null || obj.lastModified().isEmpty())
                     ? "1970-01-01T00:00:00.000Z"
                     : obj.lastModified();
@@ -487,9 +446,8 @@ public class Main {
             sb.append("    <Key>").append(escapeXml(obj.key())).append("</Key>\n");
             sb.append("    <Size>").append(obj.size()).append("</Size>\n");
             sb.append("    <LastModified>").append(lastModified).append("</LastModified>\n");
-            sb.append("    <ETag>\"").append(randomEtag).append("\"</ETag>\n"); // Dynamic random ETag
+            sb.append("    <ETag>\"").append(randomEtag).append("\"</ETag>\n");
             sb.append("    <StorageClass>STANDARD</StorageClass>\n");
-            //sb.append("    <ETag>\"").append(obj.etag()).append("\"</ETag>\n");
             sb.append("  </Contents>\n");
         }
         sb.append("</ListBucketResult>");
@@ -498,24 +456,22 @@ public class Main {
 
     private static String buildInitiateMultipartUploadXml(String bucket, String key, String uploadId) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-               "<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
-               "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
-               "  <Key>" + escapeXml(key) + "</Key>\n" +
-               "  <UploadId>" + escapeXml(uploadId) + "</UploadId>\n" +
-               "</InitiateMultipartUploadResult>";
+                "<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
+                "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
+                "  <Key>" + escapeXml(key) + "</Key>\n" +
+                "  <UploadId>" + escapeXml(uploadId) + "</UploadId>\n" +
+                "</InitiateMultipartUploadResult>";
     }
 
     private static String buildCompleteMultipartUploadXml(String bucket, String key) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-               "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
-               "  <Location>http://localhost:8080/" + escapeXml(bucket) + "/" + escapeXml(key) + "</Location>\n" +
-               "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
-               "  <Key>" + escapeXml(key) + "</Key>\n" +
-               //"  <ETag>\"\"</ETag>\n" +
-               "</CompleteMultipartUploadResult>";
+                "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
+                "  <Location>http://localhost:8080/" + escapeXml(bucket) + "/" + escapeXml(key) + "</Location>\n" +
+                "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
+                "  <Key>" + escapeXml(key) + "</Key>\n" +
+                "</CompleteMultipartUploadResult>";
     }
 
-    /** Escapes XML special characters in text content. */
     private static String escapeXml(String s) {
         if (s == null) return "";
         return s.replace("&", "&amp;")
@@ -525,34 +481,17 @@ public class Main {
                 .replace("'", "&apos;");
     }
 
-    /**
-     * Minimal XML parser for the CompleteMultipartUpload request body.
-     * Expected shape:
-     * <pre>
-     *   &lt;CompleteMultipartUpload&gt;
-     *     &lt;Part&gt;
-     *       &lt;PartNumber&gt;1&lt;/PartNumber&gt;
-     *     &lt;/Part&gt;
-     *     ...
-     *   &lt;/CompleteMultipartUpload&gt;
-     * </pre>
-     *
-     * A proper XML parser (javax.xml / JAXB) can replace this once the feature
-     * moves out of stub phase, but this avoids adding a dependency right now.
-     */
     private static List<CompletedPart> parseCompletedPartsXml(String body) {
         List<CompletedPart> parts = new ArrayList<>();
         String[] partBlocks = body.split("<Part>");
-        for (int i = 1; i < partBlocks.length; i++) { // skip index 0 (pre-first-<Part> text)
+        for (int i = 1; i < partBlocks.length; i++) {
             String block = partBlocks[i];
             int partNumber = Integer.parseInt(extractXmlTag(block, "PartNumber"));
-            //String etag = extractXmlTag(block, "ETag").replace("\"", "");
             parts.add(new CompletedPart(partNumber));
         }
         return parts;
     }
 
-    /** Extracts the text content of the first occurrence of {@code <tag>...</tag>}. */
     private static String extractXmlTag(String xml, String tag) {
         String open = "<" + tag + ">";
         String close = "</" + tag + ">";

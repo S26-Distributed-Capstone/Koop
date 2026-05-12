@@ -12,4 +12,5 @@ package com.github.koop.storagenode.db;
  */
 public sealed interface FileVersion permits RegularFileVersion, MultipartFileVersion, TombstoneFileVersion {
     long sequenceNumber();
+    long size();
 }

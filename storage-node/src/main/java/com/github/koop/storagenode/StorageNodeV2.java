@@ -161,8 +161,8 @@ public class StorageNodeV2 {
      * @param seqNumber
      * @throws Exception
      */
-    protected boolean commit(int partition, String key, String requestID, long seqNumber) throws Exception {
-        return db.putItem(key, partition, seqNumber, requestID);
+    protected boolean commit(int partition, String key, String requestID, long seqNumber, long size) throws Exception {
+        return db.putItem(key, partition, seqNumber, requestID, size);
     }
 
     /**
@@ -249,9 +249,9 @@ public class StorageNodeV2 {
      * @param chunks
      * @throws Exception
      */
-    protected void multipartCommit(int partition, String key, long seqNumber, List<String> chunks)
+    protected void multipartCommit(int partition, String key, long seqNumber, List<String> chunks, long size)
             throws Exception {
-        db.putMultipartItem(key, partition, seqNumber, chunks);
+        db.putMultipartItem(key, partition, seqNumber, chunks, size);
     }
 
     /**

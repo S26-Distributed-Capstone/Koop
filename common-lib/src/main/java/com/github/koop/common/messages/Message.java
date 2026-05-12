@@ -59,19 +59,15 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
         };
     }
 
-    public record FileCommitMessage(String bucket, String key, String requestID, InetSocketAddress sender) implements Message {
+    public record FileCommitMessage(String bucket, String key, String requestID, InetSocketAddress sender, long size) implements Message {
         @Override
         public byte[] serialize() {
             byte[] bucketBytes = getBytes(bucket);
             byte[] keyBytes = getBytes(key);
             byte[] reqBytes = getBytes(requestID);
             byte[] hostBytes = getBytes(sender.getHostString());
-            
-            int capacity = 4 + bucketBytes.length + 
-                           4 + keyBytes.length + 
-                           4 + reqBytes.length + 
-                           4 + hostBytes.length + 
-                           4; // port
+
+            int capacity = 4 + bucketBytes.length + 4 + keyBytes.length + 4 + reqBytes.length + 4 + hostBytes.length + 4 + 8; // +8 for size
 
             ByteBuffer buffer = ByteBuffer.allocate(capacity);
             buffer.putInt(bucketBytes.length).put(bucketBytes);
@@ -79,7 +75,7 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             buffer.putInt(reqBytes.length).put(reqBytes);
             buffer.putInt(hostBytes.length).put(hostBytes);
             buffer.putInt(sender.getPort());
-
+            buffer.putLong(size);
             return buffer.array();
         }
 
@@ -90,11 +86,12 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             String requestID = getString(buffer);
             String host = getString(buffer);
             int port = buffer.getInt();
-            return new FileCommitMessage(bucket, key, requestID, new InetSocketAddress(host, port));
+            long size = buffer.getLong();
+            return new FileCommitMessage(bucket, key, requestID, new InetSocketAddress(host, port), size);
         }
     }
 
-    public record MultipartCommitMessage(String bucket, String key, String requestID, InetSocketAddress sender, List<String> chunks) implements Message {
+    public record MultipartCommitMessage(String bucket, String key, String requestID, InetSocketAddress sender, List<String> chunks, long size) implements Message {
         @Override
         public byte[] serialize() {
             byte[] bucketBytes = getBytes(bucket);
@@ -102,13 +99,8 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             byte[] reqBytes = getBytes(requestID);
             byte[] hostBytes = getBytes(sender.getHostString());
 
-            int capacity = 4 + bucketBytes.length + 
-                           4 + keyBytes.length + 
-                           4 + reqBytes.length + 
-                           4 + hostBytes.length + 
-                           4 + // port
-                           4;  // chunk list size
-                           
+            int capacity = 4 + bucketBytes.length + 4 + keyBytes.length + 4 + reqBytes.length + 4 + hostBytes.length + 4 + 4 + 8; // +4 chunks, +8 size
+
             List<byte[]> chunkBytesList = new ArrayList<>(chunks.size());
             for (String chunk : chunks) {
                 byte[] chunkBytes = getBytes(chunk);
@@ -122,12 +114,12 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             buffer.putInt(reqBytes.length).put(reqBytes);
             buffer.putInt(hostBytes.length).put(hostBytes);
             buffer.putInt(sender.getPort());
-            
+
             buffer.putInt(chunks.size());
             for (byte[] chunkBytes : chunkBytesList) {
                 buffer.putInt(chunkBytes.length).put(chunkBytes);
             }
-
+            buffer.putLong(size);
             return buffer.array();
         }
 
@@ -138,13 +130,14 @@ public sealed interface Message permits Message.FileCommitMessage, Message.Multi
             String requestID = getString(buffer);
             String host = getString(buffer);
             int port = buffer.getInt();
-            
-            int size = buffer.getInt();
-            List<String> chunks = new ArrayList<>(size);
-            for (int i = 0; i < size; i++) {
+
+            int numChunks = buffer.getInt();
+            List<String> chunks = new ArrayList<>(numChunks);
+            for (int i = 0; i < numChunks; i++) {
                 chunks.add(getString(buffer));
             }
-            return new MultipartCommitMessage(bucket, key, requestID, new InetSocketAddress(host, port), chunks);
+            long size = buffer.getLong();
+            return new MultipartCommitMessage(bucket, key, requestID, new InetSocketAddress(host, port), chunks, size);
         }
     }
 
