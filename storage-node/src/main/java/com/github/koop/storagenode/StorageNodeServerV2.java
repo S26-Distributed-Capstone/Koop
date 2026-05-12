@@ -675,6 +675,8 @@ public class StorageNodeServerV2 {
             // Bucket-level query endpoints (read-only, no PubSub needed)
             config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
             config.routes.get("/bucket/{bucket}", this::handleListObjects);
+
+            config.routes.get("/health", ctx -> ctx.status(200).result("OK"));
         });
 
         app.start(port);
