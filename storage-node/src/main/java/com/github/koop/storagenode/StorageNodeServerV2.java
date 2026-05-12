@@ -339,8 +339,9 @@ public class StorageNodeServerV2 {
                 // hold the watermark down on an arbitrarily-low seqNum (e.g. 0)
                 // by just keeping the socket open. Refuse versions that don't
                 // exist in metadata so the lease tracks a real version.
+                final long finalTargetVersion = targetVersion;
                 boolean exists = meta.versions().stream()
-                        .anyMatch(v -> v.sequenceNumber() == targetVersion);
+                        .anyMatch(v -> v.sequenceNumber() == finalTargetVersion);
                 if (!exists) {
                     ctx.status(404).result("NOT_FOUND");
                     logger.debug("GET partition={} fullKey={} targetVersion={} no such version",
