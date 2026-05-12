@@ -67,6 +67,10 @@ public class StorageNodeServerV2 {
     static final long GC_INTERVAL_MS = 10_000L;
     /** Frequency of disk reconciliation passes draining the pending-deletes queue. */
     static final long BLOB_DELETION_INTERVAL_MS = 5_000L;
+    /** Maximum duration an active GET lease may remain open before being force-evicted. */
+    static final long ACTIVE_READ_MAX_LEASE_MS = 5L * 60L * 1000L;
+    /** Frequency of background sweeps that prune expired GET leases. */
+    static final long ACTIVE_READ_PRUNE_INTERVAL_MS = 30_000L;
 
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
@@ -93,7 +97,8 @@ public class StorageNodeServerV2 {
         this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
-        this.activeReads = new ActiveReadTracker();
+        this.activeReads = new ActiveReadTracker(System::currentTimeMillis,
+                ACTIVE_READ_MAX_LEASE_MS, ACTIVE_READ_PRUNE_INTERVAL_MS);
         this.watermarks = new PartitionWatermarks();
         String nodeId = ip + ":" + port;
         this.gossipService = new GossipService(nodeId, db, activeReads, watermarks, pubSubClient,
@@ -721,6 +726,7 @@ public class StorageNodeServerV2 {
 
     public void start() {
         repairWorkerPool.start();
+        activeReads.start();
         gossipService.start();
         gcWorker.start();
         blobDeletionWorker.start();
@@ -769,6 +775,7 @@ public class StorageNodeServerV2 {
         }
 
         repairWorkerPool.shutdown();
+        activeReads.stop();
         gossipService.stop();
         gcWorker.stop();
         blobDeletionWorker.stop();

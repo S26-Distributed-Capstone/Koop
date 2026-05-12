@@ -142,7 +142,7 @@ public class BlobDeletionWorkerTest {
 
         // Drive GC for v1 directly.
         PartitionWatermarks wm = new PartitionWatermarks();
-        wm.update("self", PARTITION, 200L, System.currentTimeMillis());
+        wm.update("self", PARTITION, 200L);
         GarbageCollectorWorker gc = new GarbageCollectorWorker(db, wm,
                 ignored -> Set.of(PARTITION), STALE_AFTER_MS, /*intervalMs=*/3_600_000L);
         int removed = gc.runOnce();

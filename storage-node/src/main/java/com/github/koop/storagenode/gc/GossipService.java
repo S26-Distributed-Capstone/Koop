@@ -105,9 +105,11 @@ public class GossipService {
         WatermarkGossipMessage msg = new WatermarkGossipMessage(nodeId, partitionMins, now);
         pubSubClient.pub(GossipTopics.CLUSTER_GOSSIP_TOPIC, msg.serialize());
 
-        // Self-record — receivers include the sender in the minimum.
+        // Self-record — receivers include the sender in the minimum. The
+        // PartitionWatermarks records its own receive-time stamp; we do not
+        // pass the wire timestamp, which is diagnostic only.
         for (Map.Entry<Integer, Long> e : partitionMins.entrySet()) {
-            watermarks.update(nodeId, e.getKey(), e.getValue(), now);
+            watermarks.update(nodeId, e.getKey(), e.getValue());
         }
     }
 
@@ -124,8 +126,10 @@ public class GossipService {
         pubSubClient.sub(GossipTopics.CLUSTER_GOSSIP_TOPIC, (incomingTopic, offset, bytes) -> {
             try {
                 WatermarkGossipMessage msg = WatermarkGossipMessage.deserialize(bytes);
+                // Stamp lastSeen with the receiver's local clock — the sender's
+                // wire timestamp is ignored to neutralize peer clock drift.
                 for (Map.Entry<Integer, Long> e : msg.partitionMins().entrySet()) {
-                    watermarks.update(msg.nodeId(), e.getKey(), e.getValue(), msg.timestampMs());
+                    watermarks.update(msg.nodeId(), e.getKey(), e.getValue());
                 }
             } catch (Exception e) {
                 logger.warn("Failed to process gossip on {} at {}: {}", incomingTopic, offset, e.getMessage());

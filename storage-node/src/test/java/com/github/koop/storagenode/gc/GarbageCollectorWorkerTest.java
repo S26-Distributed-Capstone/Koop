@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntFunction;
 
 import org.junit.jupiter.api.AfterEach;
@@ -68,7 +69,7 @@ public class GarbageCollectorWorkerTest {
     }
 
     private void gossipSelf() throws Exception {
-        watermarks.update("self", PARTITION, localMin(), System.currentTimeMillis());
+        watermarks.update("self", PARTITION, localMin());
     }
 
     @Test
@@ -154,16 +155,25 @@ public class GarbageCollectorWorkerTest {
         db.putItem(key, PARTITION, 100L, "req-v1");
         db.putItem(key, PARTITION, 200L, "req-v2");
 
-        long now = System.currentTimeMillis();
-        watermarks.update("self", PARTITION, 200L, now);
-        watermarks.update("slow-peer", PARTITION, 50L, now);
+        // Replace the default watermarks/gc with a clock-driven pair so we can
+        // age the peer entry past the staleness window deterministically.
+        AtomicLong clock = new AtomicLong(1_000L);
+        watermarks = new PartitionWatermarks(clock::get);
+        IntFunction<Set<Integer>> owned = ignored -> Set.of(PARTITION);
+        gc = new GarbageCollectorWorker(db, watermarks, owned,
+                STALE_AFTER_MS, /*gcIntervalMs=*/3_600_000L);
 
+        // Both peers heard at t=1000 → both fresh, min is 50.
+        watermarks.update("self", PARTITION, 200L);
+        watermarks.update("slow-peer", PARTITION, 50L);
         int removed = gc.runOnce();
         assertEquals(0, removed, "lagging peer pins the global watermark");
 
-        // The peer goes silent past the staleness window → watermark snaps to self's 200.
-        watermarks.update("slow-peer", PARTITION, 50L, now - 2 * STALE_AFTER_MS);
-        watermarks.update("self", PARTITION, 200L, System.currentTimeMillis());
+        // Advance the clock past the staleness window, then refresh only self.
+        // slow-peer's lastSeen (1000) falls below cutoff and is evicted, so the
+        // watermark snaps up to self's 200 and stale v1 can be reaped.
+        clock.set(1_000L + 2 * STALE_AFTER_MS);
+        watermarks.update("self", PARTITION, 200L);
         removed = gc.runOnce();
         assertEquals(1, removed, "stale peer is evicted, watermark advances, stale version GC'd");
     }
