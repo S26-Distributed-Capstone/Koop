@@ -73,9 +73,10 @@ public class GossipServiceTest {
         dbA.putItem("bkt/x", PARTITION, 100L, "rA");
         dbB.putItem("bkt/y", PARTITION, 30L, "rB");
 
-        // Both nodes need to know about each other's gossip → both subscribe first.
-        // The MemoryPubSub only delivers to subscribers, so we tick twice to ensure
-        // each side has both subscribed and received the other's broadcast.
+        // Both nodes need to be subscribed to the shared cluster topic before either
+        // broadcasts payloads the other should see. MemoryPubSub only delivers to
+        // existing subscribers, so we tick twice: round 1 sets up subscriptions,
+        // round 2 exchanges payloads each side will actually receive.
         gossipA.tick();
         gossipB.tick();
         gossipA.tick();

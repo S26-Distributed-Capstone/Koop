@@ -222,7 +222,6 @@ public class StorageNodeServerV2 {
             String topic = "partition-" + partition;
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
-            pubSubClient.drop(com.github.koop.common.pubsub.GossipTopics.forPartition(partition));
             watermarks.forgetPartition(partition);
             subscribedPartitions.remove(partition);
 
