@@ -7,11 +7,103 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 public class Database implements AutoCloseable {
+    private static final Logger logger = LogManager.getLogger(Database.class);
     private final StorageStrategy strategy;
 
     public Database(StorageStrategy strategy) {
         this.strategy = strategy;
+    }
+
+    /**
+     * Result of garbage-collecting a single version entry.
+     *
+     * @param deletedMetadata true if the row's metadata was removed because no versions remain
+     * @param blobLocation    blob storage location to remove from disk, if the GC'd version was a regular file
+     */
+    public record GcResult(boolean deletedMetadata, Optional<String> blobLocation) {}
+
+    /** Maximum oplog seqNum recorded for {@code partition}, or 0 if none. */
+    public long getMaxSeqNum(int partition) throws Exception {
+        return strategy.getMaxSeqNum(partition);
+    }
+
+    /** Forward scan of the oplog within a partition. */
+    public Stream<OpLog> streamOpLog(int partition) throws Exception {
+        return strategy.streamLogsForward(partition);
+    }
+
+    /**
+     * Attempt to GC a specific (partition, seqNum) version of {@code key}.
+     *
+     * <p>Rules:
+     * <ul>
+     *   <li>If the version is the latest live (regular or multipart) version, keep everything
+     *       — active live versions must never be removed.</li>
+     *   <li>If the version is a tombstone (regardless of position) or a stale (non-latest)
+     *       regular/multipart version, remove it from metadata and remove the oplog entry.</li>
+     *   <li>If no versions remain after removal, drop the metadata row entirely.</li>
+     * </ul>
+     */
+    public Optional<GcResult> gcCleanupVersion(String key, int partition, long seqNum) throws Exception {
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            Optional<Metadata> metaOpt = txn.getMetadata(key);
+            if (metaOpt.isEmpty()) {
+                txn.deleteLog(partition, seqNum);
+                txn.commit();
+                return Optional.empty();
+            }
+
+            Metadata metadata = metaOpt.get();
+            List<FileVersion> versions = metadata.versions();
+
+            int idx = -1;
+            for (int i = 0; i < versions.size(); i++) {
+                if (versions.get(i).sequenceNumber() == seqNum) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx == -1) {
+                txn.deleteLog(partition, seqNum);
+                txn.commit();
+                return Optional.empty();
+            }
+
+            FileVersion target = versions.get(idx);
+            boolean isLatest = idx == versions.size() - 1;
+            boolean isTombstone = target instanceof TombstoneFileVersion;
+
+            if (isLatest && !isTombstone) {
+                // Active live version — retain it AND its oplog entry.
+                txn.rollback();
+                return Optional.empty();
+            }
+
+            Optional<String> blobLoc = (target instanceof RegularFileVersion r)
+                    ? Optional.of(r.location())
+                    : Optional.empty();
+
+            List<FileVersion> newVersions = new ArrayList<>(versions);
+            newVersions.remove(idx);
+
+            boolean deletedMeta = false;
+            if (newVersions.isEmpty()) {
+                txn.deleteMetadata(key);
+                deletedMeta = true;
+            } else {
+                txn.putMetadata(new Metadata(metadata.key(), metadata.partition(), newVersions));
+            }
+            txn.deleteLog(partition, seqNum);
+            txn.commit();
+
+            logger.debug("GC removed version key={} partition={} seq={} (tombstone={} latest={} metaDeleted={})",
+                    key, partition, seqNum, isTombstone, isLatest, deletedMeta);
+            return Optional.of(new GcResult(deletedMeta, blobLoc));
+        }
     }
 
     public void putUncommittedWrite(String requestID, long timestamp) throws Exception {

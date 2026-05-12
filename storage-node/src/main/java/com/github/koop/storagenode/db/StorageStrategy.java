@@ -12,6 +12,12 @@ public interface StorageStrategy extends AutoCloseable {
     Optional<OpLog> getLog(int partition, long seqNum) throws Exception;
     Stream<OpLog> getLogs(int partition, long from, long downTo) throws Exception;
 
+    /** Forward scan of the oplog within a partition, ordered by ascending seqNum. */
+    Stream<OpLog> streamLogsForward(int partition) throws Exception;
+
+    /** Highest seqNum present in the oplog for {@code partition}, or 0 if none. */
+    long getMaxSeqNum(int partition) throws Exception;
+
     // --- Table #2: Metadata (includes version history) ---
     Optional<Metadata> getMetadata(String key) throws Exception;
     Stream<Metadata> streamMetadataWithPrefix(String prefix) throws Exception;

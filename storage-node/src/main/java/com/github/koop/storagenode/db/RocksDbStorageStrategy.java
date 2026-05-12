@@ -115,6 +115,35 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         }).onClose(iterator::close).takeWhile(log -> log != null);
     }
 
+    @Override
+    public Stream<OpLog> streamLogsForward(int partition) throws Exception {
+        byte[] startKey = opLogKey(partition, 0L);
+        RocksIterator iterator = txnDb.newIterator(logHandle);
+        iterator.seek(startKey);
+        return Stream.generate(() -> {
+            if (!iterator.isValid()) return null;
+            ByteBuffer keyBuf = ByteBuffer.wrap(iterator.key());
+            int p = keyBuf.getInt();
+            if (p != partition) return null;
+            OpLog log = OpLog.from(iterator.value());
+            iterator.next();
+            return log;
+        }).onClose(iterator::close).takeWhile(log -> log != null);
+    }
+
+    @Override
+    public long getMaxSeqNum(int partition) throws Exception {
+        byte[] startKey = opLogKey(partition, Long.MAX_VALUE);
+        try (RocksIterator iterator = txnDb.newIterator(logHandle)) {
+            iterator.seekForPrev(startKey);
+            if (!iterator.isValid()) return 0L;
+            ByteBuffer keyBuf = ByteBuffer.wrap(iterator.key());
+            int p = keyBuf.getInt();
+            if (p != partition) return 0L;
+            return keyBuf.getLong();
+        }
+    }
+
     // --- Table #2: Metadata ---
 
     @Override
@@ -202,9 +231,20 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         }
 
         @Override
+        public void deleteMetadata(String key) throws Exception {
+            txn.delete(metaHandle, key.getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
         public void putLog(OpLog log) throws Exception {
             byte[] key = ByteBuffer.allocate(12).putInt(log.partition()).putLong(log.seqNum()).array();
             txn.put(logHandle, key, log.serialize());
+        }
+
+        @Override
+        public void deleteLog(int partition, long seqNum) throws Exception {
+            byte[] key = ByteBuffer.allocate(12).putInt(partition).putLong(seqNum).array();
+            txn.delete(logHandle, key);
         }
 
         @Override

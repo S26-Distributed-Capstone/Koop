@@ -24,6 +24,10 @@ import java.util.concurrent.TimeUnit;
 
 import com.github.koop.common.metadata.*;
 import com.github.koop.storagenode.db.RocksDbStorageStrategy;
+import com.github.koop.storagenode.gc.ActiveReadTracker;
+import com.github.koop.storagenode.gc.GarbageCollectorWorker;
+import com.github.koop.storagenode.gc.GossipService;
+import com.github.koop.storagenode.gc.PartitionWatermarks;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -48,6 +52,17 @@ public class StorageNodeServerV2 {
     private final RepairWorkerPool repairWorkerPool;
     private final RocksDbRepairQueue repairQueue;
     private final Database db;
+    private final ActiveReadTracker activeReads;
+    private final PartitionWatermarks watermarks;
+    private final GossipService gossipService;
+    private final GarbageCollectorWorker gcWorker;
+
+    /** Eviction window: peers silent for longer than this are excluded from the watermark. */
+    static final long GOSSIP_STALE_AFTER_MS = 30_000L;
+    /** Frequency of outbound gossip broadcasts. */
+    static final long GOSSIP_INTERVAL_MS = 2_000L;
+    /** Frequency of background GC passes. */
+    static final long GC_INTERVAL_MS = 10_000L;
 
     private Javalin app;
     private ErasureSetConfiguration currentEsConfig;
@@ -74,6 +89,13 @@ public class StorageNodeServerV2 {
         this.storageNode = new StorageNodeV2(db, dir, writeTracker);
         this.metadataClient = metadataClient;
         this.pubSubClient = pubSubClient;
+        this.activeReads = new ActiveReadTracker();
+        this.watermarks = new PartitionWatermarks();
+        String nodeId = ip + ":" + port;
+        this.gossipService = new GossipService(nodeId, db, activeReads, watermarks, pubSubClient,
+                ignored -> snapshotSubscribedPartitions(), GOSSIP_INTERVAL_MS);
+        this.gcWorker = new GarbageCollectorWorker(db, watermarks,
+                ignored -> snapshotSubscribedPartitions(), dir, GOSSIP_STALE_AFTER_MS, GC_INTERVAL_MS);
     }
 
     public static void main(String[] args) {
@@ -152,6 +174,10 @@ public class StorageNodeServerV2 {
         server.start();
     }
 
+    private synchronized Set<Integer> snapshotSubscribedPartitions() {
+        return Set.copyOf(subscribedPartitions);
+    }
+
     private synchronized void updateSubscriptions() {
         if (currentEsConfig == null || currentPsConfig == null) {
             return;
@@ -196,6 +222,8 @@ public class StorageNodeServerV2 {
             String topic = "partition-" + partition;
             logger.info("Node unassigned from partition {}. Dropping subscription for topic: {}", partition, topic);
             pubSubClient.drop(topic);
+            pubSubClient.drop(com.github.koop.common.pubsub.GossipTopics.forPartition(partition));
+            watermarks.forgetPartition(partition);
             subscribedPartitions.remove(partition);
 
             ExecutorService executor = partitionExecutors.remove(partition);
@@ -268,7 +296,7 @@ public class StorageNodeServerV2 {
 
     private void handleGet(Context ctx) {
         try {
-            int partition = Integer.parseInt(ctx.pathParam("partition"));
+            int urlPartition = Integer.parseInt(ctx.pathParam("partition"));
             String bucket = ctx.pathParam("bucket");
             String key = ctx.pathParam("key");
             String fullKey = bucket + "/" + key;
@@ -284,8 +312,32 @@ public class StorageNodeServerV2 {
                     return;
                 }
             }
-            logger.debug("GET partition={} fullKey={} targetVersion={}", partition, fullKey, targetVersion);
 
+            // Look up the object's metadata first to determine its assigned partition
+            // (per the gossip-GC contract — the URL partition is advisory only).
+            Optional<Metadata> metaOpt = db.getItem(fullKey);
+            if (metaOpt.isEmpty()) {
+                ctx.status(404).result("NOT_FOUND");
+                logger.debug("GET urlPartition={} fullKey={} not found", urlPartition, fullKey);
+                return;
+            }
+            Metadata meta = metaOpt.get();
+            int partition = meta.partition();
+
+            long readSeq;
+            if (targetVersion >= 0) {
+                readSeq = targetVersion;
+            } else if (!meta.versions().isEmpty()) {
+                readSeq = meta.versions().get(meta.versions().size() - 1).sequenceNumber();
+            } else {
+                ctx.status(404).result("NOT_FOUND");
+                return;
+            }
+
+            logger.debug("GET partition={} fullKey={} targetVersion={} readSeq={}",
+                    partition, fullKey, targetVersion, readSeq);
+
+            try (ActiveReadTracker.Handle ignored = activeReads.begin(partition, readSeq)) {
             Optional<StorageNodeV2.GetObjectResponse> dataOpt = storageNode.retrieve(fullKey, targetVersion);
 
             if (dataOpt.isPresent()) {
@@ -342,6 +394,7 @@ public class StorageNodeServerV2 {
             } else {
                 ctx.status(404).result("NOT_FOUND");
                 logger.debug("GET partition={} fullKey={} targetVersion={} not found", partition, fullKey, targetVersion);
+            }
             }
         } catch (Exception e) {
             logger.error("Error handling GET", e);
@@ -664,6 +717,8 @@ public class StorageNodeServerV2 {
 
     public void start() {
         repairWorkerPool.start();
+        gossipService.start();
+        gcWorker.start();
 
         app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
@@ -709,6 +764,8 @@ public class StorageNodeServerV2 {
         }
 
         repairWorkerPool.shutdown();
+        gossipService.stop();
+        gcWorker.stop();
 
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
@@ -723,5 +780,25 @@ public class StorageNodeServerV2 {
     /** Package-private accessor for tests to inspect pending repair count. */
     int repairPendingCount() {
         return repairWorkerPool.pendingCount();
+    }
+
+    /** Test hook: expose the active read tracker. */
+    public ActiveReadTracker activeReadTracker() {
+        return activeReads;
+    }
+
+    /** Test hook: expose the watermark store. */
+    public PartitionWatermarks partitionWatermarks() {
+        return watermarks;
+    }
+
+    /** Test hook: expose the gossip service. */
+    public GossipService gossipService() {
+        return gossipService;
+    }
+
+    /** Test hook: expose the GC worker. */
+    public GarbageCollectorWorker gcWorker() {
+        return gcWorker;
     }
 }

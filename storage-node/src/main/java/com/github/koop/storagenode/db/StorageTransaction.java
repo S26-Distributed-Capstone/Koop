@@ -5,8 +5,10 @@ import java.util.Optional;
 public interface StorageTransaction extends AutoCloseable {
     Optional<Metadata> getMetadata(String key) throws Exception;
     void putMetadata(Metadata metadata) throws Exception;
+    void deleteMetadata(String key) throws Exception;
     void putLog(OpLog log) throws Exception;
-    
+    void deleteLog(int partition, long seqNum) throws Exception;
+
     Optional<Bucket> getBucket(String key) throws Exception;
     void putBucket(Bucket bucket) throws Exception;
 
