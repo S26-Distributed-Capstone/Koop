@@ -25,7 +25,13 @@ import com.github.koop.queryprocessor.gateway.StorageServices.StorageService.Obj
 import com.github.koop.queryprocessor.gateway.StorageServices.StorageWorkerService;
 import com.github.koop.queryprocessor.processor.CommitCoordinator;
 import com.github.koop.queryprocessor.processor.MultipartUploadResult;
+import com.github.koop.queryprocessor.processor.NodeHealthProbe;
+import com.github.koop.queryprocessor.processor.NodeHealthTracker;
 import com.github.koop.queryprocessor.processor.StorageWorker;
+
+import java.net.http.HttpClient;
+import java.time.Duration;
+import java.util.concurrent.Executors;
 
 public class Main {
 
@@ -58,11 +64,20 @@ public class Main {
      * └─────────┴──────────────────────────────┴────────────────────────────┘
      */
     public static Javalin createApp(StorageService storage) {
+        return createApp(storage, null);
+    }
+
+    /**
+     * Same as {@link #createApp(StorageService)} but with an optional
+     * {@link NodeHealthTracker} whose status counts are included in
+     * the {@code GET /health} response.
+     */
+    public static Javalin createApp(StorageService storage, NodeHealthTracker healthTracker) {
         var app = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.http.maxRequestSize = 100_000_000L; // 100 MB
 
-            config.routes.get("/health", Main::healthHandler);
+            config.routes.get("/health", ctx -> healthHandler(ctx, healthTracker));
 
             // ── Bucket-level routes ─────────────────────────────────────────
             config.routes.put("/{bucket}",    ctx -> createBucketHandler(ctx, storage));
@@ -101,8 +116,19 @@ public class Main {
 
     // ─── Health ───────────────────────────────────────────────────────────────
 
-    private static void healthHandler(Context ctx) {
-        ctx.result("API Gateway is healthy!");
+    private static void healthHandler(Context ctx, NodeHealthTracker healthTracker) {
+        StringBuilder body = new StringBuilder("API Gateway is healthy!");
+        if (healthTracker != null) {
+            var counts = healthTracker.getStatusCounts();
+            long healthy = counts.getOrDefault(NodeHealthTracker.NodeStatus.HEALTHY, 0L);
+            long suspect = counts.getOrDefault(NodeHealthTracker.NodeStatus.SUSPECT, 0L);
+            long down    = counts.getOrDefault(NodeHealthTracker.NodeStatus.DOWN,    0L);
+            body.append("\nStorage Nodes: ")
+                .append(healthy).append(" healthy, ")
+                .append(suspect).append(" suspect, ")
+                .append(down).append(" down");
+        }
+        ctx.result(body.toString());
     }
 
     // ─── Bucket Handlers ──────────────────────────────────────────────────────
@@ -448,10 +474,20 @@ public class Main {
         String redisURL = System.getenv("REDIS_URL");
         var cacheClient = new RedisCacheClient(redisURL);
 
+        var healthTracker = new NodeHealthTracker();
         var commitCoordinator = new CommitCoordinator(pubSubClient,0);
-        StorageWorker storageWorker = new StorageWorker(metadataClient, commitCoordinator);
+        StorageWorker storageWorker = new StorageWorker(metadataClient, commitCoordinator, healthTracker);
         StorageService storage = new StorageWorkerService(storageWorker, cacheClient);
-        createApp(storage).start(8080);
+
+        HttpClient probeHttpClient = HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
+                .connectTimeout(Duration.ofSeconds(2))
+                .build();
+        NodeHealthProbe probe = new NodeHealthProbe(healthTracker, probeHttpClient, metadataClient);
+        probe.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(probe::shutdown, "node-health-probe-shutdown"));
+
+        createApp(storage, healthTracker).start(8080);
     }
 
     // ─── XML Builders ─────────────────────────────────────────────────────────
