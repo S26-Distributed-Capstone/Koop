@@ -710,37 +710,24 @@ public class StorageWorkerApiTest {
      * add logging without breaking the return contract.
      */
     @Test
-    void parseObjectListJson_returnsEmptyOnMalformedInput() throws Exception {
-        // Access the private static method via reflection
-        java.lang.reflect.Method method = StorageWorker.class.getDeclaredMethod(
-                "parseObjectListJson", String.class);
-        method.setAccessible(true);
-
+    void parseObjectListJson_returnsEmptyOnMalformedInput() {
         // Malformed JSON — not valid JSON at all
-        @SuppressWarnings("unchecked")
-        List<StorageWorker.ObjectInfo> result1 =
-                (List<StorageWorker.ObjectInfo>) method.invoke(null, "THIS IS NOT JSON!!!");
+        List<StorageWorker.ObjectInfo> result1 = StorageWorker.parseObjectListJson("THIS IS NOT JSON!!!");
         assertNotNull(result1, "Should return non-null on malformed input");
         assertTrue(result1.isEmpty(), "Should return empty list on malformed JSON, got: " + result1);
 
         // Truncated JSON — partial array
-        @SuppressWarnings("unchecked")
-        List<StorageWorker.ObjectInfo> result2 =
-                (List<StorageWorker.ObjectInfo>) method.invoke(null, "[{\"key\":\"test");
+        List<StorageWorker.ObjectInfo> result2 = StorageWorker.parseObjectListJson("[{\"key\":\"test");
         assertNotNull(result2, "Should return non-null on truncated input");
         assertTrue(result2.isEmpty(), "Should return empty list on truncated JSON, got: " + result2);
 
         // Null input
-        @SuppressWarnings("unchecked")
-        List<StorageWorker.ObjectInfo> result3 =
-                (List<StorageWorker.ObjectInfo>) method.invoke(null, (String) null);
+        List<StorageWorker.ObjectInfo> result3 = StorageWorker.parseObjectListJson(null);
         assertNotNull(result3, "Should return non-null on null input");
         assertTrue(result3.isEmpty(), "Should return empty list on null input");
 
         // Empty string
-        @SuppressWarnings("unchecked")
-        List<StorageWorker.ObjectInfo> result4 =
-                (List<StorageWorker.ObjectInfo>) method.invoke(null, "");
+        List<StorageWorker.ObjectInfo> result4 = StorageWorker.parseObjectListJson("");
         assertNotNull(result4, "Should return non-null on empty input");
         assertTrue(result4.isEmpty(), "Should return empty list on empty input");
     }

@@ -687,7 +687,8 @@ public final class StorageWorker {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-    private static List<ObjectInfo> parseObjectListJson(String body) {
+    // Package-private for testing.
+    static List<ObjectInfo> parseObjectListJson(String body) {
         if (body == null || body.isBlank()) return List.of();
         try {
             List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});

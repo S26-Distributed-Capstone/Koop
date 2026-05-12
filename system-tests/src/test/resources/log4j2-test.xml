@@ -1,16 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Standard test logging config. Identical across all modules. See docs/testing.md.
+  Override the root level locally with: -Dlog4j2.level=DEBUG
+-->
 <Configuration status="WARN">
+  <Properties>
+    <Property name="log4j2.level">INFO</Property>
+  </Properties>
+
   <Appenders>
     <Console name="Console" target="SYSTEM_OUT">
-      <PatternLayout pattern="%d{HH:mm:ss} %-5level %logger - %msg%n"/>
+      <PatternLayout pattern="%d{HH:mm:ss.SSS} %-5level [%t] %logger{0} - %msg%n"/>
     </Console>
   </Appenders>
 
   <Loggers>
+    <Logger name="org.apache.kafka"          level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="io.netty"                  level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="org.testcontainers"        level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="com.github.dockerjava"     level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="software.amazon.awssdk"    level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="io.javalin"                level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
+    <Logger name="org.eclipse.jetty"         level="WARN" additivity="false"><AppenderRef ref="Console"/></Logger>
 
-    <Root level="debug">
+    <Root level="${sys:log4j2.level}">
       <AppenderRef ref="Console"/>
     </Root>
-
   </Loggers>
 </Configuration>
