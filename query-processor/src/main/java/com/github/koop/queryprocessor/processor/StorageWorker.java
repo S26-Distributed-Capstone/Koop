@@ -30,6 +30,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
@@ -60,15 +61,22 @@ public final class StorageWorker {
     private final HttpClient httpClient;
     private final MetadataClient metadataClient;
     private final CommitCoordinator commitCoordinator;
+    private final NodeHealthTracker healthTracker;
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
     // Convenience constructor — creates a MemoryPubSub-backed CommitCoordinator
     // on an OS-assigned port. Useful when only a MetadataClient is available.
     public StorageWorker(MetadataClient metadataClient) {
-        this(metadataClient, buildDefaultCommitCoordinator());
+        this(metadataClient, buildDefaultCommitCoordinator(), new NodeHealthTracker());
     }
 
     public StorageWorker(MetadataClient metadataClient, CommitCoordinator commitCoordinator) {
+        this(metadataClient, commitCoordinator, new NodeHealthTracker());
+    }
+
+    public StorageWorker(MetadataClient metadataClient,
+                         CommitCoordinator commitCoordinator,
+                         NodeHealthTracker healthTracker) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -76,6 +84,7 @@ public final class StorageWorker {
                 .build();
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
+        this.healthTracker = healthTracker != null ? healthTracker : new NodeHealthTracker();
         registerListeners();
         tryRebuildRouting();
     }
@@ -130,11 +139,21 @@ public final class StorageWorker {
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
         InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
 
+        // Advisory health filter: skip nodes marked DOWN provided enough
+        // healthy nodes remain to meet write quorum. Otherwise fall back to
+        // contacting every node (safety net for stale-cache false positives).
+        Set<InetSocketAddress> healthyForWrite = healthTracker.getHealthyNodes(resolvedNodes);
+        final boolean skipUnhealthyForWrite = healthyForWrite.size() >= writeQuorum;
+
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (int i = 0; i < n; i++) {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = resolvedNodes.get(index);
+                if (skipUnhealthyForWrite && !healthyForWrite.contains(node)) {
+                    logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
+                    return false;
+                }
                 URI uri = URI.create(String.format(
                         "http://%s:%d/store/%d/%s?requestId=%s",
                         node.getHostString(), node.getPort(),
@@ -148,11 +167,14 @@ public final class StorageWorker {
                             .build();
                     HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
+                        healthTracker.recordSuccess(node);
                         logger.trace("PUT shard {} → node {} succeeded", index, node);
                         return true;
                     }
+                    healthTracker.recordFailure(node);
                     logger.trace("PUT shard {} → node {} HTTP {}", index, node, response.statusCode());
                 } catch (Exception e) {
+                    healthTracker.recordFailure(node);
                     logger.trace("PUT shard {} → node {} exception: {}", index, node, e.getMessage());
                 }
                 return false;
@@ -221,7 +243,7 @@ public final class StorageWorker {
         // Synchronous probe: fetch shard metadata to detect tombstones/type
         // BEFORE creating the piped stream. This lets the caller (gateway)
         // distinguish "deleted" (404) from real errors (500).
-        List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty());
+        List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty(), m);
 
         if (responses.isEmpty()) {
             logger.debug("No shards found for key {} — object does not exist", storageKey);
@@ -273,7 +295,7 @@ public final class StorageWorker {
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
             OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
-        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
+        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty(), m);
 
         if (responses.isEmpty()) {
             throw new IOException("No reachable nodes for key " + storageKey);
@@ -329,7 +351,7 @@ public final class StorageWorker {
         }
 
         long oldVersion = availableVersions.get(1); // second-highest version
-        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
+        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion), m);
         List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
         if (validOldResponses.size() >= m) {
             logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
@@ -351,13 +373,21 @@ public final class StorageWorker {
     }
 
     private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes,
-            OptionalLong targetVersion) {
+            OptionalLong targetVersion, int minHealthyToSkip) {
         List<Callable<ShardResponse>> tasks = new ArrayList<>();
+
+        // Advisory: skip DOWN nodes only if enough healthy remain to reconstruct.
+        Set<InetSocketAddress> healthyForRead = healthTracker.getHealthyNodes(nodes);
+        final boolean skipUnhealthyForRead = healthyForRead.size() >= minHealthyToSkip;
 
         for (int i = 0; i < nodes.size(); i++) {
             final int index = i;
             tasks.add(() -> {
                 InetSocketAddress node = nodes.get(index);
+                if (skipUnhealthyForRead && !healthyForRead.contains(node)) {
+                    logger.trace("GET shard {} → node {} skipped (marked DOWN)", index, node);
+                    return null;
+                }
                 String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
                         partition, storageKey);
                 if (targetVersion.isPresent()) {
@@ -366,10 +396,16 @@ public final class StorageWorker {
 
                 HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
                         .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
-                HttpResponse<InputStream> response = httpClient.send(request,
-                        HttpResponse.BodyHandlers.ofInputStream());
+                HttpResponse<InputStream> response;
+                try {
+                    response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                } catch (Exception e) {
+                    healthTracker.recordFailure(node);
+                    throw e;
+                }
 
                 if (response.statusCode() == 200) {
+                    healthTracker.recordSuccess(node);
                     long version = response.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
                     ShardType type = ShardType.fromHeader(response.headers().firstValue("X-Koop-Type").orElse("BLOB"));
                     List<String> chunks = new ArrayList<>();
@@ -390,6 +426,10 @@ public final class StorageWorker {
 
                     return new ShardResponse(index, version, type, List.of(), response.body());
                 }
+                if (response.statusCode() >= 500) {
+                    healthTracker.recordFailure(node);
+                }
+                // 4xx (e.g. 404 missing shard) is not a health signal — leave tracker untouched.
                 return null;
             });
         }
@@ -565,9 +605,18 @@ public final class StorageWorker {
         List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
+        // Advisory: as long as at least one node is reachable per the tracker,
+        // skip DOWN nodes. Otherwise contact everyone (false-positive safety net).
+        Set<InetSocketAddress> healthyForHead = healthTracker.getHealthyNodes(nodes);
+        final boolean skipUnhealthyForHead = !healthyForHead.isEmpty();
+
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (InetSocketAddress node : nodes) {
             tasks.add(() -> {
+                if (skipUnhealthyForHead && !healthyForHead.contains(node)) {
+                    logger.trace("HEAD bucket {} → node {} skipped (marked DOWN)", bucket, node);
+                    return false;
+                }
                 URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
                         node.getHostString(), node.getPort(),
                         URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
@@ -578,6 +627,8 @@ public final class StorageWorker {
                 try {
                     HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
                     int status = resp.statusCode();
+                    // Any HTTP response means the node is reachable.
+                    healthTracker.recordSuccess(node);
                     if (status == 200) return true;
                     if (status == 404) {
                         logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
@@ -585,6 +636,7 @@ public final class StorageWorker {
                     }
                     logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
                 } catch (Exception e) {
+                    healthTracker.recordFailure(node);
                     logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
                 }
                 return false;
@@ -665,18 +717,29 @@ public final class StorageWorker {
     }
 
     private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
-        for (InetSocketAddress node : nodes) {
+        // Try healthy nodes first; deprioritize (but do not exclude) DOWN nodes.
+        List<InetSocketAddress> ordered = new ArrayList<>(nodes.size());
+        List<InetSocketAddress> deferred = new ArrayList<>();
+        for (InetSocketAddress n : nodes) {
+            if (healthTracker.isHealthy(n)) ordered.add(n);
+            else deferred.add(n);
+        }
+        ordered.addAll(deferred);
+
+        for (InetSocketAddress node : ordered) {
             URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
                     node.getHostString(), node.getPort(),
                     URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
             HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
             try {
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                healthTracker.recordSuccess(node);
                 if (resp.statusCode() == 200) {
                     return parseObjectListJson(resp.body());
                 }
                 logger.trace("GET list {} → node {} HTTP {}", bucket, node, resp.statusCode());
             } catch (Exception e) {
+                healthTracker.recordFailure(node);
                 logger.trace("GET list {} → node {} failed: {}", bucket, node, e.getMessage());
             }
         }

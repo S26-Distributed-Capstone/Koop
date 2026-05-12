@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -24,6 +25,10 @@ public class FakeStorageNodeServer implements Closeable {
     private final Map<String, byte[]> store = new ConcurrentHashMap<>();
     private final Set<String> buckets = ConcurrentHashMap.newKeySet();
     private volatile boolean enabled = true;
+    private final AtomicInteger putCount = new AtomicInteger();
+    private final AtomicInteger getCount = new AtomicInteger();
+    private final AtomicInteger headBucketCount = new AtomicInteger();
+    private final AtomicInteger listObjectsCount = new AtomicInteger();
 
     private final Logger logger = LogManager.getLogger(FakeStorageNodeServer.class);
 
@@ -53,6 +58,7 @@ public class FakeStorageNodeServer implements Closeable {
     }
 
     private void handlePut(Context ctx) {
+        putCount.incrementAndGet();
         if (!enabled) {
             ctx.status(503).result("NODE_DISABLED");
             return;
@@ -71,6 +77,7 @@ public class FakeStorageNodeServer implements Closeable {
     }
 
     private void handleGet(Context ctx) {
+        getCount.incrementAndGet();
         if (!enabled) {
             ctx.status(503).result("NODE_DISABLED");
             return;
@@ -111,6 +118,7 @@ public class FakeStorageNodeServer implements Closeable {
     }
 
     private void handleHeadBucket(Context ctx) {
+        headBucketCount.incrementAndGet();
         if (!enabled) {
             ctx.status(503).result("NODE_DISABLED");
             return;
@@ -120,6 +128,7 @@ public class FakeStorageNodeServer implements Closeable {
     }
 
     private void handleListObjects(Context ctx) {
+        listObjectsCount.incrementAndGet();
         if (!enabled) {
             ctx.status(503).result("NODE_DISABLED");
             return;
@@ -152,6 +161,18 @@ public class FakeStorageNodeServer implements Closeable {
             logger.error("Error in fake list objects", e);
             ctx.status(500).result("ERROR");
         }
+    }
+
+    int putCount() { return putCount.get(); }
+    int getCount() { return getCount.get(); }
+    int headBucketCount() { return headBucketCount.get(); }
+    int listObjectsCount() { return listObjectsCount.get(); }
+
+    void resetCounters() {
+        putCount.set(0);
+        getCount.set(0);
+        headBucketCount.set(0);
+        listObjectsCount.set(0);
     }
 
     void addBucket(String bucket) {

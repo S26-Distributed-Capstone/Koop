@@ -85,6 +85,7 @@ final class AckingFakeStorageNodeServer extends FakeStorageNodeServer {
         this.enabled = true;
         this.uploadEnabled = true;
         super.setEnabled(true);
+        super.resetCounters();
         acksSent.set(0);
     }
 

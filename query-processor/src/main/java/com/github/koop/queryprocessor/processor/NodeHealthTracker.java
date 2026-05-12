@@ -195,6 +195,14 @@ public final class NodeHealthTracker {
     }
 
     /**
+     * Clears all tracked node state. Primarily intended for tests that need
+     * to reset the tracker between scenarios.
+     */
+    public void clear() {
+        nodes.clear();
+    }
+
+    /**
      * Returns counts of nodes in each status for summary reporting.
      *
      * @return map from {@link NodeStatus} to count
