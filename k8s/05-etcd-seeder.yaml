@@ -1,0 +1,64 @@
+# Runs once to seed cluster topology into etcd.
+# Two erasure sets, each n=9 (m=6 data shards + 3 parity shards).
+# Sets can share machines but each set's pods are on different nodes (anti-affinity).
+#   set 1 → storage-node-set1-0 .. storage-node-set1-8
+#   set 2 → storage-node-set2-0 .. storage-node-set2-8
+# Partition spread: set 1 → partitions 0-14, set 2 → partitions 15-29 (30 total).
+# write_quorum=7: require 7 of 9 ACKs before a PUT succeeds; reconstruction needs only 6.
+#
+# The etcd-seeder-config ConfigMap is generated on deploy by deploy.sh from
+# etcd-data/erasure_set_configurations.json and etcd-data/partition_spread_configurations.json.
+# Edit those files to change the cluster topology.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etcd-seeder
+  namespace: koopdb
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        koopdb/role: cp
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: etcd-config
+        configMap:
+          name: etcd-seeder-config
+      initContainers:
+      - name: wait-for-etcd
+        image: quay.io/coreos/etcd:v3.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          until etcdctl --endpoints=http://etcd.koopdb.svc.cluster.local:2379 endpoint health; do
+            echo "Waiting for etcd..."
+            sleep 3
+          done
+      containers:
+      - name: seeder
+        image: quay.io/coreos/etcd:v3.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          ETCD=http://etcd.koopdb.svc.cluster.local:2379
+          CONFIG_DIR=/etc/etcd-seeder
+
+          etcdctl --endpoints="${ETCD}" put erasure_set_configurations \
+            "$(cat ${CONFIG_DIR}/erasure_set_configurations.json)"
+          etcdctl --endpoints="${ETCD}" put partition_spread_configurations \
+            "$(cat ${CONFIG_DIR}/partition_spread_configurations.json)"
+          echo "Etcd seeding complete."
+        volumeMounts:
+        - name: etcd-config
+          mountPath: /etc/etcd-seeder
+          readOnly: true

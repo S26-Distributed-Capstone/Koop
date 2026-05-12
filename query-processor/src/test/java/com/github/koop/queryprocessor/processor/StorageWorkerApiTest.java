@@ -27,6 +27,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Integration and unit tests for the StorageWorker's core 2-phase commit and retrieval logic.
+ * These tests utilize an in-memory PubSub system and a fake storage node server array
+ * to simulate distributed network behavior, quorum calculations, and erasure coding.
+ */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class StorageWorkerApiTest {
 
@@ -42,6 +47,10 @@ public class StorageWorkerApiTest {
     // Setup / teardown
     // -------------------------------------------------------------------------
 
+    /**
+     * Initializes the fake distributed cluster. Sets up the mock storage nodes,
+     * injects the cluster configuration into the MetadataClient, and boots the StorageWorkers.
+     */
     @BeforeAll
     void setup() throws Exception {
         PubSubClient sharedPubSub = new PubSubClient(new MemoryPubSub());
@@ -65,11 +74,17 @@ public class StorageWorkerApiTest {
         liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0));
     }
 
+    /**
+     * Clears internal state (like ACK counts) on the fake nodes before each test.
+     */
     @BeforeEach
     void resetNodes() {
         for (AckingFakeStorageNodeServer n : nodes) n.reset();
     }
 
+    /**
+     * Gracefully shuts down the workers and fake nodes after all tests complete.
+     */
     @AfterAll
     void teardown() throws Exception {
         worker.shutdown();
@@ -81,6 +96,10 @@ public class StorageWorkerApiTest {
     // Existing round-trip tests
     // -------------------------------------------------------------------------
 
+    /**
+     * Verifies that a file can be successfully uploaded (PUT) and downloaded (GET) 
+     * without data corruption.
+     */
     @Test
     void putThenGet_roundTrip() throws Exception {
         byte[] data = randomBytes(DATA_SIZE);
@@ -96,6 +115,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that the erasure coder can successfully reconstruct a file even when
+     * 3 out of 9 storage nodes are offline.
+     */
     @Test
     void get_withThreeNodeFailures_stillWorks() throws Exception {
         byte[] data = randomBytes(DATA_SIZE);
@@ -113,6 +136,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that the erasure coder fails to reconstruct a file (as mathematically expected)
+     * when 4 out of 9 storage nodes are offline (exceeding the parity tolerance).
+     */
     @Test
     void get_withFourNodeFailures_fails() throws Exception {
         byte[] data = randomBytes(DATA_SIZE);
@@ -140,6 +167,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that the StorageWorker respects dynamic updates pushed via the MetadataClient
+     * and correctly routes requests to new nodes when the cluster topology changes.
+     */
     @Test
     void liveConfigUpdate_newNodesUsedOnNextRequest() throws Exception {
         PubSubClient sharedPubSub = new PubSubClient(new MemoryPubSub());
@@ -180,6 +211,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Checks the standard production initialization path to ensure proper instantiation
+     * and full round-trip capabilities (PUT, GET, DELETE).
+     */
     @Test
     void productionConstructor_putGetDelete_roundTrip() throws Exception {
         PubSubClient sharedPubSub = new PubSubClient(new MemoryPubSub());
@@ -225,6 +260,10 @@ public class StorageWorkerApiTest {
     // Commit-protocol tests
     // -------------------------------------------------------------------------
 
+    /**
+     * Ensures that the Phase 2 commit broadcasts the FileCommitMessage to the correct
+     * partition-specific Kafka topic.
+     */
     @Test
     void commitPublishedToPartitionTopic() throws Exception {
         PubSubClient spy = new PubSubClient(new MemoryPubSub());
@@ -279,6 +318,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that the StorageWorker fails the commit and returns false if the
+     * required number of nodes (writeQuorum) do not acknowledge the operation.
+     */
     @Test
     void commitPhase_failsWhenBelowQuorum() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -290,6 +333,7 @@ public class StorageWorkerApiTest {
         List<InetSocketAddress> set = quorumNodes.stream()
                 .map(AckingFakeStorageNodeServer::address).toList();
 
+        // 3 nodes are completely dead. Only 6 remain. (Write Quorum is 7).
         quorumNodes.get(0).setEnabled(false);
         quorumNodes.get(1).setEnabled(false);
         quorumNodes.get(2).setEnabled(false);
@@ -313,6 +357,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that if a few nodes fail during the Phase 1 upload, but recover and ACK 
+     * during Phase 2, the system handles the eventual consistency gracefully.
+     */
     @Test
     void commitPhase_succeedsWithUploadFailureThatLaterAcks() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -349,6 +397,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Tests that the CommitCoordinator successfully registers exactly one ACK from 
+     * each active storage node, avoiding duplicates.
+     */
     @Test
     void commitPhase_eachEnabledNodeAcksExactlyOnce() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -379,6 +431,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Spin up multiple virtual threads to perform concurrent PUTs and verify that 
+     * the CommitCoordinator isolates and tracks ACKs accurately per-transaction.
+     */
     @Test
     void concurrentPuts_allSucceed() throws Exception {
         int concurrency = 5;
@@ -434,6 +490,9 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that bucket creation triggers a Kafka message to the correct partition topic.
+     */
     @Test
     void createBucket_succeedsAndPublishesToPartitionTopic() throws Exception {
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
@@ -465,6 +524,9 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that bucket deletion triggers a Kafka message to the correct partition topic.
+     */
     @Test
     void deleteBucket_succeedsAndPublishesToPartitionTopic() throws Exception {
         CopyOnWriteArrayList<Message> receivedMessages = new CopyOnWriteArrayList<>();
@@ -493,6 +555,9 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Ensures bucket creation requires quorum approval to succeed.
+     */
     @Test
     void createBucket_failsWhenBelowQuorum() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -514,6 +579,9 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Simulates the entire lifecycle of a bucket from creation to population, deletion, and purging.
+     */
     @Test
     void bucketLifecycle_createPutDeleteObjectDeleteBucket() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -550,6 +618,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that deleting an object broadcasts a DeleteMessage via Kafka and waits
+     * for the appropriate quorum response.
+     */
     @Test
     void delete_publishesToPartitionTopicAndAwaitsQuorum() throws Exception {
         CopyOnWriteArrayList<String> receivedTopics = new CopyOnWriteArrayList<>();
@@ -585,6 +657,9 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that simultaneous bucket creation/deletion operations are thread-safe.
+     */
     @Test
     void concurrentBucketOps_allSucceed() throws Exception {
         int concurrency = 4;
@@ -613,6 +688,9 @@ public class StorageWorkerApiTest {
     // bucketExists / listObjects tests
     // -------------------------------------------------------------------------
 
+    /**
+     * Verifies `bucketExists` properly fans out and returns true when a bucket is available.
+     */
     @Test
     void bucketExists_returnsTrueAfterCreate() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -671,6 +749,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that listObjects can fan out across multiple partitions, collect the lists,
+     * and compile a final, sorted array of file names.
+     */
     @Test
     void listObjects_returnsStoredObjects() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -701,30 +783,38 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Tests the fault tolerance of the JSON metadata parser. If a node returns corrupted data
+     * during a list request, it shouldn't crash the entire list process.
+     */
     @Test
     void parseObjectListJson_returnsEmptyOnMalformedInput() throws Exception {
         java.lang.reflect.Method method = StorageWorker.class.getDeclaredMethod(
                 "parseObjectListJson", String.class);
         method.setAccessible(true);
 
+        // Malformed JSON — not valid JSON at all
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result1 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "THIS IS NOT JSON!!!");
         assertNotNull(result1, "Should return non-null on malformed input");
         assertTrue(result1.isEmpty(), "Should return empty list on malformed JSON, got: " + result1);
 
+        // Truncated JSON — partial array
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result2 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "[{\"key\":\"test");
         assertNotNull(result2, "Should return non-null on truncated input");
         assertTrue(result2.isEmpty(), "Should return empty list on truncated JSON, got: " + result2);
 
+        // Null input
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result3 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, (String) null);
         assertNotNull(result3, "Should return non-null on null input");
         assertTrue(result3.isEmpty(), "Should return empty list on null input");
 
+        // Empty string
         @SuppressWarnings("unchecked")
         List<StorageWorker.ObjectInfo> result4 =
                 (List<StorageWorker.ObjectInfo>) method.invoke(null, "");
@@ -757,6 +847,10 @@ public class StorageWorkerApiTest {
     // Timeout and unresponsive node tests
     // -------------------------------------------------------------------------
 
+    /**
+     * Validates that a PUT request will time out and gracefully fail if the commit
+     * phase stalls indefinitely due to unresponsive storage nodes.
+     */
     @Test
     void put_failsWhenCommitTimesOut() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
@@ -815,6 +909,10 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Validates that if all nodes are completely unreachable during Phase 1 (Upload),
+     * the system aborts early without locking up.
+     */
     @Test
     void put_phase1FailsWhenAllNodesUnreachable() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());

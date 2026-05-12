@@ -1,0 +1,164 @@
+# Two headless services — one per erasure set, giving each pod stable DNS:
+#   storage-node-set1-N.storage-node-set1.koopdb.svc.cluster.local
+#   storage-node-set2-N.storage-node-set2.koopdb.svc.cluster.local
+# Pod anti-affinity ensures each set's 9 pods land on different machines.
+# Sets CAN overlap (share machines).
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-node-set1
+  namespace: koopdb
+spec:
+  clusterIP: None
+  selector:
+    app: storage-node
+    erasure-set: "1"
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-node-set2
+  namespace: koopdb
+spec:
+  clusterIP: None
+  selector:
+    app: storage-node
+    erasure-set: "2"
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage-node-set1
+  namespace: koopdb
+spec:
+  serviceName: storage-node-set1
+  replicas: 9
+  selector:
+    matchLabels:
+      app: storage-node
+      erasure-set: "1"
+  template:
+    metadata:
+      labels:
+        app: storage-node
+        erasure-set: "1"
+    spec:
+      nodeSelector:
+        koopdb/role: worker
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                erasure-set: "1"
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: storage-node
+        image: ygins/storage-node:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: APP_PORT
+          value: "8080"
+        - name: STORAGE_DIR
+          value: "/storage"
+        - name: ETCD_URL
+          value: "http://etcd.koopdb.svc.cluster.local:2379"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka.koopdb.svc.cluster.local:9092"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_IP
+          value: "$(POD_NAME).storage-node-set1.koopdb.svc.cluster.local"
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 12
+        volumeMounts:
+        - name: storage
+          mountPath: /storage
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage-node-set2
+  namespace: koopdb
+spec:
+  serviceName: storage-node-set2
+  replicas: 9
+  selector:
+    matchLabels:
+      app: storage-node
+      erasure-set: "2"
+  template:
+    metadata:
+      labels:
+        app: storage-node
+        erasure-set: "2"
+    spec:
+      nodeSelector:
+        koopdb/role: worker
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                erasure-set: "2"
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: storage-node
+        image: ygins/storage-node:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: APP_PORT
+          value: "8080"
+        - name: STORAGE_DIR
+          value: "/storage"
+        - name: ETCD_URL
+          value: "http://etcd.koopdb.svc.cluster.local:2379"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka.koopdb.svc.cluster.local:9092"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NODE_IP
+          value: "$(POD_NAME).storage-node-set2.koopdb.svc.cluster.local"
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 12
+        volumeMounts:
+        - name: storage
+          mountPath: /storage
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi

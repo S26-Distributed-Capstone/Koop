@@ -1,90 +1,78 @@
 package com.github.koop.common.pubsub;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.junit.jupiter.api.*;
 import org.testcontainers.kafka.ConfluentKafkaContainer;
 
-import java.time.LocalTime;
+import java.time.Duration;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration tests for {@link KafkaPubSub}.
+ * Integration test for {@link KafkaPubSub}.
  *
- * Run with:
- *   mvn test -pl common-lib -Dtest=KafkaPubSubTest
+ * Run with: mvn test -pl common-lib -Dtest=KafkaPubSubTest
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class)
 class KafkaPubSubTest {
 
-    // Manually managed so we can log every lifecycle step
-    static ConfluentKafkaContainer kafka;
+    private static final Logger log = LogManager.getLogger(KafkaPubSubTest.class);
 
-    private static void log(String msg) {
-        System.out.printf("[%s] %s%n", LocalTime.now().withNano(0), msg);
-        System.out.flush();
-    }
+    private ConfluentKafkaContainer kafka;
 
     @BeforeAll
     void startKafka() {
-        log("Creating ConfluentKafkaContainer...");
         kafka = new ConfluentKafkaContainer("confluentinc/cp-kafka:7.7.8");
-        log("Starting container...");
         kafka.start();
-        log("Container started. Bootstrap: " + kafka.getBootstrapServers());
+        log.info("Kafka container started, bootstrap={}", kafka.getBootstrapServers());
     }
 
     @AfterAll
     void stopKafka() {
-        log("Stopping Kafka container...");
         if (kafka != null) kafka.stop();
-        log("Done.");
     }
 
     @Test
-    @Order(1)
-    void pub_sub_roundTrip() throws InterruptedException {
+    void publish_thenSubscribe_deliversMessage() {
         String topic = CommitTopics.forPartition(0);
         String groupId = "test-group-" + System.currentTimeMillis();
 
-        log("Creating KafkaPubSub groupId=" + groupId);
         KafkaPubSub pubSub = new KafkaPubSub(kafka.getBootstrapServers(), groupId);
         PubSubClient client = new PubSubClient(pubSub);
-
-        log("Starting client...");
         client.start();
 
         CountDownLatch latch = new CountDownLatch(1);
         CopyOnWriteArrayList<byte[]> received = new CopyOnWriteArrayList<>();
 
-        log("Subscribing to topic: " + topic);
         client.sub(topic, (t, offset, message) -> {
-            log("*** MESSAGE RECEIVED on " + t + " offset=" + offset + " value=" + new String(message));
             received.add(message);
             latch.countDown();
         });
 
-        log("Waiting 5s for consumer group assignment...");
-        Thread.sleep(5000);
-
-        log("Publishing message...");
-        client.pub(topic, "hello".getBytes());
-        log("Message published. Waiting 15s for delivery...");
-
-        boolean ok = latch.await(15, TimeUnit.SECONDS);
-        log("Latch done: " + ok + " received=" + received.size());
-
+        // Publish repeatedly until consumer group assignment completes and the
+        // first message lands. Avoids fragile fixed sleeps for broker readiness.
         try {
-            client.close();
-        } catch (Exception e) {
-            log("Error closing client: " + e.getMessage());
-        }
+            await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .until(() -> {
+                    client.pub(topic, "hello".getBytes());
+                    return latch.getCount() == 0;
+                });
 
-        assertTrue(ok, "Message not received within timeout");
-        assertArrayEquals("hello".getBytes(), received.get(0));
-        log("Test passed.");
+            assertEquals(1, received.size(), "expected exactly one delivery");
+            assertArrayEquals("hello".getBytes(), received.get(0));
+        } finally {
+            try {
+                client.close();
+            } catch (Exception e) {
+                log.warn("error closing client", e);
+            }
+        }
     }
 }
