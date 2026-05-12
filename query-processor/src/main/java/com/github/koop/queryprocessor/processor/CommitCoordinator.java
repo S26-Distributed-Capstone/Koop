@@ -133,12 +133,11 @@ public final class CommitCoordinator implements AutoCloseable {
      * @param writeQuorum number of ACKs required before the commit is considered successful.
      * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginCommit(UUID requestId, int partition, String bucket, String key, int writeQuorum) {
+    public boolean beginCommit(UUID requestId, int partition, String bucket, String key, long size, int writeQuorum) {
         return runCommit(requestId, writeQuorum, () -> {
-            FileCommitMessage msg = new FileCommitMessage(bucket, key, requestId.toString(), ackAddress);
+            FileCommitMessage msg = new FileCommitMessage(bucket, key, requestId.toString(), ackAddress, size);
             String topic = CommitTopics.forPartition(partition);
             pubSubClient.pub(topic, Message.serializeMessage(msg));
-            logger.debug("Published FileCommitMessage for requestId {} on topic {}", requestId, topic);
         });
     }
 
@@ -154,14 +153,11 @@ public final class CommitCoordinator implements AutoCloseable {
      * @param writeQuorum number of ACKs required before the commit is considered successful.
      * @return {@code true} iff at least {@code writeQuorum} SNs ACKed within the timeout.
      */
-    public boolean beginMultipartCommit(UUID requestId, int partition, String bucket, String key, List<String> chunks,
-                                        int writeQuorum) {
+    public boolean beginMultipartCommit(UUID requestId, int partition, String bucket, String key, List<String> chunks, long size, int writeQuorum) {
         return runCommit(requestId, writeQuorum, () -> {
-            MultipartCommitMessage msg = new MultipartCommitMessage(bucket, key, requestId.toString(), ackAddress,
-                    chunks);
+            MultipartCommitMessage msg = new MultipartCommitMessage(bucket, key, requestId.toString(), ackAddress, chunks, size);
             String topic = CommitTopics.forPartition(partition);
             pubSubClient.pub(topic, Message.serializeMessage(msg));
-            logger.debug("Published MultipartCommitMessage for requestId {} on topic {}", requestId, topic);
         });
     }
 

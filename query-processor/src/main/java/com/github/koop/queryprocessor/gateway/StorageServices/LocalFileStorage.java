@@ -29,12 +29,14 @@ public class LocalFileStorage implements StorageService {
         return StorageResult.success();
     }
 
+    // UPDATED: Return GetObjectResult with both the stream and the exact file size
     @Override
-    public InputStream getObject(String bucket, String key) throws Exception {
+    public GetObjectResult getObject(String bucket, String key) throws Exception {
         Path filePath = rootDir.resolve(bucket).resolve(key);
         if(Files.exists(filePath)){
-            System.out.println("[LocalFileStorage] Retrieved: " + filePath);
-            return Files.newInputStream(filePath);
+            long size = Files.size(filePath);
+            System.out.println("[LocalFileStorage] Retrieved: " + filePath + " (Size: " + size + " bytes)");
+            return new GetObjectResult(Files.newInputStream(filePath), size);
         }
         return null;
     }

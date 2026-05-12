@@ -45,7 +45,6 @@ class StorageNodeServerV2Test {
     private MemoryFetcher fetcher;
     private MemoryPubSub pubSub;
 
-    // A dummy server to absorb all the async ACKs and prevent connection errors in the logs
     private Javalin ackServer;
 
     @TempDir
@@ -63,7 +62,6 @@ class StorageNodeServerV2Test {
         metadataClient.start();
         pubSubClient.start();
 
-        // Feed empty metadata so the waitFor completes immediately
         var emptyEs = new ErasureSetConfiguration();
         emptyEs.setErasureSets(List.of());
         var emptyPs = new PartitionSpreadConfiguration();
@@ -71,7 +69,6 @@ class StorageNodeServerV2Test {
         fetcher.update(emptyEs);
         fetcher.update(emptyPs);
 
-        // Start the ACK blackhole server on a random port (Updated to new path param spec)
         ackServer = Javalin.create(config -> {
             config.startup.showJavalinBanner = false;
             config.routes.post("/ack/{requestId}", ctx -> ctx.status(200));
@@ -115,7 +112,7 @@ class StorageNodeServerV2Test {
         String fullKey = "test-bucket/missing-reqid";
 
         HttpRequest putReq = HttpRequest.newBuilder()
-                .uri(storeUri(partition, fullKey)) // Omitting ?requestId=
+                .uri(storeUri(partition, fullKey))
                 .PUT(HttpRequest.BodyPublishers.ofString("Data"))
                 .build();
 
@@ -180,7 +177,7 @@ class StorageNodeServerV2Test {
         assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode());
 
         Message.FileCommitMessage commitMsg = new Message.FileCommitMessage(
-                bucket, key, reqId, getDummySender());
+                bucket, key, reqId, getDummySender(), 1024L);
         server.processSequencerMessage(partition, commitMsg, seqNum);
 
         HttpRequest getReq = HttpRequest.newBuilder()
@@ -204,14 +201,14 @@ class StorageNodeServerV2Test {
                 .PUT(HttpRequest.BodyPublishers.ofString("Version 1"))
                 .build();
         http.send(putReq1, HttpResponse.BodyHandlers.ofString());
-        db.putItem(fullKey, partition, 10L, "req-v1");
+        db.putItem(fullKey, partition, 10L, "req-v1", 1024L);
 
         HttpRequest putReq2 = HttpRequest.newBuilder()
                 .uri(storeUriWithReq(partition, fullKey, "req-v2"))
                 .PUT(HttpRequest.BodyPublishers.ofString("Version 2"))
                 .build();
         http.send(putReq2, HttpResponse.BodyHandlers.ofString());
-        db.putItem(fullKey, partition, 20L, "req-v2");
+        db.putItem(fullKey, partition, 20L, "req-v2", 1024L);
 
         HttpRequest getV1 = HttpRequest.newBuilder()
                 .uri(storeUriWithVersion(partition, fullKey, 10L))
@@ -238,18 +235,15 @@ class StorageNodeServerV2Test {
         String fullKey = bucket + "/" + key;
         String reqId = "req-del-put";
 
-        // Store and commit an object
         http.send(HttpRequest.newBuilder().uri(storeUriWithReq(partition, fullKey, reqId))
-                .PUT(HttpRequest.BodyPublishers.ofString("To Be Deleted")).build(),
+                        .PUT(HttpRequest.BodyPublishers.ofString("To Be Deleted")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 50L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 50L);
 
-        // Delete object via sequencer
         server.processSequencerMessage(partition,
                 new Message.DeleteMessage(bucket, key, "req-delete", getDummySender()), 51L);
 
-        // Verify it returns 404 and Tombstone
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
@@ -266,14 +260,12 @@ class StorageNodeServerV2Test {
         String key = "multi-key";
         String fullKey = bucket + "/" + key;
 
-        // Commit a multipart object
         List<String> chunks = List.of("chunk1", "chunk2");
         server.processSequencerMessage(partition,
                 new Message.MultipartCommitMessage(bucket, key, "req-multi", getDummySender(),
-                        chunks),
+                        chunks, 5000L),
                 200L);
 
-        // Retrieve the multipart chunk list
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
@@ -295,7 +287,6 @@ class StorageNodeServerV2Test {
         CountDownLatch ackLatch = new CountDownLatch(1);
         AtomicReference<String> receivedReqId = new AtomicReference<>();
 
-        // Start a dummy Javalin server on a random port to act as the sequencer callback endpoint
         Javalin coordinator = Javalin.create(config -> {
             config.concurrency.useVirtualThreads = true;
             config.startup.showJavalinBanner = false;
@@ -310,13 +301,10 @@ class StorageNodeServerV2Test {
         int callbackPort = coordinator.port();
         InetSocketAddress senderAddress = new InetSocketAddress("127.0.0.1", callbackPort);
 
-        // Create a simple message to trigger the sequencer processing and subsequent ACK
         Message.CreateBucketMessage msg = new Message.CreateBucketMessage(bucket, reqId, senderAddress);
 
-        // Process the message (this handles the database operation and fires the async ACK)
         server.processSequencerMessage(partition, msg, 1L);
 
-        // Wait for the asynchronous HTTP client to send the request to the dummy server
         boolean received = ackLatch.await(5, TimeUnit.SECONDS);
 
         assertTrue(received, "ACK was not received by the callback server within the timeout limit");
@@ -332,9 +320,8 @@ class StorageNodeServerV2Test {
         String fullKey = bucket + "/" + key;
         String reqId = "req-missing-123";
 
-        // Commit the file metadata via sequencer message WITHOUT performing the HTTP PUT first.
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 300L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 300L);
 
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
@@ -342,8 +329,6 @@ class StorageNodeServerV2Test {
                 .build();
         HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // StorageNodeV2 checks Files.exists(path) for RegularFileVersion and returns Optional.empty(),
-        // which the server translates to 404 NOT_FOUND.
         assertEquals(404, getResp.statusCode(),
                 "GET should return 404 when file metadata exists but the physical file is missing from disk");
     }
@@ -356,10 +341,9 @@ class StorageNodeServerV2Test {
         String fullKey = bucket + "/" + key;
         String reqId = "req-multi-missing";
 
-        // Commit the multipart manifest WITHOUT putting the actual chunk files on disk.
         List<String> chunks = List.of("missing-chunk1", "missing-chunk2");
         server.processSequencerMessage(partition,
-                new Message.MultipartCommitMessage(bucket, key, reqId, getDummySender(), chunks), 400L);
+                new Message.MultipartCommitMessage(bucket, key, reqId, getDummySender(), chunks, 5000L), 400L);
 
         HttpRequest getReq = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
@@ -367,8 +351,6 @@ class StorageNodeServerV2Test {
                 .build();
         HttpResponse<String> getResp = http.send(getReq, HttpResponse.BodyHandlers.ofString());
 
-        // StorageNodeV2 DOES NOT verify physical existence of individual chunks during a manifest retrieval.
-        // It returns the JSON list of chunks immediately.
         assertEquals(200, getResp.statusCode(),
                 "GET should return 200 for multipart manifest even if physical chunk files are unmaterialized");
         assertEquals("application/json", getResp.headers().firstValue("Content-Type").orElse(""));
@@ -385,11 +367,9 @@ class StorageNodeServerV2Test {
         String reqId = "req-late-123";
         String dataStr = "Better late than never";
 
-        // 1. Commit the file metadata via sequencer message FIRST (before the file is uploaded)
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 500L);
+                new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 500L);
 
-        // 2. Verify the file is not yet available (returns 404 because physical file is missing)
         HttpRequest getReq1 = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
@@ -397,7 +377,6 @@ class StorageNodeServerV2Test {
         assertEquals(404, http.send(getReq1, HttpResponse.BodyHandlers.ofString()).statusCode(),
                 "GET should return 404 when committed but not yet materialized");
 
-        // 3. Materialize the physical file on disk via HTTP PUT
         HttpRequest putReq = HttpRequest.newBuilder()
                 .uri(storeUriWithReq(partition, fullKey, reqId))
                 .PUT(HttpRequest.BodyPublishers.ofString(dataStr))
@@ -405,7 +384,6 @@ class StorageNodeServerV2Test {
         assertEquals(200, http.send(putReq, HttpResponse.BodyHandlers.ofString()).statusCode(),
                 "PUT should succeed in materializing the file");
 
-        // 4. Verify the file is now successfully retrievable
         HttpRequest getReq2 = HttpRequest.newBuilder()
                 .uri(storeUri(partition, fullKey))
                 .GET()
@@ -418,8 +396,6 @@ class StorageNodeServerV2Test {
                 "The version headers should match the initial sequencer commit");
     }
 
-    // ─── Bucket query endpoint helpers ────────────────────────────────────────
-
     private URI bucketUri(String bucket) {
         return URI.create("http://localhost:" + port + "/bucket/" + bucket);
     }
@@ -431,8 +407,6 @@ class StorageNodeServerV2Test {
         if (maxKeys != null) { sb.append(sep).append("maxKeys=").append(maxKeys); }
         return URI.create(sb.toString());
     }
-
-    // ─── HeadBucket tests ─────────────────────────────────────────────────────
 
     @Test
     void testHeadBucket_returnsNotFoundWhenBucketDoesNotExist() throws Exception {
@@ -449,7 +423,6 @@ class StorageNodeServerV2Test {
         int partition = 10;
         String bucket = "head-test-bucket";
 
-        // Create bucket via sequencer message
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-head-create", getDummySender()), 600L);
 
@@ -466,7 +439,6 @@ class StorageNodeServerV2Test {
         int partition = 11;
         String bucket = "head-delete-bucket";
 
-        // Create then delete
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-hd-create", getDummySender()), 700L);
         server.processSequencerMessage(partition,
@@ -479,8 +451,6 @@ class StorageNodeServerV2Test {
         HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
         assertEquals(404, resp.statusCode(), "HEAD should return 404 after bucket is deleted");
     }
-
-    // ─── ListObjects tests ────────────────────────────────────────────────────
 
     @Test
     void testListObjects_returnsEmptyListWhenNoObjects() throws Exception {
@@ -509,24 +479,22 @@ class StorageNodeServerV2Test {
         String fullKey1 = bucket + "/" + key1;
         String fullKey2 = bucket + "/" + key2;
 
-        // Create bucket first so that GET /bucket/{bucket} doesn't 404
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-list-create", getDummySender()), 899L);
 
-        // PUT + commit two objects
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey1, "req-list-1"))
-                .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
+                        .uri(storeUriWithReq(partition, fullKey1, "req-list-1"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key1, "req-list-1", getDummySender()), 900L);
+                new Message.FileCommitMessage(bucket, key1, "req-list-1", getDummySender(), 1024L), 900L);
 
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey2, "req-list-2"))
-                .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
+                        .uri(storeUriWithReq(partition, fullKey2, "req-list-2"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key2, "req-list-2", getDummySender()), 901L);
+                new Message.FileCommitMessage(bucket, key2, "req-list-2", getDummySender(), 1024L), 901L);
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(bucketUri(bucket))
@@ -543,21 +511,19 @@ class StorageNodeServerV2Test {
         int partition = 14;
         String bucket = "maxkeys-bucket";
 
-        // Create bucket first
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-mk-create", getDummySender()), 999L);
 
-        // Commit three objects
         for (int i = 1; i <= 3; i++) {
             String key = "obj" + i;
             String fullKey = bucket + "/" + key;
             String reqId = "req-mk-" + i;
             http.send(HttpRequest.newBuilder()
-                    .uri(storeUriWithReq(partition, fullKey, reqId))
-                    .PUT(HttpRequest.BodyPublishers.ofString("data" + i)).build(),
+                            .uri(storeUriWithReq(partition, fullKey, reqId))
+                            .PUT(HttpRequest.BodyPublishers.ofString("data" + i)).build(),
                     HttpResponse.BodyHandlers.ofString());
             server.processSequencerMessage(partition,
-                    new Message.FileCommitMessage(bucket, key, reqId, getDummySender()), 1000L + i);
+                    new Message.FileCommitMessage(bucket, key, reqId, getDummySender(), 1024L), 1000L + i);
         }
 
         HttpRequest req = HttpRequest.newBuilder()
@@ -567,8 +533,6 @@ class StorageNodeServerV2Test {
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, resp.statusCode());
 
-        // Count how many "key" entries appear. With maxKeys=1, should be exactly 1 object.
-        // Simple check: split by "key" field separator
         String body = resp.body();
         long objectCount = body.chars().filter(ch -> ch == '{').count();
         assertEquals(1, objectCount, "maxKeys=1 should return exactly 1 object, got: " + body);
@@ -579,37 +543,35 @@ class StorageNodeServerV2Test {
         int partition = 15;
         String bucket = "prefix-bucket";
 
-        // Create both buckets first
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-pf-create", getDummySender()), 1099L);
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage("other-bucket", "req-pf-other-create", getDummySender()), 1098L);
 
-        // Two objects in "prefix-bucket", one in "other-bucket"
         String fullKey1 = bucket + "/alpha";
         String fullKey2 = bucket + "/beta";
         String otherKey = "other-bucket/gamma";
 
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey1, "req-pf-1"))
-                .PUT(HttpRequest.BodyPublishers.ofString("a")).build(),
+                        .uri(storeUriWithReq(partition, fullKey1, "req-pf-1"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("a")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, "alpha", "req-pf-1", getDummySender()), 1100L);
+                new Message.FileCommitMessage(bucket, "alpha", "req-pf-1", getDummySender(), 1024L), 1100L);
 
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey2, "req-pf-2"))
-                .PUT(HttpRequest.BodyPublishers.ofString("b")).build(),
+                        .uri(storeUriWithReq(partition, fullKey2, "req-pf-2"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("b")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, "beta", "req-pf-2", getDummySender()), 1101L);
+                new Message.FileCommitMessage(bucket, "beta", "req-pf-2", getDummySender(), 1024L), 1101L);
 
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, otherKey, "req-pf-3"))
-                .PUT(HttpRequest.BodyPublishers.ofString("c")).build(),
+                        .uri(storeUriWithReq(partition, otherKey, "req-pf-3"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("c")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage("other-bucket", "gamma", "req-pf-3", getDummySender()), 1102L);
+                new Message.FileCommitMessage("other-bucket", "gamma", "req-pf-3", getDummySender(), 1024L), 1102L);
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(bucketUri(bucket))
@@ -631,30 +593,26 @@ class StorageNodeServerV2Test {
         String fullKey1 = bucket + "/" + key1;
         String fullKey2 = bucket + "/" + key2;
 
-        // Create bucket
         server.processSequencerMessage(partition,
                 new Message.CreateBucketMessage(bucket, "req-ts-create", getDummySender()), 1200L);
 
-        // PUT + commit both objects
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey1, "req-ts-1"))
-                .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
+                        .uri(storeUriWithReq(partition, fullKey1, "req-ts-1"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("data1")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key1, "req-ts-1", getDummySender()), 1201L);
+                new Message.FileCommitMessage(bucket, key1, "req-ts-1", getDummySender(), 1024L), 1201L);
 
         http.send(HttpRequest.newBuilder()
-                .uri(storeUriWithReq(partition, fullKey2, "req-ts-2"))
-                .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
+                        .uri(storeUriWithReq(partition, fullKey2, "req-ts-2"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("data2")).build(),
                 HttpResponse.BodyHandlers.ofString());
         server.processSequencerMessage(partition,
-                new Message.FileCommitMessage(bucket, key2, "req-ts-2", getDummySender()), 1202L);
+                new Message.FileCommitMessage(bucket, key2, "req-ts-2", getDummySender(), 1024L), 1202L);
 
-        // Delete the second object (writes a tombstone)
         server.processSequencerMessage(partition,
                 new Message.DeleteMessage(bucket, key2, "req-ts-del", getDummySender()), 1203L);
 
-        // List objects — deleted key should NOT appear
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(bucketUri(bucket))
                 .GET()

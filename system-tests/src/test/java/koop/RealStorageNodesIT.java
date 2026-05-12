@@ -37,7 +37,6 @@ public class RealStorageNodesIT {
     private final List<Database> databases = new ArrayList<>();
     private List<InetSocketAddress> addrs;
 
-    // Shared infrastructure for V2
     private MemoryFetcher sharedFetcher;
     private MemoryPubSub sharedPubSub;
     private MetadataClient sharedMetadataClient;
@@ -45,18 +44,12 @@ public class RealStorageNodesIT {
     private CommitCoordinator commitCoordinator;
     private StorageWorker worker;
 
-    // -------------------------------------------------------
-    // Logging helper
-    // -------------------------------------------------------
     private static void log(String msg) {
         System.out.printf("[%s] %s%n",
                 LocalTime.now().withNano(0),
                 msg);
     }
 
-    // -------------------------------------------------------
-    // Setup cluster
-    // -------------------------------------------------------
     @BeforeEach
     void startRealNodes() throws Exception {
 
@@ -66,18 +59,15 @@ public class RealStorageNodesIT {
         sharedFetcher = new MemoryFetcher();
         sharedPubSub = new MemoryPubSub();
 
-        // 1. Initialize shared control plane
         sharedPubSubClient = new PubSubClient(sharedPubSub);
         sharedPubSubClient.start();
 
         sharedMetadataClient = new MetadataClient(sharedFetcher);
         sharedMetadataClient.start();
 
-        // 2. Init QP Commit Coordinator and Storage Worker
         commitCoordinator = new CommitCoordinator(sharedPubSubClient, 0, 10);
         worker = new StorageWorker(sharedMetadataClient, commitCoordinator);
-    
-        // 3. Start Storage Node Servers (V2)
+
         for (int i = 0; i < TOTAL_NODES; i++) {
 
             int port = freePort();
@@ -85,7 +75,6 @@ public class RealStorageNodesIT {
 
             log("Starting node " + i + " on port " + port);
 
-            // Each node gets its own Database instance but shares the memory-backed control planes
             RocksDbStorageStrategy strategy = new RocksDbStorageStrategy(dir.resolve("db").toString());
             RocksDbRepairQueue repairQueue = new RocksDbRepairQueue(strategy);
             Database db = new Database(strategy);
@@ -105,7 +94,6 @@ public class RealStorageNodesIT {
             addrs.add(addr);
         }
 
-        // 4. Populate cluster configuration so components can discover each other
         ErasureSetConfiguration esConfig = new ErasureSetConfiguration();
         ErasureSet es = new ErasureSet();
         es.setNumber(1);
@@ -127,11 +115,10 @@ public class RealStorageNodesIT {
         PartitionSpread ps = new PartitionSpread();
         ps.setErasureSet(1);
         List<Integer> parts = new ArrayList<>();
-        for(int i = 0; i < 3; i++) parts.add(i); // Assign all partitions to this set
+        for(int i = 0; i < 3; i++) parts.add(i);
         ps.setPartitions(parts);
         psConfig.setPartitionSpread(List.of(ps));
 
-        // Push updates to the shared MemoryFetcher
         sharedFetcher.update(esConfig);
         sharedFetcher.update(psConfig);
 
@@ -140,9 +127,6 @@ public class RealStorageNodesIT {
         log("=== CLUSTER READY ===");
     }
 
-    // -------------------------------------------------------
-    // Shutdown cluster
-    // -------------------------------------------------------
     @AfterEach
     void stopRealNodes() throws Exception {
 
@@ -173,9 +157,6 @@ public class RealStorageNodesIT {
         log("=== CLUSTER STOPPED ===");
     }
 
-    // -------------------------------------------------------
-    // MAIN ROUNDTRIP TEST
-    // -------------------------------------------------------
     @Test
     void put_get_roundTrip_realServers() throws Exception {
 
@@ -195,7 +176,9 @@ public class RealStorageNodesIT {
         assertTrue(putOk, "PUT should have successfully reached ACK quorum");
 
         log("[WORKER] GET starting...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "realA")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "realA");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
 
             byte[] got = in.readAllBytes();
 
@@ -206,10 +189,6 @@ public class RealStorageNodesIT {
 
         log("Round-trip test completed successfully.");
     }
-
-    // -------------------------------------------------------
-    // ERASURE TESTS (real servers)
-    // -------------------------------------------------------
 
     @Test
     void get_tolerates_three_node_failures_realServers() throws Exception {
@@ -226,13 +205,14 @@ public class RealStorageNodesIT {
         log("[WORKER] PUT result = " + putOk);
         assertTrue(putOk, "PUT should succeed before failures");
 
-        // Stop 3 nodes (simulate 3 shard failures)
         log("Simulating 3 node failures (should still reconstruct)...");
         stopNodes(0, 1, 2);
 
         log("[WORKER] GET starting with 3 nodes down...");
         byte[] got;
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", key);
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             got = in.readAllBytes();
         }
 
@@ -256,35 +236,32 @@ public class RealStorageNodesIT {
         log("[WORKER] PUT result = " + putOk);
         assertTrue(putOk, "PUT should succeed before failures");
 
-        // Stop 4 nodes (simulate 4 shard failures)
         log("Simulating 4 node failures (should NOT reconstruct)...");
         stopNodes(0, 1, 2, 3);
 
         log("[WORKER] GET starting with 4 nodes down (expect failure)...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+        try {
+            StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", key);
+            if (obj != null) {
+                try (InputStream in = obj.stream()) {
+                    byte[] got = in.readAllBytes();
+                    log("[WORKER] GET returned " + got.length + " bytes with 4 nodes down");
 
-            byte[] got = in.readAllBytes();
-            log("[WORKER] GET returned " + got.length + " bytes with 4 nodes down");
-
-            // Must not match the original fully
-            if (Arrays.equals(data, got)) {
-                fail("Expected reconstruction to fail with 4 nodes down, but got full correct data");
+                    if (Arrays.equals(data, got)) {
+                        fail("Expected reconstruction to fail with 4 nodes down, but got full correct data");
+                    }
+                    assertNotEquals(data.length, got.length,
+                            "Expected missing/corrupt data length with 4 nodes down");
+                }
+            } else {
+                log("[WORKER] GET returned null with 4 nodes down (as expected)");
             }
-
-            // Usually this will be shorter, so this is a helpful additional check:
-            assertNotEquals(data.length, got.length,
-                    "Expected missing/corrupt data length with 4 nodes down");
         } catch (Exception e) {
-            // Also acceptable: the read/reconstruct throws
             log("[WORKER] GET failed with exception as expected: " + e);
         }
 
         log("Erasure failure test (4 failures) completed.");
     }
-
-    // -------------------------------------------------------
-    // GET: TOMBSTONE (DELETE) TEST
-    // -------------------------------------------------------
 
     @Test
     void get_after_delete_returnsNull_realServers() throws Exception {
@@ -300,14 +277,14 @@ public class RealStorageNodesIT {
         boolean putOk = worker.put(putReq, "b", key, data.length, new ByteArrayInputStream(data));
         assertTrue(putOk, "PUT should succeed");
 
-        // Verify GET works before delete
         log("[WORKER] GET starting (before delete)...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+        StorageWorker.RetrievedObject beforeDelete = worker.get(UUID.randomUUID(), "b", key);
+        assertNotNull(beforeDelete);
+        try (InputStream in = beforeDelete.stream()) {
             byte[] got = in.readAllBytes();
             assertArrayEquals(data, got, "GET should return correct data before delete");
         }
 
-        // Read v1 sequence number and partition from DB
         var v1Version = databases.get(0).getLatestFileVersion("b/" + key);
         assertTrue(v1Version.isPresent(), "v1 version should exist in DB");
         long v1Seq = v1Version.get().sequenceNumber();
@@ -316,24 +293,18 @@ public class RealStorageNodesIT {
         assertTrue(metadata.isPresent(), "metadata should exist in DB");
         int partition = metadata.get().partition();
 
-        // Write tombstone to ALL node DBs (simulating a delete commit)
         long tombstoneSeq = v1Seq + 1;
         log("Writing tombstone (seq=" + tombstoneSeq + ") to all " + databases.size() + " node DBs...");
         for (Database db : databases) {
             db.deleteItem("b/" + key, partition, tombstoneSeq);
         }
 
-        // GET after delete should return null (not found/deleted collapsed)
         log("[WORKER] GET starting (after delete, expect null)...");
-        InputStream afterDelete = worker.get(UUID.randomUUID(), "b", key);
+        StorageWorker.RetrievedObject afterDelete = worker.get(UUID.randomUUID(), "b", key);
         assertNull(afterDelete, "GET after delete should return null");
 
         log("Tombstone/delete test completed successfully.");
     }
-
-    // -------------------------------------------------------
-    // GET: MULTIPART ROUNDTRIP TEST
-    // -------------------------------------------------------
 
     @Test
     void get_multipart_roundTrip_realServers() throws Exception {
@@ -345,27 +316,26 @@ public class RealStorageNodesIT {
         new SecureRandom().nextBytes(chunk1Data);
         new SecureRandom().nextBytes(chunk2Data);
 
-        // PUT chunk 1
         UUID chunk1Req = UUID.randomUUID();
         log("[WORKER] PUT chunk1 starting...");
         boolean put1Ok = worker.put(chunk1Req, "b", "part1", chunk1Data.length, new ByteArrayInputStream(chunk1Data));
         assertTrue(put1Ok, "PUT chunk1 should succeed");
 
-        // PUT chunk 2
         UUID chunk2Req = UUID.randomUUID();
         log("[WORKER] PUT chunk2 starting...");
         boolean put2Ok = worker.put(chunk2Req, "b", "part2", chunk2Data.length, new ByteArrayInputStream(chunk2Data));
         assertTrue(put2Ok, "PUT chunk2 should succeed");
 
-        // Commit multipart object referencing both chunks
         String uploadId = UUID.randomUUID().toString();
         log("[WORKER] beginMultipartCommit starting...");
-        boolean commitOk = worker.beginMultipartCommit("b", "multipartFile", uploadId, List.of("b/part1", "b/part2"));
+        long totalSize = chunk1Data.length + chunk2Data.length;
+        boolean commitOk = worker.beginMultipartCommit("b", "multipartFile", uploadId, List.of("b/part1", "b/part2"), totalSize);
         assertTrue(commitOk, "Multipart commit should succeed");
 
-        // GET the multipart object — should stream chunk1 then chunk2
         log("[WORKER] GET multipart starting...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "multipartFile")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "multipartFile");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             byte[] got = in.readAllBytes();
 
             byte[] expected = new byte[chunk1Data.length + chunk2Data.length];
@@ -379,10 +349,6 @@ public class RealStorageNodesIT {
         log("Multipart roundtrip test completed successfully.");
     }
 
-    // -------------------------------------------------------
-    // GET: VERSION FALLBACK TEST
-    // -------------------------------------------------------
-
     @Test
     void get_blob_version_fallback_realServers() throws Exception {
 
@@ -393,18 +359,17 @@ public class RealStorageNodesIT {
         String key = "fallbackKey";
         UUID v1Req = UUID.randomUUID();
 
-        // PUT v1 normally (all 9 nodes receive shards)
         log("[WORKER] PUT v1 starting...");
         boolean putOk = worker.put(v1Req, "b", key, v1Data.length, new ByteArrayInputStream(v1Data));
         assertTrue(putOk, "PUT v1 should succeed");
 
-        // Verify v1 is readable
         log("[WORKER] GET v1 starting (sanity check)...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+        StorageWorker.RetrievedObject obj1 = worker.get(UUID.randomUUID(), "b", key);
+        assertNotNull(obj1);
+        try (InputStream in = obj1.stream()) {
             assertArrayEquals(v1Data, in.readAllBytes(), "v1 should be readable");
         }
 
-        // Read v1 sequence number and partition from the first node's DB
         var v1Version = databases.get(0).getLatestFileVersion("b/" + key);
         assertTrue(v1Version.isPresent(), "v1 version should exist in DB");
         long v1Seq = v1Version.get().sequenceNumber();
@@ -413,27 +378,24 @@ public class RealStorageNodesIT {
         assertTrue(metadata.isPresent(), "metadata should exist in DB");
         int partition = metadata.get().partition();
 
-        // Simulate a partial v2 on only 3 nodes (< k=6)
-        // Write fake blob files and v2 metadata entries to nodes 0, 1, 2 only
         String fakeV2RequestId = UUID.randomUUID().toString();
         long v2Seq = v1Seq + 1;
         log("Writing partial v2 (seq=" + v2Seq + ") to 3 nodes...");
 
         for (int i = 0; i < 3; i++) {
-            // Write a fake blob file on disk so retrieve() finds it
             Path blobDir = dataDirs.get(i).resolve("data").resolve("blobs");
             String prefix = fakeV2RequestId.length() >= 3 ? fakeV2RequestId.substring(0, 3) : "000";
             Path blobPath = blobDir.resolve(prefix).resolve(fakeV2RequestId);
             Files.createDirectories(blobPath.getParent());
-            Files.write(blobPath, new byte[]{0, 1, 2, 3}); // dummy shard data
+            Files.write(blobPath, new byte[]{0, 1, 2, 3});
 
-            // Write v2 metadata to this node's DB
-            databases.get(i).putItem("b/" + key, partition, v2Seq, fakeV2RequestId);
+            databases.get(i).putItem("b/" + key, partition, v2Seq, fakeV2RequestId, v1Data.length);
         }
 
-        // GET should: find v2 has only 3 shards (< k=6), fall back to v1 (9 shards), reconstruct v1
         log("[WORKER] GET starting (expect v2 fallback to v1)...");
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", key)) {
+        StorageWorker.RetrievedObject obj2 = worker.get(UUID.randomUUID(), "b", key);
+        assertNotNull(obj2);
+        try (InputStream in = obj2.stream()) {
             byte[] got = in.readAllBytes();
             log("[WORKER] GET received " + got.length + " bytes after version fallback");
             assertArrayEquals(v1Data, got, "Should reconstruct v1 data after v2 has insufficient shards");
@@ -442,15 +404,6 @@ public class RealStorageNodesIT {
         log("Version fallback test completed successfully.");
     }
 
-    // -------------------------------------------------------
-    // BUCKET AND DELETE TESTS (real servers)
-    // -------------------------------------------------------
-
-    /**
-     * Creates a bucket via pub/sub and verifies that the SN writes the bucket
-     * record to RocksDB by checking that a subsequent put into that bucket succeeds.
-     * This exercises the full CreateBucketMessage → SN commit → ACK path.
-     */
     @Test
     void createBucket_realServers() throws Exception {
         log("Testing createBucket with real storage nodes...");
@@ -460,7 +413,6 @@ public class RealStorageNodesIT {
         log("[WORKER] createBucket result = " + ok);
         assertTrue(ok, "createBucket should succeed with real SNs");
 
-        // Confirm the bucket is usable by putting an object into it.
         byte[] data = new byte[1024];
         new SecureRandom().nextBytes(data);
         boolean putOk = worker.put(UUID.randomUUID(), "integration-bucket", "probe",
@@ -470,26 +422,19 @@ public class RealStorageNodesIT {
         log("createBucket test completed successfully.");
     }
 
-    /**
-     * Creates a bucket, puts an object, then deletes the bucket via pub/sub.
-     * Verifies that the SN tombstones the bucket record in RocksDB.
-     */
     @Test
     void deleteBucket_realServers() throws Exception {
         log("Testing deleteBucket with real storage nodes...");
 
-        // Create bucket first.
         assertTrue(worker.createBucket(UUID.randomUUID(), "doomed-bucket"),
                 "createBucket should succeed");
 
-        // Put an object so there is real data behind the bucket.
         byte[] data = new byte[1024];
         new SecureRandom().nextBytes(data);
         assertTrue(worker.put(UUID.randomUUID(), "doomed-bucket", "obj",
                         data.length, new ByteArrayInputStream(data)),
                 "PUT should succeed before bucket deletion");
 
-        // Delete the bucket.
         boolean deleteOk = worker.deleteBucket(UUID.randomUUID(), "doomed-bucket");
         log("[WORKER] deleteBucket result = " + deleteOk);
         assertTrue(deleteOk, "deleteBucket should succeed with real SNs");
@@ -497,26 +442,16 @@ public class RealStorageNodesIT {
         log("deleteBucket test completed successfully.");
     }
 
-    /**
-     * Verifies the full bucket lifecycle with real SNs:
-     * create bucket → put object → get object → delete object → delete bucket.
-     *
-     * After delete the object should be tombstoned in RocksDB on each SN,
-     * so a subsequent GET should return a tombstone (404 from the SN),
-     * causing reconstruction to fail or return no data.
-     */
     @Test
     void bucketLifecycle_realServers() throws Exception {
         log("Testing full bucket lifecycle with real storage nodes...");
 
         String bucket = "lifecycle-bucket";
 
-        // 1. Create bucket.
         assertTrue(worker.createBucket(UUID.randomUUID(), bucket),
                 "createBucket should succeed");
         log("Bucket created.");
 
-        // 2. PUT object.
         byte[] data = new byte[DATA_SIZE];
         new SecureRandom().nextBytes(data);
         assertTrue(worker.put(UUID.randomUUID(), bucket, "life-obj",
@@ -524,29 +459,33 @@ public class RealStorageNodesIT {
                 "PUT should succeed");
         log("Object PUT succeeded.");
 
-        // 3. GET object — must round-trip correctly.
-        try (InputStream in = worker.get(UUID.randomUUID(), bucket, "life-obj")) {
+        StorageWorker.RetrievedObject obj1 = worker.get(UUID.randomUUID(), bucket, "life-obj");
+        assertNotNull(obj1);
+        try (InputStream in = obj1.stream()) {
             assertArrayEquals(data, in.readAllBytes(), "GET should return original data");
         }
         log("GET round-trip verified.");
 
-        // 4. DELETE object via pub/sub — SNs tombstone metadata + op-log.
         assertTrue(worker.delete(UUID.randomUUID(), bucket, "life-obj"),
                 "delete should succeed");
         log("Object deleted.");
 
-        // 5. GET after delete — SNs return tombstone (404), so reconstruction fails.
-        // We accept either an exception or an empty/short stream.
-        try (InputStream in = worker.get(UUID.randomUUID(), bucket, "life-obj")) {
-            byte[] got = in.readAllBytes();
-            assertNotEquals(data.length, got.length,
-                    "Data should not be fully retrievable after delete");
+        try {
+            StorageWorker.RetrievedObject obj2 = worker.get(UUID.randomUUID(), bucket, "life-obj");
+            if (obj2 != null) {
+                try (InputStream in = obj2.stream()) {
+                    byte[] got = in.readAllBytes();
+                    assertNotEquals(data.length, got.length,
+                            "Data should not be fully retrievable after delete");
+                }
+            } else {
+                log("GET returned null as expected after delete.");
+            }
         } catch (Exception e) {
             log("[WORKER] GET after delete threw as expected: " + e.getMessage());
         }
         log("Post-delete GET correctly failed.");
 
-        // 6. DELETE bucket.
         assertTrue(worker.deleteBucket(UUID.randomUUID(), bucket),
                 "deleteBucket should succeed");
         log("Bucket deleted.");
@@ -554,13 +493,6 @@ public class RealStorageNodesIT {
         log("Full bucket lifecycle test completed successfully.");
     }
 
-    /**
-     * Verifies that delete() correctly tombstones an object across the real SN
-     * cluster and that a subsequent GET cannot reconstruct it.
-     *
-     * Specifically tests the pub/sub delete path: QP publishes DeleteMessage →
-     * each SN writes a tombstone to RocksDB → SN ACKs → QP returns true.
-     */
     @Test
     void delete_tombstones_object_realServers() throws Exception {
         log("Testing pub/sub delete with real storage nodes...");
@@ -568,37 +500,36 @@ public class RealStorageNodesIT {
         byte[] data = new byte[DATA_SIZE];
         new SecureRandom().nextBytes(data);
 
-        // PUT first.
         assertTrue(worker.put(UUID.randomUUID(), "b", "to-delete",
                         data.length, new ByteArrayInputStream(data)),
                 "PUT should succeed");
         log("Object PUT succeeded.");
 
-        // Verify it's readable.
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "to-delete")) {
+        StorageWorker.RetrievedObject obj1 = worker.get(UUID.randomUUID(), "b", "to-delete");
+        assertNotNull(obj1);
+        try (InputStream in = obj1.stream()) {
             assertArrayEquals(data, in.readAllBytes(), "Object should be readable before delete");
         }
 
-        // DELETE via pub/sub.
         boolean deleteOk = worker.delete(UUID.randomUUID(), "b", "to-delete");
         log("[WORKER] delete result = " + deleteOk);
         assertTrue(deleteOk, "delete should succeed with real SNs");
 
-        // GET after delete — tombstone on SNs means reconstruction fails.
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "to-delete")) {
-            byte[] got = in.readAllBytes();
-            assertNotEquals(data.length, got.length,
-                    "Object should not be fully retrievable after tombstone");
+        try {
+            StorageWorker.RetrievedObject obj2 = worker.get(UUID.randomUUID(), "b", "to-delete");
+            if (obj2 != null) {
+                try (InputStream in = obj2.stream()) {
+                    byte[] got = in.readAllBytes();
+                    assertNotEquals(data.length, got.length,
+                            "Object should not be fully retrievable after tombstone");
+                }
+            }
         } catch (Exception e) {
             log("[WORKER] GET after delete threw as expected: " + e.getMessage());
         }
 
         log("Delete tombstone test completed successfully.");
     }
-
-    // -------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------
 
     private void stopNodes(int... idxs) {
         for (int idx : idxs) {

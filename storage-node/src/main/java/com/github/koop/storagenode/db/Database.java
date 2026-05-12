@@ -34,30 +34,24 @@ public class Database implements AutoCloseable {
             if(metadataOpt.isEmpty()){
                 putUncommittedWrite(requestId, timestamp);
             }else{
-                //already have metadata - check if we have for this version & materialize:
                 Metadata metadata = metadataOpt.get();
                 var versionCommitted = metadata.versions().stream()
-                        .filter(v -> {
-                            if(v instanceof RegularFileVersion rfv){
-                                return rfv.location().equals(requestId);
-                            }
-                            return false;
-                        })
+                        .filter(v -> v instanceof RegularFileVersion rfv && rfv.location().equals(requestId))
                         .findFirst();
                 if(versionCommitted.isPresent()){
-                    //already committed - materialize:
                     var presentVersion = (RegularFileVersion)versionCommitted.get();
                     long seqNum = presentVersion.sequenceNumber();
                     String location = presentVersion.location();
+                    long size = presentVersion.size(); // PRESERVE SIZE
+
                     var otherVersions = metadata.versions().stream()
                             .filter(v -> v != versionCommitted.get())
                             .toList();
                     var versions = new ArrayList<FileVersion>();
                     versions.addAll(otherVersions);
-                    versions.add(new RegularFileVersion(seqNum, location, true));
+                    versions.add(new RegularFileVersion(seqNum, location, true, size)); // APPLY SIZE
                     txn.putMetadata(new Metadata(key, metadata.partition(), new ArrayList<>(versions)));
                 }else{
-                    //not committed yet - record uncommitted write intent:
                     putUncommittedWrite(requestId, timestamp);
                 }
             }
@@ -69,7 +63,7 @@ public class Database implements AutoCloseable {
     // PUT item — atomic write into metadata and oplog
     // -------------------------------------------------------------------------
 
-    public boolean putItem(String key, int partition, long seqNumber, String requestID) throws Exception {
+    public boolean putItem(String key, int partition, long seqNumber, String requestID, long size) throws Exception {
         try (StorageTransaction txn = strategy.beginTransaction()) {
             boolean materialized = false;
             Optional<Long> uncommitted = txn.getUncommitted(requestID);
@@ -83,7 +77,7 @@ public class Database implements AutoCloseable {
                     .map(m -> new ArrayList<>(m.versions()))
                     .orElseGet(ArrayList::new);
 
-            versions.add(new RegularFileVersion(seqNumber, requestID, materialized));
+            versions.add(new RegularFileVersion(seqNumber, requestID, materialized, size)); // APPLY SIZE
 
             txn.putLog(new OpLog(partition, seqNumber, key, Operation.PUT));
             txn.putMetadata(new Metadata(key, partition, versions));
@@ -93,17 +87,17 @@ public class Database implements AutoCloseable {
         }
     }
 
-    public void putMultipartItem(String key, int partition, long seqNumber, List<String> chunks) throws Exception {
+    public void putMultipartItem(String key, int partition, long seqNumber, List<String> chunks, long size) throws Exception {
         try (StorageTransaction txn = strategy.beginTransaction()) {
             List<FileVersion> versions = txn.getMetadata(key)
                     .map(m -> new ArrayList<>(m.versions()))
                     .orElseGet(ArrayList::new);
-            
-            versions.add(new MultipartFileVersion(seqNumber, chunks));
-            
+
+            versions.add(new MultipartFileVersion(seqNumber, chunks, size)); // APPLY SIZE
+
             txn.putLog(new OpLog(partition, seqNumber, key, Operation.PUT));
             txn.putMetadata(new Metadata(key, partition, versions));
-            
+
             txn.commit();
         }
     }
