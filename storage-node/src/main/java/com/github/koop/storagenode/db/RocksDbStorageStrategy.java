@@ -18,6 +18,8 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     private final ColumnFamilyHandle bucketsHandle;
     private final ColumnFamilyHandle uncommittedHandle;
     private final ColumnFamilyHandle repairQueueHandle;
+    private final ColumnFamilyHandle pendingDeletesHandle;
+    private final ColumnFamilyHandle gcCursorsHandle;
     private volatile boolean closed = false;
 
     public RocksDbStorageStrategy(String dbPath) throws RocksDBException {
@@ -29,7 +31,9 @@ public class RocksDbStorageStrategy implements StorageStrategy {
                 new ColumnFamilyDescriptor("metadata".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("buckets".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
                 new ColumnFamilyDescriptor("uncommitted_writes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
-                new ColumnFamilyDescriptor("repair_queue".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
+                new ColumnFamilyDescriptor("repair_queue".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
+                new ColumnFamilyDescriptor("pending_deletes".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()),
+                new ColumnFamilyDescriptor("gc_cursors".getBytes(StandardCharsets.UTF_8), new ColumnFamilyOptions()));
 
         handles = new ArrayList<>();
         try (DBOptions options = new DBOptions()
@@ -43,6 +47,8 @@ public class RocksDbStorageStrategy implements StorageStrategy {
             bucketsHandle     = handles.get(3);
             uncommittedHandle = handles.get(4);
             repairQueueHandle = handles.get(5);
+            pendingDeletesHandle = handles.get(6);
+            gcCursorsHandle = handles.get(7);
         }
     }
 
@@ -50,7 +56,27 @@ public class RocksDbStorageStrategy implements StorageStrategy {
     public StorageTransaction beginTransaction() throws Exception {
         WriteOptions writeOptions = new WriteOptions();
         Transaction txn = txnDb.beginTransaction(writeOptions);
-        return new RocksDbTransaction(txn, writeOptions, logHandle, metaHandle, bucketsHandle, uncommittedHandle);
+        return new RocksDbTransaction(txn, writeOptions, logHandle, metaHandle, bucketsHandle,
+                uncommittedHandle, pendingDeletesHandle);
+    }
+
+    private static final byte[] EMPTY_VALUE = new byte[0];
+
+    @Override
+    public Stream<String> streamPendingDeletions() throws Exception {
+        RocksIterator iterator = txnDb.newIterator(pendingDeletesHandle);
+        iterator.seekToFirst();
+        return Stream.generate(() -> {
+            if (!iterator.isValid()) return null;
+            String location = new String(iterator.key(), StandardCharsets.UTF_8);
+            iterator.next();
+            return location;
+        }).onClose(iterator::close).takeWhile(s -> s != null);
+    }
+
+    @Override
+    public void removePendingDeletion(String location) throws Exception {
+        txnDb.delete(pendingDeletesHandle, location.getBytes(StandardCharsets.UTF_8));
     }
 
     @Override
@@ -115,6 +141,51 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         }).onClose(iterator::close).takeWhile(log -> log != null);
     }
 
+    @Override
+    public Stream<OpLog> streamLogsForward(int partition, long startSeq) throws Exception {
+        byte[] startKey = opLogKey(partition, startSeq);
+        RocksIterator iterator = txnDb.newIterator(logHandle);
+        iterator.seek(startKey);
+        return Stream.generate(() -> {
+            if (!iterator.isValid()) return null;
+            ByteBuffer keyBuf = ByteBuffer.wrap(iterator.key());
+            int p = keyBuf.getInt();
+            if (p != partition) return null;
+            OpLog log = OpLog.from(iterator.value());
+            iterator.next();
+            return log;
+        }).onClose(iterator::close).takeWhile(log -> log != null);
+    }
+
+    private byte[] cursorKey(int partition) {
+        return ByteBuffer.allocate(4).putInt(partition).array();
+    }
+
+    @Override
+    public long getGcCursor(int partition) throws Exception {
+        byte[] value = txnDb.get(gcCursorsHandle, cursorKey(partition));
+        return value == null ? 0L : ByteBuffer.wrap(value).getLong();
+    }
+
+    @Override
+    public void setGcCursor(int partition, long nextSeq) throws Exception {
+        byte[] value = ByteBuffer.allocate(Long.BYTES).putLong(nextSeq).array();
+        txnDb.put(gcCursorsHandle, cursorKey(partition), value);
+    }
+
+    @Override
+    public long getMaxSeqNum(int partition) throws Exception {
+        byte[] startKey = opLogKey(partition, Long.MAX_VALUE);
+        try (RocksIterator iterator = txnDb.newIterator(logHandle)) {
+            iterator.seekForPrev(startKey);
+            if (!iterator.isValid()) return 0L;
+            ByteBuffer keyBuf = ByteBuffer.wrap(iterator.key());
+            int p = keyBuf.getInt();
+            if (p != partition) return 0L;
+            return keyBuf.getLong();
+        }
+    }
+
     // --- Table #2: Metadata ---
 
     @Override
@@ -176,18 +247,26 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         private final ColumnFamilyHandle metaHandle;
         private final ColumnFamilyHandle bucketsHandle;
         private final ColumnFamilyHandle uncommittedHandle;
+        private final ColumnFamilyHandle pendingDeletesHandle;
         private final ReadOptions readOptions;
 
-        public RocksDbTransaction(Transaction txn, WriteOptions writeOptions, 
+        public RocksDbTransaction(Transaction txn, WriteOptions writeOptions,
                                   ColumnFamilyHandle logHandle, ColumnFamilyHandle metaHandle,
-                                  ColumnFamilyHandle bucketsHandle, ColumnFamilyHandle uncommittedHandle) {
+                                  ColumnFamilyHandle bucketsHandle, ColumnFamilyHandle uncommittedHandle,
+                                  ColumnFamilyHandle pendingDeletesHandle) {
             this.txn = txn;
             this.writeOptions = writeOptions;
             this.logHandle = logHandle;
             this.metaHandle = metaHandle;
             this.bucketsHandle = bucketsHandle;
             this.uncommittedHandle = uncommittedHandle;
+            this.pendingDeletesHandle = pendingDeletesHandle;
             this.readOptions = new ReadOptions();
+        }
+
+        @Override
+        public void enqueueBlobDeletion(String location) throws Exception {
+            txn.put(pendingDeletesHandle, location.getBytes(StandardCharsets.UTF_8), EMPTY_VALUE);
         }
 
         @Override
@@ -202,9 +281,20 @@ public class RocksDbStorageStrategy implements StorageStrategy {
         }
 
         @Override
+        public void deleteMetadata(String key) throws Exception {
+            txn.delete(metaHandle, key.getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
         public void putLog(OpLog log) throws Exception {
             byte[] key = ByteBuffer.allocate(12).putInt(log.partition()).putLong(log.seqNum()).array();
             txn.put(logHandle, key, log.serialize());
+        }
+
+        @Override
+        public void deleteLog(int partition, long seqNum) throws Exception {
+            byte[] key = ByteBuffer.allocate(12).putInt(partition).putLong(seqNum).array();
+            txn.delete(logHandle, key);
         }
 
         @Override

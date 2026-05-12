@@ -7,11 +7,140 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 public class Database implements AutoCloseable {
+    private static final Logger logger = LogManager.getLogger(Database.class);
     private final StorageStrategy strategy;
 
     public Database(StorageStrategy strategy) {
         this.strategy = strategy;
+    }
+
+    /**
+     * Result of a holistic key cleanup.
+     *
+     * @param versionsRemoved number of FileVersion entries (and their oplog rows) reaped
+     * @param deletedMetadata true if the metadata row itself was removed because no versions remain
+     */
+    public record GcResult(int versionsRemoved, boolean deletedMetadata) {}
+
+    /** Maximum oplog seqNum recorded for {@code partition}, or 0 if none. */
+    public long getMaxSeqNum(int partition) throws Exception {
+        return strategy.getMaxSeqNum(partition);
+    }
+
+    /**
+     * Forward scan of the oplog within a partition, starting from
+     * {@code startSeq} (inclusive). The GC worker passes the persisted cursor
+     * here so each cycle's work is bounded to O(new operations).
+     */
+    public Stream<OpLog> streamOpLog(int partition, long startSeq) throws Exception {
+        return strategy.streamLogsForward(partition, startSeq);
+    }
+
+    /** Lowest seqNum the GC has NOT yet examined for {@code partition}. */
+    public long getGcCursor(int partition) throws Exception {
+        return strategy.getGcCursor(partition);
+    }
+
+    /** Persist the GC cursor for {@code partition}. */
+    public void setGcCursor(int partition, long nextSeq) throws Exception {
+        strategy.setGcCursor(partition, nextSeq);
+    }
+
+    /**
+     * Holistic GC of a single key, triggered when the worker visits an oplog
+     * entry for {@code key} at {@code visitedSeq}.
+     *
+     * <p>Looks at the key's metadata and reaps every version that is either:
+     * <ul>
+     *   <li>a tombstone with {@code seqNum < watermark}, or</li>
+     *   <li>a non-current regular/multipart version with {@code seqNum < watermark}.</li>
+     * </ul>
+     * The latest non-tombstone version is always retained. Each reaped
+     * {@link RegularFileVersion} is durably queued for blob deletion in the
+     * same transaction; oplog rows for reaped versions are removed.
+     *
+     * <p>Doing the cleanup by-key (rather than by-(key,seq)) is what lets the
+     * GC cursor advance past oplog entries we decide to keep — when a later
+     * version supersedes an older one and the worker visits the newer entry,
+     * this method catches the now-stale older version even if its own oplog
+     * row was already skipped by the cursor.
+     */
+    public Optional<GcResult> gcCleanupKey(String key, int partition, long visitedSeq, long watermark)
+            throws Exception {
+        try (StorageTransaction txn = strategy.beginTransaction()) {
+            Optional<Metadata> metaOpt = txn.getMetadata(key);
+            if (metaOpt.isEmpty()) {
+                // Orphan oplog row — drop it defensively.
+                txn.deleteLog(partition, visitedSeq);
+                txn.commit();
+                return Optional.empty();
+            }
+
+            Metadata metadata = metaOpt.get();
+            List<FileVersion> versions = metadata.versions();
+
+            // The "live" version is the latest non-tombstone; if the latest entry
+            // is a tombstone the key has no live state and every version is
+            // eligible for reaping (assuming it's past the watermark).
+            int liveIdx = -1;
+            if (!versions.isEmpty()
+                    && !(versions.get(versions.size() - 1) instanceof TombstoneFileVersion)) {
+                liveIdx = versions.size() - 1;
+            }
+
+            List<FileVersion> keep = new ArrayList<>(versions.size());
+            List<FileVersion> toDelete = new ArrayList<>();
+            for (int i = 0; i < versions.size(); i++) {
+                FileVersion v = versions.get(i);
+                if (i == liveIdx) {
+                    keep.add(v);
+                } else if (v.sequenceNumber() < watermark) {
+                    toDelete.add(v);
+                } else {
+                    keep.add(v);
+                }
+            }
+
+            if (toDelete.isEmpty()) {
+                txn.rollback();
+                return Optional.empty();
+            }
+
+            boolean deletedMeta = false;
+            if (keep.isEmpty()) {
+                txn.deleteMetadata(key);
+                deletedMeta = true;
+            } else {
+                txn.putMetadata(new Metadata(metadata.key(), metadata.partition(), keep));
+            }
+
+            for (FileVersion v : toDelete) {
+                txn.deleteLog(partition, v.sequenceNumber());
+                if (v instanceof RegularFileVersion r) {
+                    // Durable blob-deletion intent committed atomically with metadata change.
+                    txn.enqueueBlobDeletion(r.location());
+                }
+            }
+            txn.commit();
+
+            logger.debug("GC reaped {} version(s) for key={} partition={} watermark={} (metaDeleted={})",
+                    toDelete.size(), key, partition, watermark, deletedMeta);
+            return Optional.of(new GcResult(toDelete.size(), deletedMeta));
+        }
+    }
+
+    /** Stream all blob locations awaiting on-disk deletion. */
+    public Stream<String> pendingBlobDeletions() throws Exception {
+        return strategy.streamPendingDeletions();
+    }
+
+    /** Remove a pending-deletion entry after the on-disk blob has been deleted. */
+    public void removePendingBlobDeletion(String location) throws Exception {
+        strategy.removePendingDeletion(location);
     }
 
     public void putUncommittedWrite(String requestID, long timestamp) throws Exception {
