@@ -999,7 +999,9 @@ public class StorageWorkerApiTest {
         markDown(nodes.get(1).address());
         markDown(nodes.get(2).address());
 
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "skipReadDown")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "skipReadDown");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             assertArrayEquals(data, in.readAllBytes());
         }
 
@@ -1022,7 +1024,9 @@ public class StorageWorkerApiTest {
         // to contacting every node (DOWN-marked ones still get a request).
         for (int i = 0; i < 5; i++) markDown(nodes.get(i).address());
 
-        try (InputStream in = worker.get(UUID.randomUUID(), "b", "fallbackRead")) {
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fallbackRead");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
             assertArrayEquals(data, in.readAllBytes());
         }
 
