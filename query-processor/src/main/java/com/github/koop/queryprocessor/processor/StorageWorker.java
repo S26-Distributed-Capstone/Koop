@@ -159,11 +159,13 @@ public final class StorageWorker {
             InetSocketAddress node = resolvedNodes.get(index);
             if (!healthyForWrite.contains(node)) {
                 logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
-                // Close the unread shard stream so its pipe is marked broken and the
-                // ErasureCoder producer can drop it on its next enqueue (otherwise the
-                // bounded queue fills up and stalls the producer for ~10s, blocking the
-                // healthy shards' pipes alongside it).
-                try { shardStreams[index].close(); } catch (IOException ignored) {}
+                // Drain-and-discard the unread shard stream. ErasureCoder.shard() feeds
+                // every pipe regardless of consumer; if we leave this one unread, its
+                // bounded queue fills up and the producer stalls (~10s) on enqueue,
+                // starving the healthy pipes too. Closing instead is racy: the producer's
+                // prefix-write loop has no per-pipe try/catch, so a close that lands
+                // before pos[i].write(lenBytes) triggers fail() on every pipe.
+                executor.execute(() -> drainAndClose(shardStreams[index]));
                 results.add(CompletableFuture.completedFuture(false));
                 continue;
             }
@@ -942,6 +944,22 @@ public final class StorageWorker {
                 Thread.currentThread().interrupt();
             }
         });
+    }
+
+    /**
+     * Reads and discards every byte from {@code stream}, then closes it. Used to keep
+     * {@link ErasureCoder#shard} producer pipes draining for shards we deliberately skip
+     * (DOWN nodes) so the producer never stalls on a full queue.
+     */
+    private static void drainAndClose(InputStream stream) {
+        try (InputStream s = stream) {
+            byte[] buf = new byte[64 * 1024];
+            while (s.read(buf) >= 0) {
+                // discard
+            }
+        } catch (IOException ignored) {
+            // The producer side will surface its own error to the healthy pipes if any.
+        }
     }
 
     /**
