@@ -6,6 +6,8 @@ import io.javalin.Javalin;
 import io.javalin.http.Context;
 
 import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -500,9 +502,10 @@ public class Main {
     }
 
     private static String buildCompleteMultipartUploadXml(String bucket, String key) {
+        String encodedKey = URLEncoder.encode(key, StandardCharsets.UTF_8).replace("+", "%20");
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                 "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
-                "  <Location>http://localhost:8080/" + escapeXml(bucket) + "/" + escapeXml(key) + "</Location>\n" +
+                "  <Location>http://localhost:8080/" + escapeXml(bucket) + "/" + encodedKey + "</Location>\n" +
                 "  <Bucket>" + escapeXml(bucket) + "</Bucket>\n" +
                 "  <Key>" + escapeXml(key) + "</Key>\n" +
                 "</CompleteMultipartUploadResult>";

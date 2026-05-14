@@ -169,10 +169,9 @@ public final class StorageWorker {
                 results.add(CompletableFuture.completedFuture(false));
                 continue;
             }
-            URI uri = URI.create(String.format(
-                    "http://%s:%d/store/%d/%s?requestId=%s",
-                    node.getHostString(), node.getPort(),
-                    resolvedPartition, storageKey, requestID));
+            URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+                        "/store/" + resolvedPartition + "/" + storageKey,
+                        "requestId=" + requestID, null);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(uri)
                     .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
@@ -415,11 +414,10 @@ public final class StorageWorker {
                 results.add(CompletableFuture.completedFuture(null));
                 continue;
             }
-            String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
-                    partition, storageKey);
-            if (targetVersion.isPresent()) {
-                uriStr += "?version=" + targetVersion.getAsLong();
-            }
+                String query = targetVersion.isPresent() ? "version=" + targetVersion.getAsLong() : null;
+                URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+                        "/store/" + partition + "/" + storageKey,
+                        query, null);
 
             HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
 
