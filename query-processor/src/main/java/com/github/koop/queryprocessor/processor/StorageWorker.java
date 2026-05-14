@@ -168,6 +168,7 @@ public final class StorageWorker {
                             .header("Content-Type", "application/octet-stream")
                             .timeout(Duration.ofSeconds(SHARD_UPLOAD_TIMEOUT_SECONDS))
                             .build();
+
                     HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                     if (response.statusCode() == 200) {
                         healthTracker.recordSuccess(node);
@@ -686,9 +687,10 @@ public final class StorageWorker {
                 .toList();
 
         String safePrefix = prefix == null ? "" : prefix;
+
+        // Encode the prefix and manually construct the query string
         String encodedPrefix = URLEncoder.encode(safePrefix, java.nio.charset.StandardCharsets.UTF_8);
-        String query = "?maxKeys=" + maxKeys
-                + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
+        String query = "?maxKeys=" + maxKeys + (safePrefix.isEmpty() ? "" : "&prefix=" + encodedPrefix);
 
         List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
         for (int partition : partitions) {
@@ -739,8 +741,8 @@ public final class StorageWorker {
             HttpRequest req = HttpRequest.newBuilder().uri(uri).GET().build();
             try {
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-                healthTracker.recordSuccess(node);
                 if (resp.statusCode() == 200) {
+                    healthTracker.recordSuccess(node);
                     return parseObjectListJson(resp.body());
                 }
                 logger.trace("GET list {} → node {} HTTP {}", bucket, node, resp.statusCode());
@@ -870,7 +872,6 @@ public final class StorageWorker {
     private static String toStorageKey(String bucket, String key) {
         return bucket + "/" + key;
     }
-
 
     private List<InetSocketAddress> getNodesForPartition(int partition) {
         ErasureRouting r = getRouting();
