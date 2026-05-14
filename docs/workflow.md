@@ -4,7 +4,17 @@ This document displays the **planned target-state** workflow diagrams for each s
 
 > **Related documents:**
 > - [Scope](scope.md) — supported use cases and error cases
-> - [Architecture Overview](messy-everything-doc.md) — system component overview and redundancy model
+> - [Architecture Overview](architecture.md) — system component overview and redundancy model
+
+> **Erasure configuration shown in the diagrams:** The sequence diagrams below depict the
+> recommended full-deployment configuration of `n = 9` total shards (`m = 6` data + `k = 3`
+> parity, `write_quorum = 7`), which is what the system-tests cluster uses. The
+> `docker-compose.yml` setup runs a smaller cluster (`n = 6, m = 4, k = 2, write_quorum = 5`)
+> over 6 storage nodes; the flow is identical, only the numbers change. Where this document
+> writes `≥ m` it means "at least the data-shard count" (reads need `m` shards to reconstruct);
+> where it writes `≥ write_quorum` it means the shard upload / commit ACK threshold from
+> `erasure_set_configurations` in Etcd. For the 9-node diagrams that is `m = 6` and
+> `write_quorum = 7`.
 
 ---
 
@@ -40,31 +50,31 @@ The following diagram shows the high-level components involved in every workflow
 
 **Route:** `PUT /{bucket}/{key}`
 
-The QP erasure-encodes the object into 9 shards and streams them concurrently to all storage nodes via HTTP. After shard upload quorum is reached, the QP publishes an ordered PUT commit through Kafka. Storage nodes apply the sequenced commit by atomically writing OpLog + Metadata updates in RocksDB. The client is acknowledged only after write-quorum commit ACKs are received.
+The QP erasure-encodes the object into `n` shards (9 in the configuration shown) and streams them concurrently to all storage nodes via HTTP. After `write_quorum` shard upload ACKs are received, the QP publishes an ordered PUT commit through Kafka. Storage nodes apply the sequenced commit by atomically writing OpLog + Metadata updates in RocksDB. The client is acknowledged only after `write_quorum` commit ACKs are received.
 
 ```mermaid
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
     participant Kafka as Kafka / PubSub (Sequencer)
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: PUT /{bucket}/{key} [data]
-    QP->>QP: Erasure-encode → 9 shards
+    QP->>QP: Erasure-encode → n shards (here 9)
     par Stream shards concurrently
         QP->>SN: PUT /store/{partition}/{storageKey}?requestId=X [shard i]
         SN-->>QP: 200 shard received
     end
-    Note over QP: Wait for shard upload quorum (≥6)
+    Note over QP: Wait for shard upload quorum (≥ write_quorum; here ≥7)
     QP->>Kafka: Publish ordered PUT commit message
     Kafka->>SN: Deliver sequenced PUT for this partition
     par Apply commit on nodes
-        SN->>RDB: Atomic write OpLog + Metadata
+        SN->>RDB: Atomic write OpLog + Metadata (incl. object size)
         RDB-->>SN: OK
         SN-->>QP: 200 ACK
     end
-    Note over QP: Wait for write-quorum commit ACKs (≥6)
+    Note over QP: Wait for write-quorum commit ACKs (≥ write_quorum; here ≥7)
     QP-->>C: 200 OK
 ```
 
@@ -75,7 +85,7 @@ flowchart TD
     A[PUT request received] --> B{Content-Length > 0?}
     B -- No --> Z1[400 Bad Request]
     B -- Yes --> C[Erasure-encode + stream shards concurrently]
-    C --> D{≥6 shard ACKs received?}
+    C --> D{≥ write_quorum shard ACKs received?}
     D -- No --> Z2[500 Internal Error to client]
     D -- Yes --> K[200 OK to client]
 ```
@@ -86,7 +96,7 @@ flowchart TD
 
 **Route:** `GET /{bucket}/{key}`
 
-The QP queries all 9 storage nodes for their shard. At least 6 shards (the erasure coding threshold `K`) must be available to reconstruct the object. The QP streams the reconstructed data back to the client.
+The QP queries all `n` storage nodes for their shard. At least `m` shards (the erasure-coding data-shard count) must be available to reconstruct the object. The QP streams the reconstructed data back to the client.
 
 See [`StorageWorker.get()`](../query-processor/src/main/java/com/github/koop/queryprocessor/processor/StorageWorker.java:180) and [`StorageNode.retrieve()`](../storage-node/src/main/java/com/github/koop/storagenode/StorageNode.java:171).
 
@@ -94,7 +104,7 @@ See [`StorageWorker.get()`](../query-processor/src/main/java/com/github/koop/que
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant Disk as Disk (each SN)
 
     C->>QP: GET /{bucket}/{key}
@@ -106,23 +116,23 @@ sequenceDiagram
         SN-->>QP: 200 + shard bytes
     end
     Note over QP: Collect available shards
-    alt ≥6 shards available
+    alt ≥ m shards available (here ≥6)
         QP->>QP: Erasure-decode → reconstruct object
         QP-->>C: 200 OK [object data stream]
-    else <6 shards available
+    else < m shards available
         QP-->>C: 500 Internal Error (too many nodes lost)
     end
 ```
 
 ### Conflicting Versions
 
-When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum (6/9) of nodes agree on. If no version reaches quorum, the operation fails immediately with `500 InternalError` — the system does **not** wait for stabilization.
+When nodes return different versions of the same key (e.g., a write is mid-commit), the QP returns the version that at least a read quorum of `m` nodes agree on (in the 9-node configuration, that is `6/9`). If no version reaches quorum, the operation fails immediately with `500 InternalError` — the system does **not** wait for stabilization.
 
 ```mermaid
 flowchart TD
     A[Collect shard responses] --> B{All nodes agree on version?}
     B -- Yes --> C[Erasure-decode + return to client]
-    B -- No --> D{Does a read quorum ≥6 share the same version?}
+    B -- No --> D{Does a read quorum ≥ m share the same version?}
     D -- Yes --> E[Use quorum version → decode + return]
     D -- No --> F[500 Internal Error\nNo quorum version available]
 ```
@@ -133,14 +143,14 @@ flowchart TD
 
 **Route:** `DELETE /{bucket}/{key}`
 
-DELETE is sequenced through Kafka to guarantee per-partition ordering with PUT. Storage nodes apply a tombstone commit in RocksDB (OpLog + Metadata) and acknowledge once durable. Physical shard cleanup remains asynchronous garbage collection.
+DELETE is sequenced through Kafka to guarantee per-partition ordering with PUT. Storage nodes apply a tombstone commit in RocksDB (OpLog + Metadata) and acknowledge once durable. Physical shard cleanup is **decoupled** from the client ACK path: the commit handler enqueues the obsolete shard paths into the `pending_deletes` RocksDB column family, and the `BlobDeletionWorker` drains that queue asynchronously to remove shard files from disk. This keeps client latency bounded by the metadata commit and lets gossip-based garbage collection batch the actual disk work. See [§13 Gossip-Based Garbage Collection](#13-gossip-based-garbage-collection).
 
 ```mermaid
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
     participant Kafka as Kafka / PubSub (Sequencer)
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: DELETE /{bucket}/{key}
@@ -151,10 +161,12 @@ sequenceDiagram
         RDB-->>SN: OK
         SN-->>QP: 200 ACK
     end
-    Note over QP: Wait for write quorum ACKs (≥6)
+    Note over QP: Wait for write_quorum commit ACKs (here ≥7)
     QP-->>C: 204 No Content
 
-    Note over SN: Physical shard file deletion is async (gossip/background GC)
+    Note over SN: Physical shard file deletion is decoupled: the commit marks a
+    Note over SN: tombstone in metadata + enqueues shards in the pending_deletes
+    Note over SN: column family; the BlobDeletionWorker drains it asynchronously.
 ```
 
 ---
@@ -170,7 +182,7 @@ sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
     participant Kafka as Kafka / PubSub (Sequencer)
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: PUT /{bucket}
@@ -182,7 +194,7 @@ sequenceDiagram
         Kafka->>SN: Deliver ordered operation to all nodes
         SN->>RDB: Atomic write → Bucket table + OpLog entry
         SN-->>QP: ACK
-        Note over QP: Wait for write quorum ACKs
+        Note over QP: Wait for write_quorum commit ACKs (here ≥7)
         QP-->>C: 200 OK
     end
 ```
@@ -200,7 +212,7 @@ sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
     participant Kafka as Kafka / PubSub (Sequencer)
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: DELETE /{bucket}
@@ -223,7 +235,7 @@ A lightweight existence check. The QP queries the bucket table on storage nodes 
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: HEAD /{bucket}
@@ -252,7 +264,7 @@ See [`Database.listItemsInBucket()`](../storage-node/src/main/java/com/github/ko
 sequenceDiagram
     participant C as S3 Client
     participant QP as Query Processor
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
     participant RDB as RocksDB (each SN)
 
     C->>QP: GET /{bucket}?prefix=animals/
@@ -305,7 +317,7 @@ sequenceDiagram
     participant QP as Query Processor
     participant Cache as Cache (Redis / MemoryCache)
     participant SW as StorageWorker
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
 
     C->>QP: PUT /{bucket}/{key}?partNumber=N&uploadId=X [part data]
     QP->>Cache: Check mpu:session:{uploadId} exists + status=ACTIVE
@@ -318,7 +330,7 @@ sequenceDiagram
     end
     QP->>SW: put(requestId, bucket, partStorageKey, length, data)
     SW->>SN: Stream erasure-coded shards concurrently
-    SN-->>SW: ACKs (≥6 required)
+    SN-->>SW: ACKs (≥ write_quorum required; here ≥7)
     SW-->>QP: Success
     QP->>Cache: Add partNumber N → mpu:parts:{uploadId}
     QP->>Cache: Store part size → mpu:partsize:{uploadId}:{N}
@@ -382,7 +394,7 @@ sequenceDiagram
     participant QP as Query Processor
     participant Cache as Cache (Redis / MemoryCache)
     participant SW as StorageWorker
-    participant SN as Storage Nodes (×9)
+    participant SN as Storage Nodes (×n, here n=9)
 
     C->>QP: DELETE /{bucket}/{key}?uploadId=X
     QP->>Cache: Check mpu:session:{uploadId} exists

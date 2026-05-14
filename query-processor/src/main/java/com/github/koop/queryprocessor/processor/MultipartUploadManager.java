@@ -45,10 +45,13 @@ public class MultipartUploadManager {
 
     /**
      * Uploads a single part of an in-progress multipart upload.
-     * 
-     * TODO(architecture): The current implementation caches the part in Redis first,
-     * then uploads to the Storage Node. According to docs, we should ideally verify the part doesn't already exist,
-     * upload to the Storage Node first, and only update the cache upon success.
+     *
+     * <p>Ordering: the part number is atomically reserved in the cache's parts set
+     * via {@link CacheClient#setAddIfAbsent} before any shard data is written, then
+     * the part bytes are streamed to storage nodes. On storage failure or a
+     * concurrent abort the reservation is rolled back (and any successfully
+     * stored shard is best-effort deleted). Part data itself is never cached —
+     * only the reservation flag and, on success, the part's byte size.
      */
     public MultipartUploadResult uploadPart(String bucket, String key, String uploadId,
                              int partNumber, InputStream data, long length)
