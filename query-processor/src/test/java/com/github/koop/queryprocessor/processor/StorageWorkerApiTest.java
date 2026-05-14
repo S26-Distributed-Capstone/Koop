@@ -19,6 +19,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -1011,29 +1012,67 @@ public class StorageWorkerApiTest {
     }
 
     @Test
-    void get_fallsBackToFullNodeList_whenTooManyDown() throws Exception {
-        // Write fresh.
+    void put_skipsDownNode_doesNotStallErasureProducer() throws Exception {
+        // Regression test for the "skipped shard leaks its pipe" bug.
+        //
+        // ErasureCoder.shard() returns n shard InputStreams fed by a single virtual-thread
+        // producer through bounded queues (capacity capped at 8 chunks). If a node is
+        // marked DOWN and we skip sending its shard *without closing the corresponding
+        // InputStream*, that pipe never drains. Once it fills to capacity, the producer
+        // blocks at enqueue(...) for the pipe's 10-second offer timeout — and because the
+        // producer is single-threaded across all pipes, the healthy shards' pipes don't
+        // get fed during that window either.
+        //
+        // The trigger: enqueues per pipe = 1 (length prefix) + numStripes + 1 (EOF). Capacity
+        // = min(8, numStripes + 2). With m=6 and SHARD_SIZE=1MB, numStripes=ceil(len/6MB).
+        // 50MB → numStripes=9 → 11 enqueues against an 8-slot queue → unambiguous stall
+        // if the skipped pipe isn't closed.
+        //
+        // Healthy puts of this size on the in-process fakes complete in ~1-2 seconds.
+        // The 7-second threshold is well above that but well below the 10-second stall.
+        markDown(nodes.get(0).address());
+
+        byte[] data = randomBytes(50 * 1024 * 1024);
+        assertTimeoutPreemptively(Duration.ofSeconds(7),
+                () -> {
+                    boolean ok = worker.put(UUID.randomUUID(), "b", "noStallOnSkip",
+                            data.length, new ByteArrayInputStream(data));
+                    assertTrue(ok, "put should succeed with 8 of 9 healthy nodes");
+                },
+                "put stalled — skipped shard's pipe likely filled to capacity "
+                        + "(10s ThreadSafePipe.enqueue offer timeout)");
+
+        assertEquals(0, nodes.get(0).putCount(),
+                "DOWN node 0 must not receive a PUT request");
+    }
+
+    @Test
+    void get_failsWhenTooManyDown() throws Exception {
+        // Write fresh while all nodes are healthy.
         byte[] data = randomBytes(DATA_SIZE);
-        assertTrue(worker.put(UUID.randomUUID(), "b", "fallbackRead",
+        assertTrue(worker.put(UUID.randomUUID(), "b", "tooManyDown",
                 data.length, new ByteArrayInputStream(data)));
 
         for (AckingFakeStorageNodeServer n : nodes) n.resetCounters();
         healthTracker.clear();
 
-        // Mark 5 nodes DOWN. Healthy=4 < m=6, so the read path must fall back
-        // to contacting every node (DOWN-marked ones still get a request).
+        // Mark 5 of 9 nodes DOWN. Healthy=4 < m=6, so reconstruction is impossible.
+        // No safety net: DOWN nodes are skipped and the client gets a failed read.
         for (int i = 0; i < 5; i++) markDown(nodes.get(i).address());
 
-        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fallbackRead");
-        assertNotNull(obj);
-        try (InputStream in = obj.stream()) {
-            assertArrayEquals(data, in.readAllBytes());
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "tooManyDown");
+        boolean failedFast = obj == null;
+        if (!failedFast) {
+            try (InputStream in = obj.stream()) {
+                byte[] read = in.readAllBytes();
+                assertNotEquals(data.length, read.length,
+                        "GET must not return the full object when fewer than m healthy nodes remain");
+            }
         }
 
-        for (int i = 0; i < nodes.size(); i++) {
-            assertTrue(nodes.get(i).getCount() > 0,
-                    "Node " + i + " should have been contacted under fallback (got "
-                            + nodes.get(i).getCount() + ")");
+        for (int i = 0; i < 5; i++) {
+            assertEquals(0, nodes.get(i).getCount(),
+                    "DOWN node " + i + " must not be contacted (no safety net)");
         }
     }
 
