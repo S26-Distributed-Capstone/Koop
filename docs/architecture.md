@@ -17,7 +17,7 @@ The architecture consists of four primary services:
 
 2.  **Storage Nodes:**
     - **Stateful Backend:** Receives erasure-coded shards over HTTP and persists them to disk.
-    - **Storage Engine:** Uses **RocksDB** (embedded key-value store) for the OpLog, object metadata, and bucket tables.
+    - **Storage Engine:** Uses **RocksDB** (embedded key-value store) for the OpLog, object metadata (including each object's byte size, recorded on PUT so HEAD, GET, and ListObjectsV2 can report content length without re-reading shards and so multipart completion can validate part sizes), and bucket tables.
     - **Operation Log:** Maintains a per-partition, sequenced log of mutations (PUT, DELETE, bucket ops) used for repair.
     - **Repair Worker Pool:** Background workers (`RepairWorkerPool` in `StorageNodeServerV2`) detect missed sequence numbers when a node comes back online and replay them from peers to catch up.
 
@@ -37,7 +37,7 @@ The architecture consists of four primary services:
 The system uses a two-stage write: shards are streamed first, and only after a write quorum acknowledges the shard upload is an ordered commit message published. This is **not** XA-style two-phase commit — there is no prepare/abort vote — but it does separate durable shard placement from the ordered metadata commit.
 
 1.  **Client** sends a `PUT /{bucket}/{key}` request to any Query Processor.
-2.  **QP** receives the data stream and erasure-encodes it into `n` shards (default `n=6`, `k=4`).
+2.  **QP** receives the data stream and erasure-encodes it into `n` total shards (`m` data + `k = n − m` parity). The defaults depend on deployment: the `docker-compose.yml` `etcd-seeder` block configures `n=6, m=4, k=2, write_quorum=5` (tolerates 2 node failures), while the system-tests cluster and the recommended full deployment use `n=9, m=6, k=3, write_quorum=7` (tolerates 3 node failures). Both configurations are read from `erasure_set_configurations` in Etcd at startup.
 3.  **QP** looks up the partition's erasure set in Etcd and streams shards to the target storage nodes concurrently over HTTP (`PUT /store/{partition}/{storageKey}`).
 4.  **QP** waits for at least `write_quorum` shard upload ACKs from the storage nodes.
 5.  **QP** publishes an ordered `PutMessage` via Kafka to the partition's topic.

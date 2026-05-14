@@ -67,9 +67,11 @@ If you run services outside Docker Compose, you must supply these environment va
 
 ## Erasure Configuration
 
-The erasure-set parameters are seeded into Etcd at startup by the `etcd-seeder` service in `docker-compose.yml`. To change `n`, `k`, `write_quorum`, the participating storage nodes, or the partition spread, edit the `etcd-seeder` `command` block in `docker-compose.yml` and restart the cluster. The seeded keys are:
+> **Note on cluster sizing:** This guide describes the `docker-compose.yml` setup, which runs a **6-node cluster** with `n = 6, m = 4, write_quorum = 5` (4 data + 2 parity shards, tolerates 2 node failures). The system-tests integration suite (`system-tests/src/test/java/koop/RealStorageNodesIT.java`) and the recommended full deployment use a **9-node cluster** with `n = 9, m = 6, write_quorum = 7` (6 data + 3 parity, tolerates 3 failures). The architecture and workflow documents describe the 9-node configuration as the default; the flow is identical, only the seeded numbers and the number of storage-node replicas differ.
 
-- `erasure_set_configurations` — list of erasure sets, each with `n`, `k`, `write_quorum`, and the list of `(ip, port)` machines.
+The erasure-set parameters are seeded into Etcd at startup by the `etcd-seeder` service in `docker-compose.yml`. To change `n`, `m`, `write_quorum`, the participating storage nodes, or the partition spread, edit the `etcd-seeder` `command` block in `docker-compose.yml` and restart the cluster. The seeded keys are:
+
+- `erasure_set_configurations` — list of erasure sets, each with `n` (total shards), `m` (data shards), `write_quorum`, and the list of `(ip, port)` machines. The parity-shard count is computed as `k = n − m`.
 - `partition_spread_configurations` — mapping of partitions to erasure sets.
 
 ## Stopping the Cluster

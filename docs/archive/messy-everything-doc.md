@@ -197,54 +197,12 @@ The API for all of these can be found on the [S3 API Reference](https://docs.aws
 Both of the below configurations are put into etcd.  
 Partition spread configuration defines which data partitions to which erasure set.
 
-| {
-"partition\_spread": \[
-{
-"partitions": \[0, 1, 2, 3, 4, 5, 6, 7, 8\],
-"erasure\_set": 1
-},
-{
-"partitions": \[9, 10, 11, 12, 13, 14, 15, 16, 17\],
-"erasure\_set": 2
-},
-{
-"partitions": \[18, 19, 20, 21, 22, 23, 24, 25, 26\],
-"erasure\_set": 3
-}
-\]
-} |
+| {"partition\_spread": \[{"partitions": \[0, 1, 2, 3, 4, 5, 6, 7, 8\],"erasure\_set": 1},{"partitions": \[9, 10, 11, 12, 13, 14, 15, 16, 17\],"erasure\_set": 2},{"partitions": \[18, 19, 20, 21, 22, 23, 24, 25, 26\],"erasure\_set": 3}\]} |
 | :---- |
 
 erasure set configuration defines which erasure sets map to which machines
 
-| {
-"replica\_sets": \[
-{
-"number": 1,
-"machines": \[
-{ "ip": "192.168.1.1", "port": 8080 },
-{ "ip": "192.168.1.2", "port": 8080 },
-{ "ip": "192.168.1.3", "port": 8080 }
-\]
-},
-{
-"number": 2,
-"machines": \[
-{ "ip": "192.168.1.4", "port": 8080 },
-{ "ip": "192.168.1.5", "port": 8080 },
-{ "ip": "192.168.1.6", "port": 8080 }
-\]
-},
-{
-"number": 3,
-"machines": \[
-{ "ip": "192.168.1.7", "port": 8080 },
-{ "ip": "192.168.1.8", "port": 8080 },
-{ "ip": "192.168.1.9", "port": 8080 }
-\]
-}
-\]
-} |
+| {"replica\_sets": \[{"number": 1,"machines": \[{ "ip": "192.168.1.1", "port": 8080 },{ "ip": "192.168.1.2", "port": 8080 },{ "ip": "192.168.1.3", "port": 8080 }\]},{"number": 2,"machines": \[{ "ip": "192.168.1.4", "port": 8080 },{ "ip": "192.168.1.5", "port": 8080 },{ "ip": "192.168.1.6", "port": 8080 }\]},{"number": 3,"machines": \[{ "ip": "192.168.1.7", "port": 8080 },{ "ip": "192.168.1.8", "port": 8080 },{ "ip": "192.168.1.9", "port": 8080 }\]}\]} |
 | :---- |
 
 # Architecture
