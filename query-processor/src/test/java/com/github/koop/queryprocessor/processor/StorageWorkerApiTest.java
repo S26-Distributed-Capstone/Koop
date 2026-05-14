@@ -19,6 +19,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -1008,6 +1009,41 @@ public class StorageWorkerApiTest {
         assertEquals(0, nodes.get(0).getCount(), "DOWN node 0 must not receive a GET");
         assertEquals(0, nodes.get(1).getCount(), "DOWN node 1 must not receive a GET");
         assertEquals(0, nodes.get(2).getCount(), "DOWN node 2 must not receive a GET");
+    }
+
+    @Test
+    void put_skipsDownNode_doesNotStallErasureProducer() throws Exception {
+        // Regression test for the "skipped shard leaks its pipe" bug.
+        //
+        // ErasureCoder.shard() returns n shard InputStreams fed by a single virtual-thread
+        // producer through bounded queues (capacity capped at 8 chunks). If a node is
+        // marked DOWN and we skip sending its shard *without closing the corresponding
+        // InputStream*, that pipe never drains. Once it fills to capacity, the producer
+        // blocks at enqueue(...) for the pipe's 10-second offer timeout — and because the
+        // producer is single-threaded across all pipes, the healthy shards' pipes don't
+        // get fed during that window either.
+        //
+        // The trigger: enqueues per pipe = 1 (length prefix) + numStripes + 1 (EOF). Capacity
+        // = min(8, numStripes + 2). With m=6 and SHARD_SIZE=1MB, numStripes=ceil(len/6MB).
+        // 50MB → numStripes=9 → 11 enqueues against an 8-slot queue → unambiguous stall
+        // if the skipped pipe isn't closed.
+        //
+        // Healthy puts of this size on the in-process fakes complete in ~1-2 seconds.
+        // The 7-second threshold is well above that but well below the 10-second stall.
+        markDown(nodes.get(0).address());
+
+        byte[] data = randomBytes(50 * 1024 * 1024);
+        assertTimeoutPreemptively(Duration.ofSeconds(7),
+                () -> {
+                    boolean ok = worker.put(UUID.randomUUID(), "b", "noStallOnSkip",
+                            data.length, new ByteArrayInputStream(data));
+                    assertTrue(ok, "put should succeed with 8 of 9 healthy nodes");
+                },
+                "put stalled — skipped shard's pipe likely filled to capacity "
+                        + "(10s ThreadSafePipe.enqueue offer timeout)");
+
+        assertEquals(0, nodes.get(0).putCount(),
+                "DOWN node 0 must not receive a PUT request");
     }
 
     @Test

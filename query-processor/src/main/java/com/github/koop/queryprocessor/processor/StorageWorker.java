@@ -140,17 +140,17 @@ public final class StorageWorker {
         int m = es.getM();
         int writeQuorum = es.getWriteQuorum();
 
-        // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
-        InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
-
         // DOWN nodes are skipped unconditionally. If the healthy set can't meet
-        // write quorum, the caller gets a failed put — no safety-net retries.
+        // write quorum, fail fast — no point starting the erasure-coding producer.
         Set<InetSocketAddress> healthyForWrite = healthTracker.getHealthyNodes(resolvedNodes);
         if (healthyForWrite.size() < writeQuorum) {
             logger.error("Aborting put: only {} healthy nodes available, writeQuorum={}",
                     healthyForWrite.size(), writeQuorum);
             return false;
         }
+
+        // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
+        InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
 
         List<InflightTransfer> inflight = new ArrayList<>();
         List<CompletableFuture<Boolean>> results = new ArrayList<>();
@@ -159,6 +159,11 @@ public final class StorageWorker {
             InetSocketAddress node = resolvedNodes.get(index);
             if (!healthyForWrite.contains(node)) {
                 logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
+                // Close the unread shard stream so its pipe is marked broken and the
+                // ErasureCoder producer can drop it on its next enqueue (otherwise the
+                // bounded queue fills up and stalls the producer for ~10s, blocking the
+                // healthy shards' pipes alongside it).
+                try { shardStreams[index].close(); } catch (IOException ignored) {}
                 results.add(CompletableFuture.completedFuture(false));
                 continue;
             }
