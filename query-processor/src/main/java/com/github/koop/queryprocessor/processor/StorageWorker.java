@@ -157,10 +157,9 @@ public final class StorageWorker {
                     logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
                     return false;
                 }
-                URI uri = URI.create(String.format(
-                        "http://%s:%d/store/%d/%s?requestId=%s",
-                        node.getHostString(), node.getPort(),
-                        resolvedPartition, storageKey, requestID));
+                URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+                        "/store/" + resolvedPartition + "/" + storageKey,
+                        "requestId=" + requestID, null);
                 try {
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(uri)
@@ -393,14 +392,14 @@ public final class StorageWorker {
                     logger.trace("GET shard {} → node {} skipped (marked DOWN)", index, node);
                     return null;
                 }
-                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
-                        partition, storageKey);
-                if (targetVersion.isPresent()) {
-                    uriStr += "?version=" + targetVersion.getAsLong();
-                }
+                String query = targetVersion.isPresent() ? "version=" + targetVersion.getAsLong() : null;
+                URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+                        "/store/" + partition + "/" + storageKey,
+                        query, null);
 
-                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
+                HttpRequest request = HttpRequest.newBuilder().uri(uri).GET()
                         .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
+
                 HttpResponse<InputStream> response;
                 try {
                     response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
