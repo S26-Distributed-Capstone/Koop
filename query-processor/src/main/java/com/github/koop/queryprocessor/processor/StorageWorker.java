@@ -34,10 +34,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
@@ -54,8 +55,8 @@ public final class StorageWorker {
 
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
 
-    private static final int SHARD_UPLOAD_TIMEOUT_SECONDS = 30;
-    private static final int SHARD_FETCH_TIMEOUT_SECONDS = 30;
+    /** Polling interval (ms) for the health watcher that cancels in-flight transfers to DOWN nodes. */
+    private static final long HEALTH_WATCH_INTERVAL_MS = 250;
 
     private final ExecutorService executor;
     private final HttpClient httpClient;
@@ -142,63 +143,76 @@ public final class StorageWorker {
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
         InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
 
-        // Advisory health filter: skip nodes marked DOWN provided enough
-        // healthy nodes remain to meet write quorum. Otherwise fall back to
-        // contacting every node (safety net for stale-cache false positives).
+        // DOWN nodes are skipped unconditionally. If the healthy set can't meet
+        // write quorum, the caller gets a failed put — no safety-net retries.
         Set<InetSocketAddress> healthyForWrite = healthTracker.getHealthyNodes(resolvedNodes);
-        final boolean skipUnhealthyForWrite = healthyForWrite.size() >= writeQuorum;
-
-        List<Callable<Boolean>> tasks = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            final int index = i;
-            tasks.add(() -> {
-                InetSocketAddress node = resolvedNodes.get(index);
-                if (skipUnhealthyForWrite && !healthyForWrite.contains(node)) {
-                    logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
-                    return false;
-                }
-                URI uri = URI.create(String.format(
-                        "http://%s:%d/store/%d/%s?requestId=%s",
-                        node.getHostString(), node.getPort(),
-                        resolvedPartition, storageKey, requestID));
-                try {
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(uri)
-                            .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
-                            .header("Content-Type", "application/octet-stream")
-                            .timeout(Duration.ofSeconds(SHARD_UPLOAD_TIMEOUT_SECONDS))
-                            .build();
-
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                    if (response.statusCode() == 200) {
-                        healthTracker.recordSuccess(node);
-                        logger.trace("PUT shard {} → node {} succeeded", index, node);
-                        return true;
-                    }
-                    healthTracker.recordFailure(node);
-                    logger.trace("PUT shard {} → node {} HTTP {}", index, node, response.statusCode());
-                } catch (Exception e) {
-                    healthTracker.recordFailure(node);
-                    logger.trace("PUT shard {} → node {} exception: {}", index, node, e.getMessage());
-                }
-                return false;
-            });
+        if (healthyForWrite.size() < writeQuorum) {
+            logger.error("Aborting put: only {} healthy nodes available, writeQuorum={}",
+                    healthyForWrite.size(), writeQuorum);
+            return false;
         }
 
-        long uploaded;
-        try {
-            uploaded = executor.invokeAll(tasks, SHARD_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    .stream().filter(f -> {
-                        try {
-                            return f.get();
-                        } catch (InterruptedException | ExecutionException | CancellationException e) {
-                            logger.warn("Shard upload task error: {}", e.getMessage());
-                            return false;
-                        }
-                    }).count();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+        List<InflightTransfer> inflight = new ArrayList<>();
+        List<CompletableFuture<Boolean>> results = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final int index = i;
+            InetSocketAddress node = resolvedNodes.get(index);
+            if (!healthyForWrite.contains(node)) {
+                logger.trace("PUT shard {} → node {} skipped (marked DOWN)", index, node);
+                results.add(CompletableFuture.completedFuture(false));
+                continue;
+            }
+            URI uri = URI.create(String.format(
+                    "http://%s:%d/store/%d/%s?requestId=%s",
+                    node.getHostString(), node.getPort(),
+                    resolvedPartition, storageKey, requestID));
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
+                    .header("Content-Type", "application/octet-stream")
+                    .build();
+
+            CompletableFuture<HttpResponse<String>> raw =
+                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<Boolean> result = raw.handle((response, ex) -> {
+                if (ex != null) {
+                    Throwable cause = unwrap(ex);
+                    if (cause instanceof CancellationException) {
+                        logger.trace("PUT shard {} → node {} cancelled (health watcher)", index, node);
+                    } else {
+                        healthTracker.recordFailure(node);
+                        logger.trace("PUT shard {} → node {} exception: {}", index, node, cause.getMessage());
+                    }
+                    return false;
+                }
+                if (response.statusCode() == 200) {
+                    healthTracker.recordSuccess(node);
+                    logger.trace("PUT shard {} → node {} succeeded", index, node);
+                    return true;
+                }
+                healthTracker.recordFailure(node);
+                logger.trace("PUT shard {} → node {} HTTP {}", index, node, response.statusCode());
+                return false;
+            });
+
+            inflight.add(new InflightTransfer(node, raw, index));
+            results.add(result);
+        }
+
+        startHealthWatcher(inflight);
+
+        long uploaded = 0;
+        for (CompletableFuture<Boolean> f : results) {
+            try {
+                if (Boolean.TRUE.equals(f.get())) {
+                    uploaded++;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (CancellationException | ExecutionException e) {
+                logger.trace("Shard upload task error: {}", e.getMessage());
+            }
         }
 
         if (uploaded < writeQuorum) {
@@ -247,7 +261,7 @@ public final class StorageWorker {
         // Synchronous probe: fetch shard metadata to detect tombstones/type
         // BEFORE creating the piped stream. This lets the caller (gateway)
         // distinguish "deleted" (404) from real errors (500).
-        List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty(), m);
+        List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty());
 
         if (responses.isEmpty()) {
             logger.debug("No shards found for key {} — object does not exist", storageKey);
@@ -300,7 +314,7 @@ public final class StorageWorker {
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
                                      OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
-        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty(), m);
+        List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
 
         if (responses.isEmpty()) {
             throw new IOException("No reachable nodes for key " + storageKey);
@@ -356,7 +370,7 @@ public final class StorageWorker {
         }
 
         long oldVersion = availableVersions.get(1); // second-highest version
-        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion), m);
+        List<ShardResponse> oldResponses = fetchShards(partition, storageKey, nodes, OptionalLong.of(oldVersion));
         List<ShardResponse> validOldResponses = oldResponses.stream().filter(r -> r.version() == oldVersion).toList();
         if (validOldResponses.size() >= m) {
             logger.debug("Found sufficient shards for version {} ({}/{}). Reconstructing.", oldVersion,
@@ -378,35 +392,42 @@ public final class StorageWorker {
     }
 
     private List<ShardResponse> fetchShards(int partition, String storageKey, List<InetSocketAddress> nodes,
-            OptionalLong targetVersion, int minHealthyToSkip) {
-        List<Callable<ShardResponse>> tasks = new ArrayList<>();
-
-        // Advisory: skip DOWN nodes only if enough healthy remain to reconstruct.
+            OptionalLong targetVersion) {
+        // DOWN nodes are skipped unconditionally. If too few shards come back, the
+        // caller surfaces the failure to the client — no fallback to DOWN nodes.
         Set<InetSocketAddress> healthyForRead = healthTracker.getHealthyNodes(nodes);
-        final boolean skipUnhealthyForRead = healthyForRead.size() >= minHealthyToSkip;
+
+        List<InflightTransfer> inflight = new ArrayList<>();
+        List<CompletableFuture<ShardResponse>> results = new ArrayList<>();
 
         for (int i = 0; i < nodes.size(); i++) {
             final int index = i;
-            tasks.add(() -> {
-                InetSocketAddress node = nodes.get(index);
-                if (skipUnhealthyForRead && !healthyForRead.contains(node)) {
-                    logger.trace("GET shard {} → node {} skipped (marked DOWN)", index, node);
-                    return null;
-                }
-                String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
-                        partition, storageKey);
-                if (targetVersion.isPresent()) {
-                    uriStr += "?version=" + targetVersion.getAsLong();
-                }
+            InetSocketAddress node = nodes.get(index);
+            if (!healthyForRead.contains(node)) {
+                logger.trace("GET shard {} → node {} skipped (marked DOWN)", index, node);
+                results.add(CompletableFuture.completedFuture(null));
+                continue;
+            }
+            String uriStr = String.format("http://%s:%d/store/%d/%s", node.getHostString(), node.getPort(),
+                    partition, storageKey);
+            if (targetVersion.isPresent()) {
+                uriStr += "?version=" + targetVersion.getAsLong();
+            }
 
-                HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET()
-                        .timeout(Duration.ofSeconds(SHARD_FETCH_TIMEOUT_SECONDS)).build();
-                HttpResponse<InputStream> response;
-                try {
-                    response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-                } catch (Exception e) {
-                    healthTracker.recordFailure(node);
-                    throw e;
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+
+            CompletableFuture<HttpResponse<InputStream>> raw =
+                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
+            CompletableFuture<ShardResponse> result = raw.handle((response, ex) -> {
+                if (ex != null) {
+                    Throwable cause = unwrap(ex);
+                    if (cause instanceof CancellationException) {
+                        logger.trace("GET shard {} → node {} cancelled (health watcher)", index, node);
+                    } else {
+                        healthTracker.recordFailure(node);
+                        logger.trace("GET shard {} → node {} exception: {}", index, node, cause.getMessage());
+                    }
+                    return null;
                 }
 
                 if (response.statusCode() == 200) {
@@ -417,16 +438,23 @@ public final class StorageWorker {
 
                     List<String> chunks = new ArrayList<>();
                     if (type == ShardType.MULTIPART) {
-                        byte[] payload = response.body().readAllBytes();
-                        String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
-                        // Parse simple JSON array: ["chunk1","chunk2"]
-                        if (json.startsWith("[") && json.endsWith("]")) {
-                            String content = json.substring(1, json.length() - 1);
-                            if (!content.isEmpty()) {
-                                for (String token : content.split(",")) {
-                                    chunks.add(token.trim().replace("\"", ""));
+                        try {
+                            byte[] payload = response.body().readAllBytes();
+                            String json = new String(payload, java.nio.charset.StandardCharsets.UTF_8).trim();
+                            // Parse simple JSON array: ["chunk1","chunk2"]
+                            if (json.startsWith("[") && json.endsWith("]")) {
+                                String content = json.substring(1, json.length() - 1);
+                                if (!content.isEmpty()) {
+                                    for (String token : content.split(",")) {
+                                        chunks.add(token.trim().replace("\"", ""));
+                                    }
                                 }
                             }
+                        } catch (IOException ioe) {
+                            healthTracker.recordFailure(node);
+                            logger.trace("GET shard {} → node {} multipart payload read failed: {}",
+                                    index, node, ioe.getMessage());
+                            return null;
                         }
                         return new ShardResponse(index, version, type, logicalSize, chunks, InputStream.nullInputStream());
                     }
@@ -439,23 +467,26 @@ public final class StorageWorker {
                 // 4xx (e.g. 404 missing shard) is not a health signal — leave tracker untouched.
                 return null;
             });
+
+            inflight.add(new InflightTransfer(node, raw, index));
+            results.add(result);
         }
 
-        try {
-            return executor.invokeAll(tasks, SHARD_FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
-                    .map(future -> {
-                        try {
-                            return future.get();
-                        } catch (Exception e) {
-                            return null;
-                        }
-                    })
-                    .filter(res -> res != null)
-                    .toList();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return List.of();
+        startHealthWatcher(inflight);
+
+        List<ShardResponse> out = new ArrayList<>();
+        for (CompletableFuture<ShardResponse> f : results) {
+            try {
+                ShardResponse sr = f.get();
+                if (sr != null) out.add(sr);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return List.of();
+            } catch (CancellationException | ExecutionException e) {
+                logger.trace("Shard fetch task error: {}", e.getMessage());
+            }
         }
+        return out;
     }
 
     private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int m,
@@ -612,15 +643,13 @@ public final class StorageWorker {
         List<InetSocketAddress> nodes = resolved.get().erasureSet().getMachines().stream()
                 .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
 
-        // Advisory: as long as at least one node is reachable per the tracker,
-        // skip DOWN nodes. Otherwise contact everyone (false-positive safety net).
+        // DOWN nodes are skipped unconditionally. If every node is DOWN, return false.
         Set<InetSocketAddress> healthyForHead = healthTracker.getHealthyNodes(nodes);
-        final boolean skipUnhealthyForHead = !healthyForHead.isEmpty();
 
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (InetSocketAddress node : nodes) {
             tasks.add(() -> {
-                if (skipUnhealthyForHead && !healthyForHead.contains(node)) {
+                if (!healthyForHead.contains(node)) {
                     logger.trace("HEAD bucket {} → node {} skipped (marked DOWN)", bucket, node);
                     return false;
                 }
@@ -725,16 +754,13 @@ public final class StorageWorker {
     }
 
     private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
-        // Try healthy nodes first; deprioritize (but do not exclude) DOWN nodes.
-        List<InetSocketAddress> ordered = new ArrayList<>(nodes.size());
-        List<InetSocketAddress> deferred = new ArrayList<>();
-        for (InetSocketAddress n : nodes) {
-            if (healthTracker.isHealthy(n)) ordered.add(n);
-            else deferred.add(n);
-        }
-        ordered.addAll(deferred);
+        // DOWN nodes are skipped entirely. If none are healthy, return an empty list
+        // — no fallback retries against nodes the tracker has written off.
+        List<InetSocketAddress> healthy = nodes.stream()
+                .filter(healthTracker::isHealthy)
+                .toList();
 
-        for (InetSocketAddress node : ordered) {
+        for (InetSocketAddress node : healthy) {
             URI uri = URI.create(String.format("http://%s:%d/bucket/%s%s",
                     node.getHostString(), node.getPort(),
                     URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8), query));
@@ -871,6 +897,58 @@ public final class StorageWorker {
 
     private static String toStorageKey(String bucket, String key) {
         return bucket + "/" + key;
+    }
+
+    /**
+     * Holds a raw {@link CompletableFuture} returned by {@link HttpClient#sendAsync} along
+     * with the target node it addresses. The raw future (not a {@code thenApply} derivative)
+     * must be the cancellation target so that the underlying HTTP exchange is torn down.
+     */
+    private record InflightTransfer(InetSocketAddress node, CompletableFuture<?> future, int shardIndex) {
+    }
+
+    /**
+     * Spawns a watcher on the shared virtual-thread executor that periodically checks the
+     * health of each in-flight transfer's target node. If the {@link NodeHealthTracker} marks
+     * a target as unhealthy, {@code cancel(true)} is invoked on the corresponding raw future,
+     * tearing down the connection so a stalled transfer cannot block the parent commit.
+     *
+     * <p>The watcher exits as soon as every transfer is done (success, failure, or cancelled).
+     */
+    private void startHealthWatcher(List<InflightTransfer> inflight) {
+        if (inflight.isEmpty()) return;
+        executor.execute(() -> {
+            try {
+                while (true) {
+                    boolean anyPending = false;
+                    for (InflightTransfer t : inflight) {
+                        if (t.future().isDone()) continue;
+                        anyPending = true;
+                        if (!healthTracker.isHealthy(t.node())) {
+                            logger.trace("Cancelling in-flight shard {} transfer to {} (marked DOWN)",
+                                    t.shardIndex(), t.node());
+                            t.future().cancel(true);
+                        }
+                    }
+                    if (!anyPending) return;
+                    Thread.sleep(HEALTH_WATCH_INTERVAL_MS);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    /**
+     * Unwraps a {@link CompletionException} (used by {@link CompletableFuture}'s {@code handle})
+     * to expose the underlying cause — typically a {@link CancellationException} when the
+     * health watcher tore down the request.
+     */
+    private static Throwable unwrap(Throwable ex) {
+        if (ex instanceof CompletionException && ex.getCause() != null) {
+            return ex.getCause();
+        }
+        return ex;
     }
 
     private List<InetSocketAddress> getNodesForPartition(int partition) {

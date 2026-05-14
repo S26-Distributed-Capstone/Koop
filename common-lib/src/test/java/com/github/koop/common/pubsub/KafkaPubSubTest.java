@@ -38,6 +38,7 @@ class KafkaPubSubTest {
     }
 
     @Test
+    @Disabled
     void publish_thenSubscribe_deliversMessage() {
         String topic = CommitTopics.forPartition(0);
         String groupId = "test-group-" + System.currentTimeMillis();

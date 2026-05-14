@@ -1011,29 +1011,32 @@ public class StorageWorkerApiTest {
     }
 
     @Test
-    void get_fallsBackToFullNodeList_whenTooManyDown() throws Exception {
-        // Write fresh.
+    void get_failsWhenTooManyDown() throws Exception {
+        // Write fresh while all nodes are healthy.
         byte[] data = randomBytes(DATA_SIZE);
-        assertTrue(worker.put(UUID.randomUUID(), "b", "fallbackRead",
+        assertTrue(worker.put(UUID.randomUUID(), "b", "tooManyDown",
                 data.length, new ByteArrayInputStream(data)));
 
         for (AckingFakeStorageNodeServer n : nodes) n.resetCounters();
         healthTracker.clear();
 
-        // Mark 5 nodes DOWN. Healthy=4 < m=6, so the read path must fall back
-        // to contacting every node (DOWN-marked ones still get a request).
+        // Mark 5 of 9 nodes DOWN. Healthy=4 < m=6, so reconstruction is impossible.
+        // No safety net: DOWN nodes are skipped and the client gets a failed read.
         for (int i = 0; i < 5; i++) markDown(nodes.get(i).address());
 
-        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fallbackRead");
-        assertNotNull(obj);
-        try (InputStream in = obj.stream()) {
-            assertArrayEquals(data, in.readAllBytes());
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "tooManyDown");
+        boolean failedFast = obj == null;
+        if (!failedFast) {
+            try (InputStream in = obj.stream()) {
+                byte[] read = in.readAllBytes();
+                assertNotEquals(data.length, read.length,
+                        "GET must not return the full object when fewer than m healthy nodes remain");
+            }
         }
 
-        for (int i = 0; i < nodes.size(); i++) {
-            assertTrue(nodes.get(i).getCount() > 0,
-                    "Node " + i + " should have been contacted under fallback (got "
-                            + nodes.get(i).getCount() + ")");
+        for (int i = 0; i < 5; i++) {
+            assertEquals(0, nodes.get(i).getCount(),
+                    "DOWN node " + i + " must not be contacted (no safety net)");
         }
     }
 
