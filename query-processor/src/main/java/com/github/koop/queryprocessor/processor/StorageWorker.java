@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -55,7 +56,10 @@ public final class StorageWorker {
 
     private static final Logger logger = LogManager.getLogger(StorageWorker.class);
 
-    /** Polling interval (ms) for the health watcher that cancels in-flight transfers to DOWN nodes. */
+    /**
+     * Polling interval (ms) for the health watcher that cancels in-flight transfers
+     * to DOWN nodes.
+     */
     private static final long HEALTH_WATCH_INTERVAL_MS = 250;
 
     private final ExecutorService executor;
@@ -66,7 +70,8 @@ public final class StorageWorker {
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
     // Wrapper record to return both the stream and its exact byte size
-    public record RetrievedObject(InputStream stream, long size) {}
+    public record RetrievedObject(InputStream stream, long size) {
+    }
 
     // Convenience constructor — creates a MemoryPubSub-backed CommitCoordinator
     // on an OS-assigned port. Useful when only a MetadataClient is available.
@@ -79,8 +84,8 @@ public final class StorageWorker {
     }
 
     public StorageWorker(MetadataClient metadataClient,
-                         CommitCoordinator commitCoordinator,
-                         NodeHealthTracker healthTracker) {
+            CommitCoordinator commitCoordinator,
+            NodeHealthTracker healthTracker) {
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpClient = HttpClient.newBuilder()
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
@@ -169,17 +174,23 @@ public final class StorageWorker {
                 results.add(CompletableFuture.completedFuture(false));
                 continue;
             }
-            URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+            URI uri;
+            try {
+                uri = new URI("http", null, node.getHostString(), node.getPort(),
                         "/store/" + resolvedPartition + "/" + storageKey,
                         "requestId=" + requestID, null);
+            } catch (URISyntaxException e) {
+                logger.error("Failed to build URI for node {}: {}", node, e.getMessage());
+                return false;
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(uri)
                     .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> shardStreams[index]))
                     .header("Content-Type", "application/octet-stream")
                     .build();
 
-            CompletableFuture<HttpResponse<String>> raw =
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> raw = httpClient.sendAsync(request,
+                    HttpResponse.BodyHandlers.ofString());
             CompletableFuture<Boolean> result = raw.handle((response, ex) -> {
                 if (ex != null) {
                     Throwable cause = unwrap(ex);
@@ -229,7 +240,8 @@ public final class StorageWorker {
         logger.debug("Phase 1 complete: {}/{} shards uploaded for requestId {}", uploaded, n, requestID);
 
         // Phase 2 – commit. (Pass the exact length to the database metadata)
-        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, length, writeQuorum);
+        boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, length,
+                writeQuorum);
         if (!committed) {
             logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
         }
@@ -313,12 +325,13 @@ public final class StorageWorker {
             });
         }
 
-        // Return both the stream and the logical size extracted from the storage node headers
+        // Return both the stream and the logical size extracted from the storage node
+        // headers
         return new RetrievedObject(pis, representative.logicalSize());
     }
 
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
-                                     OutputStream out) throws IOException {
+            OutputStream out) throws IOException {
         // Initial fetch: gets data + metadata in one pass without specifying a version
         List<ShardResponse> responses = fetchShards(partition, storageKey, nodes, OptionalLong.empty());
 
@@ -358,8 +371,8 @@ public final class StorageWorker {
     }
 
     private void reconstructFromOlderVersion(int partition, String storageKey, List<InetSocketAddress> nodes, int m,
-                                             int n,
-                                             OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
+            int n,
+            OutputStream out, long maxVersion, int maxVersionShardCount, List<ShardResponse> responses)
             throws IOException {
         logger.warn("Latest version {} for key {} has insufficient shards ({}/{}). Searching older versions.",
                 maxVersion, storageKey, maxVersionShardCount, m);
@@ -414,15 +427,21 @@ public final class StorageWorker {
                 results.add(CompletableFuture.completedFuture(null));
                 continue;
             }
-                String query = targetVersion.isPresent() ? "version=" + targetVersion.getAsLong() : null;
-                URI uri = new URI("http", null, node.getHostString(), node.getPort(),
+            String query = targetVersion.isPresent() ? "version=" + targetVersion.getAsLong() : null;
+            URI uri;
+            try {
+                uri = new URI("http", null, node.getHostString(), node.getPort(),
                         "/store/" + partition + "/" + storageKey,
                         query, null);
+            } catch (URISyntaxException e) {
+                logger.error("Failed to build URI for node {}: {}", node, e.getMessage());
+                return List.of();
+            }
 
-            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(uriStr)).GET().build();
+            HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
 
-            CompletableFuture<HttpResponse<InputStream>> raw =
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
+            CompletableFuture<HttpResponse<InputStream>> raw = httpClient.sendAsync(request,
+                    HttpResponse.BodyHandlers.ofInputStream());
             CompletableFuture<ShardResponse> result = raw.handle((response, ex) -> {
                 if (ex != null) {
                     Throwable cause = unwrap(ex);
@@ -461,7 +480,8 @@ public final class StorageWorker {
                                     index, node, ioe.getMessage());
                             return null;
                         }
-                        return new ShardResponse(index, version, type, logicalSize, chunks, InputStream.nullInputStream());
+                        return new ShardResponse(index, version, type, logicalSize, chunks,
+                                InputStream.nullInputStream());
                     }
 
                     return new ShardResponse(index, version, type, logicalSize, List.of(), response.body());
@@ -469,7 +489,8 @@ public final class StorageWorker {
                 if (response.statusCode() >= 500) {
                     healthTracker.recordFailure(node);
                 }
-                // 4xx (e.g. 404 missing shard) is not a health signal — leave tracker untouched.
+                // 4xx (e.g. 404 missing shard) is not a health signal — leave tracker
+                // untouched.
                 return null;
             });
 
@@ -483,7 +504,8 @@ public final class StorageWorker {
         for (CompletableFuture<ShardResponse> f : results) {
             try {
                 ShardResponse sr = f.get();
-                if (sr != null) out.add(sr);
+                if (sr != null)
+                    out.add(sr);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return List.of();
@@ -495,7 +517,7 @@ public final class StorageWorker {
     }
 
     private void reconstructFromResponses(List<ShardResponse> payloadResponses, List<InetSocketAddress> nodes, int m,
-                                          int n, OutputStream out) throws IOException {
+            int n, OutputStream out) throws IOException {
         InputStream[] ins = new InputStream[n];
         boolean[] present = new boolean[n];
 
@@ -534,7 +556,7 @@ public final class StorageWorker {
     }
 
     private record ShardResponse(int nodeIndex, long version, ShardType type, long logicalSize, List<String> chunks,
-                                 InputStream payload) {
+            InputStream payload) {
     }
 
     /**
@@ -633,11 +655,13 @@ public final class StorageWorker {
      * erasure set concurrently. Returns {@code true} if any node returns 200
      * (bucket exists), {@code false} only if every node returns 404 or fails.
      *
-     * <p>This prevents false negatives when a node is stale or partitioned:
+     * <p>
+     * This prevents false negatives when a node is stale or partitioned:
      * even a single node reporting the bucket exists is sufficient.
      */
     public boolean bucketExists(String bucket) {
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
 
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
@@ -670,7 +694,8 @@ public final class StorageWorker {
                     int status = resp.statusCode();
                     // Any HTTP response means the node is reachable.
                     healthTracker.recordSuccess(node);
-                    if (status == 200) return true;
+                    if (status == 200)
+                        return true;
                     if (status == 404) {
                         logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
                         return false;
@@ -705,8 +730,10 @@ public final class StorageWorker {
      * merging results, deduping by key, sorting, and applying maxKeys.
      */
     public List<ObjectInfo> listObjects(String bucket, String prefix, int maxKeys) {
-        if (bucket == null) throw new IllegalArgumentException("bucket is null");
-        if (maxKeys < 0) throw new IllegalArgumentException("maxKeys < 0");
+        if (bucket == null)
+            throw new IllegalArgumentException("bucket is null");
+        if (maxKeys < 0)
+            throw new IllegalArgumentException("maxKeys < 0");
 
         ErasureRouting r = getRouting();
         var spreads = metadataClient.get(PartitionSpreadConfiguration.class).getPartitionSpread();
@@ -729,10 +756,12 @@ public final class StorageWorker {
         List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
         for (int partition : partitions) {
             Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
-            if (esOpt.isEmpty()) continue;
+            if (esOpt.isEmpty())
+                continue;
             List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
                     .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
-            if (nodes.isEmpty()) continue;
+            if (nodes.isEmpty())
+                continue;
             tasks.add(() -> fetchListFromAnyNode(bucket, query, nodes));
         }
 
@@ -785,15 +814,19 @@ public final class StorageWorker {
         return List.of();
     }
 
-    /** Parses the storage node's list response: [{"key":"..."},...] using Jackson. */
+    /**
+     * Parses the storage node's list response: [{"key":"..."},...] using Jackson.
+     */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     // Package-private for testing.
     static List<ObjectInfo> parseObjectListJson(String body) {
-        if (body == null || body.isBlank()) return List.of();
+        if (body == null || body.isBlank())
+            return List.of();
         try {
-            List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {});
+            List<ObjectInfo> result = OBJECT_MAPPER.readValue(body, new TypeReference<List<ObjectInfo>>() {
+            });
             return result != null ? result : List.of();
         } catch (Exception e) {
             logger.warn("Failed to parse object list JSON (body length={}): {}",
@@ -802,9 +835,11 @@ public final class StorageWorker {
         }
     }
 
-    public record ObjectInfo(String key, long size, String lastModified) {}
+    public record ObjectInfo(String key, long size, String lastModified) {
+    }
 
-    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks, long totalSize) {
+    public boolean beginMultipartCommit(String bucket, String key, String uploadId, List<String> chunks,
+            long totalSize) {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
         if (key == null)
@@ -837,7 +872,8 @@ public final class StorageWorker {
         }
 
         int multipartQuorum = erasureSetOpt.get().getK() + 1;
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, totalSize, multipartQuorum);
+        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, totalSize,
+                multipartQuorum);
     }
 
     public void shutdown() {
@@ -887,7 +923,7 @@ public final class StorageWorker {
             logger.info("ErasureRouting rebuilt");
         } else {
             logger.info("Cannot rebuild ErasureRouting yet (waiting for both configs): "
-                            + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
+                    + "PartitionSpreadConfiguration is {}, ErasureSetConfiguration is {}",
                     ps == null ? "null" : "present", es == null ? "null" : "present");
         }
     }
@@ -905,29 +941,40 @@ public final class StorageWorker {
     }
 
     /**
-     * Holds a raw {@link CompletableFuture} returned by {@link HttpClient#sendAsync} along
-     * with the target node it addresses. The raw future (not a {@code thenApply} derivative)
-     * must be the cancellation target so that the underlying HTTP exchange is torn down.
+     * Holds a raw {@link CompletableFuture} returned by
+     * {@link HttpClient#sendAsync} along
+     * with the target node it addresses. The raw future (not a {@code thenApply}
+     * derivative)
+     * must be the cancellation target so that the underlying HTTP exchange is torn
+     * down.
      */
     private record InflightTransfer(InetSocketAddress node, CompletableFuture<?> future, int shardIndex) {
     }
 
     /**
-     * Spawns a watcher on the shared virtual-thread executor that periodically checks the
-     * health of each in-flight transfer's target node. If the {@link NodeHealthTracker} marks
-     * a target as unhealthy, {@code cancel(true)} is invoked on the corresponding raw future,
-     * tearing down the connection so a stalled transfer cannot block the parent commit.
+     * Spawns a watcher on the shared virtual-thread executor that periodically
+     * checks the
+     * health of each in-flight transfer's target node. If the
+     * {@link NodeHealthTracker} marks
+     * a target as unhealthy, {@code cancel(true)} is invoked on the corresponding
+     * raw future,
+     * tearing down the connection so a stalled transfer cannot block the parent
+     * commit.
      *
-     * <p>The watcher exits as soon as every transfer is done (success, failure, or cancelled).
+     * <p>
+     * The watcher exits as soon as every transfer is done (success, failure, or
+     * cancelled).
      */
     private void startHealthWatcher(List<InflightTransfer> inflight) {
-        if (inflight.isEmpty()) return;
+        if (inflight.isEmpty())
+            return;
         executor.execute(() -> {
             try {
                 while (true) {
                     boolean anyPending = false;
                     for (InflightTransfer t : inflight) {
-                        if (t.future().isDone()) continue;
+                        if (t.future().isDone())
+                            continue;
                         anyPending = true;
                         if (!healthTracker.isHealthy(t.node())) {
                             logger.trace("Cancelling in-flight shard {} transfer to {} (marked DOWN)",
@@ -935,7 +982,8 @@ public final class StorageWorker {
                             t.future().cancel(true);
                         }
                     }
-                    if (!anyPending) return;
+                    if (!anyPending)
+                        return;
                     Thread.sleep(HEALTH_WATCH_INTERVAL_MS);
                 }
             } catch (InterruptedException e) {
@@ -945,8 +993,10 @@ public final class StorageWorker {
     }
 
     /**
-     * Reads and discards every byte from {@code stream}, then closes it. Used to keep
-     * {@link ErasureCoder#shard} producer pipes draining for shards we deliberately skip
+     * Reads and discards every byte from {@code stream}, then closes it. Used to
+     * keep
+     * {@link ErasureCoder#shard} producer pipes draining for shards we deliberately
+     * skip
      * (DOWN nodes) so the producer never stalls on a full queue.
      */
     private static void drainAndClose(InputStream stream) {
@@ -961,8 +1011,10 @@ public final class StorageWorker {
     }
 
     /**
-     * Unwraps a {@link CompletionException} (used by {@link CompletableFuture}'s {@code handle})
-     * to expose the underlying cause — typically a {@link CancellationException} when the
+     * Unwraps a {@link CompletionException} (used by {@link CompletableFuture}'s
+     * {@code handle})
+     * to expose the underlying cause — typically a {@link CancellationException}
+     * when the
      * health watcher tore down the request.
      */
     private static Throwable unwrap(Throwable ex) {
