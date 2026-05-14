@@ -449,7 +449,7 @@ class StorageNodeServerV2Test {
                 .method("HEAD", HttpRequest.BodyPublishers.noBody())
                 .build();
         HttpResponse<Void> resp = http.send(req, HttpResponse.BodyHandlers.discarding());
-        assertEquals(404, resp.statusCode(), "HEAD should return 404 after bucket is deleted");
+        assertEquals(410, resp.statusCode(), "HEAD should return 410 after bucket is deleted");
     }
 
     @Test

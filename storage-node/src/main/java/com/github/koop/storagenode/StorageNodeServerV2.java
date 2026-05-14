@@ -652,9 +652,22 @@ public class StorageNodeServerV2 {
 
     private void handleHeadBucket(Context ctx) {
         try {
-            String bucket = ctx.pathParam("bucket");
-            boolean exists = storageNode.bucketExists(bucket);
-            ctx.status(exists ? 200 : 404);
+            String bucketKey = ctx.pathParam("bucket");
+            Optional<com.github.koop.storagenode.db.Bucket> bucketOpt = storageNode.getBucket(bucketKey);
+
+            if (bucketOpt.isPresent()) {
+                var bucket = bucketOpt.get();
+                // Expose the version (sequenceNumber) to the caller
+                ctx.header("X-Bucket-Version", String.valueOf(bucket.sequenceNumber()));
+
+                if (bucket.deleted()) {
+                    ctx.status(410); // Tombstoned
+                } else {
+                    ctx.status(200); // Active
+                }
+            } else {
+                ctx.status(404); // Never existed on this node
+            }
         } catch (Exception e) {
             logger.error("Error handling HEAD /bucket", e);
             ctx.status(500);

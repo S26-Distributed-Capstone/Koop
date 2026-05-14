@@ -308,6 +308,15 @@ public class Database implements AutoCloseable {
                 .orElse(false);
     }
 
+    /**
+     * Retrieves the full bucket metadata including its sequence number and tombstone status.
+     */
+    public Optional<Bucket> getBucket(String bucketKey) throws Exception {
+        // Assuming your StorageStrategy exposes a method to get the raw bucket record.
+        // If your strategy method is named differently (e.g., getBucketRecord), adjust accordingly.
+        return strategy.getBucket(bucketKey);
+    }
+
     // -------------------------------------------------------------------------
     // LIST ITEMS IN BUCKET — prefix scan on metadata table
     // -------------------------------------------------------------------------

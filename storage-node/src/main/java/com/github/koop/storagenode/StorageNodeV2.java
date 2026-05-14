@@ -302,6 +302,16 @@ public class StorageNodeV2 {
     }
 
     /**
+     * Retrieves the bucket metadata containing its sequence number and deleted state.
+     * * @param bucketKey the name of the bucket
+     * @return an Optional containing the Bucket if it has ever existed on this node
+     * @throws Exception
+     */
+    protected Optional<com.github.koop.storagenode.db.Bucket> getBucket(String bucketKey) throws Exception {
+        return db.getBucket(bucketKey);
+    }
+
+    /**
      * Lists the items in the bucket with the specified prefix. This method queries
      * the database for all items that belong to the bucket identified by the given
      * prefix and returns a Stream of Metadata objects representing each item. This
