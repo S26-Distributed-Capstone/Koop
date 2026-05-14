@@ -42,6 +42,7 @@ public class StorageWorkerApiTest {
     private StorageWorker worker;
     private StorageWorker liveWorker;
     private MemoryFetcher memoryFetcher;
+    private NodeHealthTracker healthTracker;
 
     // -------------------------------------------------------------------------
     // Setup / teardown
@@ -68,10 +69,11 @@ public class StorageWorkerApiTest {
         memoryFetcher.update(buildErasureSetConfiguration(set, set, set));
         memoryFetcher.update(buildPartitionSpreadConfiguration());
 
+        healthTracker = new NodeHealthTracker();
         CommitCoordinator coordinator = new CommitCoordinator(sharedPubSub, 0);
-        worker = new StorageWorker(metadataClient, coordinator);
+        worker = new StorageWorker(metadataClient, coordinator, healthTracker);
 
-        liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0));
+        liveWorker = new StorageWorker(metadataClient, new CommitCoordinator(sharedPubSub, 0), healthTracker);
     }
 
     /**
@@ -80,6 +82,14 @@ public class StorageWorkerApiTest {
     @BeforeEach
     void resetNodes() {
         for (AckingFakeStorageNodeServer n : nodes) n.reset();
+        healthTracker.clear();
+        // Restore original routing in case a prior test mutated memoryFetcher
+        // (e.g. liveConfigUpdate_*). Without this, the shared worker's routing
+        // may point at closed fakes from a previous test.
+        List<InetSocketAddress> originalSet = nodes.stream()
+                .map(AckingFakeStorageNodeServer::address).toList();
+        memoryFetcher.update(buildErasureSetConfiguration(originalSet, originalSet, originalSet));
+        memoryFetcher.update(buildPartitionSpreadConfiguration());
     }
 
     /**
@@ -938,6 +948,124 @@ public class StorageWorkerApiTest {
         } finally {
             w.shutdown();
             for (AckingFakeStorageNodeServer n : unreachableNodes) n.close();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Discovery cache (NodeHealthTracker) integration
+    // -------------------------------------------------------------------------
+
+    /** Marks a node DOWN by recording two consecutive failures (the default threshold). */
+    private void markDown(InetSocketAddress addr) {
+        healthTracker.recordFailure(addr);
+        healthTracker.recordFailure(addr);
+    }
+
+    @Test
+    void put_skipsDownNodes_stillSucceeds() throws Exception {
+        // Pre-mark 2 nodes as DOWN. All servers are functional; the skip is purely
+        // tracker-driven. writeQuorum=7 → 7 of 9 healthy is enough.
+        markDown(nodes.get(0).address());
+        markDown(nodes.get(1).address());
+
+        byte[] data = randomBytes(DATA_SIZE);
+        boolean ok = worker.put(UUID.randomUUID(), "b", "skipDown",
+                data.length, new ByteArrayInputStream(data));
+        assertTrue(ok, "put should succeed despite 2 nodes pre-marked DOWN");
+
+        assertEquals(0, nodes.get(0).putCount(),
+                "DOWN node 0 must not receive a PUT request");
+        assertEquals(0, nodes.get(1).putCount(),
+                "DOWN node 1 must not receive a PUT request");
+        for (int i = 2; i < nodes.size(); i++) {
+            assertTrue(nodes.get(i).putCount() > 0,
+                    "Healthy node " + i + " should receive a PUT");
+        }
+    }
+
+    @Test
+    void get_skipsDownNodes_withinFaultTolerance() throws Exception {
+        // Write fresh, then mark 3 nodes DOWN (within K=3). GET should succeed using
+        // the remaining 6 nodes (m=6) and the DOWN nodes should not be contacted.
+        byte[] data = randomBytes(DATA_SIZE);
+        assertTrue(worker.put(UUID.randomUUID(), "b", "skipReadDown",
+                data.length, new ByteArrayInputStream(data)));
+
+        // Reset request counters after the put so the get-side asserts are clean.
+        for (AckingFakeStorageNodeServer n : nodes) n.resetCounters();
+        healthTracker.clear();
+
+        markDown(nodes.get(0).address());
+        markDown(nodes.get(1).address());
+        markDown(nodes.get(2).address());
+
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "skipReadDown");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
+            assertArrayEquals(data, in.readAllBytes());
+        }
+
+        assertEquals(0, nodes.get(0).getCount(), "DOWN node 0 must not receive a GET");
+        assertEquals(0, nodes.get(1).getCount(), "DOWN node 1 must not receive a GET");
+        assertEquals(0, nodes.get(2).getCount(), "DOWN node 2 must not receive a GET");
+    }
+
+    @Test
+    void get_fallsBackToFullNodeList_whenTooManyDown() throws Exception {
+        // Write fresh.
+        byte[] data = randomBytes(DATA_SIZE);
+        assertTrue(worker.put(UUID.randomUUID(), "b", "fallbackRead",
+                data.length, new ByteArrayInputStream(data)));
+
+        for (AckingFakeStorageNodeServer n : nodes) n.resetCounters();
+        healthTracker.clear();
+
+        // Mark 5 nodes DOWN. Healthy=4 < m=6, so the read path must fall back
+        // to contacting every node (DOWN-marked ones still get a request).
+        for (int i = 0; i < 5; i++) markDown(nodes.get(i).address());
+
+        StorageWorker.RetrievedObject obj = worker.get(UUID.randomUUID(), "b", "fallbackRead");
+        assertNotNull(obj);
+        try (InputStream in = obj.stream()) {
+            assertArrayEquals(data, in.readAllBytes());
+        }
+
+        for (int i = 0; i < nodes.size(); i++) {
+            assertTrue(nodes.get(i).getCount() > 0,
+                    "Node " + i + " should have been contacted under fallback (got "
+                            + nodes.get(i).getCount() + ")");
+        }
+    }
+
+    @Test
+    void healthTracker_updatedOnRequestOutcome() throws Exception {
+        // Disable node 0 so its uploads fail; healthy nodes record successes.
+        nodes.get(0).setEnabled(false);
+
+        byte[] data = randomBytes(DATA_SIZE);
+        // Even though node 0 fails, writeQuorum=7 is still met by the other 8.
+        assertTrue(worker.put(UUID.randomUUID(), "b", "trackOutcome",
+                data.length, new ByteArrayInputStream(data)));
+
+        InetSocketAddress dead = nodes.get(0).address();
+        assertNotNull(healthTracker.getHealth(dead),
+                "Failed node must be tracked after a put attempt");
+        // One put fans 503 to node 0 once → SUSPECT (still healthy=true)
+        assertEquals(NodeHealthTracker.NodeStatus.SUSPECT, healthTracker.getHealth(dead).status());
+
+        // A second put produces another failure → DOWN (default threshold = 2).
+        assertTrue(worker.put(UUID.randomUUID(), "b", "trackOutcome2",
+                data.length, new ByteArrayInputStream(data)));
+        assertEquals(NodeHealthTracker.NodeStatus.DOWN, healthTracker.getHealth(dead).status());
+
+        // Healthy nodes should be recorded as HEALTHY.
+        for (int i = 1; i < nodes.size(); i++) {
+            InetSocketAddress addr = nodes.get(i).address();
+            assertNotNull(healthTracker.getHealth(addr),
+                    "Healthy node " + i + " should be tracked");
+            assertEquals(NodeHealthTracker.NodeStatus.HEALTHY,
+                    healthTracker.getHealth(addr).status(),
+                    "Healthy node " + i + " should be HEALTHY");
         }
     }
 

@@ -122,6 +122,42 @@ class S3Test {
         assertTrue(port > 0, "App should have started on a valid port");
     }
 
+    @Test
+    @Order(1)
+    void healthEndpoint_includesNodeStatus() throws Exception {
+        // Spin up a separate app instance with a tracker pre-populated so we can
+        // verify the /health body includes the storage-node summary line.
+        com.github.koop.queryprocessor.processor.NodeHealthTracker tracker =
+                new com.github.koop.queryprocessor.processor.NodeHealthTracker();
+        java.net.InetSocketAddress healthyNode = new java.net.InetSocketAddress("10.0.0.1", 8080);
+        java.net.InetSocketAddress suspectNode = new java.net.InetSocketAddress("10.0.0.2", 8080);
+        java.net.InetSocketAddress downNode    = new java.net.InetSocketAddress("10.0.0.3", 8080);
+        tracker.recordSuccess(healthyNode);
+        tracker.recordFailure(suspectNode);                           // SUSPECT
+        tracker.recordFailure(downNode); tracker.recordFailure(downNode); // DOWN
+
+        Javalin healthApp = Main.createApp(mockStorage, tracker).start(0);
+        try {
+            int healthPort = healthApp.port();
+            java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
+            java.net.http.HttpResponse<String> resp = http.send(
+                    java.net.http.HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:" + healthPort + "/health"))
+                            .GET().build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(200, resp.statusCode());
+            String body = resp.body();
+            assertTrue(body.contains("API Gateway is healthy!"),
+                    "Body should include the gateway-health prefix: " + body);
+            assertTrue(body.contains("1 healthy"), "Expected '1 healthy' in: " + body);
+            assertTrue(body.contains("1 suspect"), "Expected '1 suspect' in: " + body);
+            assertTrue(body.contains("1 down"),    "Expected '1 down' in: "    + body);
+        } finally {
+            healthApp.stop();
+        }
+    }
+
     // ===================== PUT OBJECT =====================
 
     @Test
