@@ -23,7 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import com.github.koop.common.metadata.*;
-import com.github.koop.storagenode.db.RocksDbStorageStrategy;
+import com.github.koop.storagenode.db.*;
 import com.github.koop.storagenode.gc.ActiveReadTracker;
 import com.github.koop.storagenode.gc.BlobDeletionWorker;
 import com.github.koop.storagenode.gc.GarbageCollectorWorker;
@@ -36,9 +36,6 @@ import com.github.koop.common.erasure.ErasureCoder;
 import com.github.koop.common.messages.Message;
 import com.github.koop.common.pubsub.CommitTopics;
 import com.github.koop.common.pubsub.PubSubClient;
-import com.github.koop.storagenode.db.Database;
-import com.github.koop.storagenode.db.Metadata;
-import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -652,9 +649,22 @@ public class StorageNodeServerV2 {
 
     private void handleHeadBucket(Context ctx) {
         try {
-            String bucket = ctx.pathParam("bucket");
-            boolean exists = storageNode.bucketExists(bucket);
-            ctx.status(exists ? 200 : 404);
+            String bucketName = ctx.pathParam("bucket");
+            Optional<Bucket> bucketOpt = storageNode.getBucket(bucketName);
+
+            if (bucketOpt.isPresent()) {
+                Bucket bucket = bucketOpt.get();
+                // Attach the sequence number so StorageWorker can resolve tie-breakers
+                ctx.header("X-Bucket-Version", String.valueOf(bucket.sequenceNumber()));
+
+                if (bucket.deleted()) {
+                    ctx.status(410); // Explicitly tombstoned
+                } else {
+                    ctx.status(200); // Active
+                }
+            } else {
+                ctx.status(404); // Never existed
+            }
         } catch (Exception e) {
             logger.error("Error handling HEAD /bucket", e);
             ctx.status(500);

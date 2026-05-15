@@ -652,13 +652,11 @@ public final class StorageWorker {
 
     /**
      * Checks whether a bucket exists by querying all nodes in the partition's
-     * erasure set concurrently. Returns {@code true} if any node returns 200
-     * (bucket exists), {@code false} only if every node returns 404 or fails.
-     *
-     * <p>
-     * This prevents false negatives when a node is stale or partitioned:
-     * even a single node reporting the bucket exists is sufficient.
+     * erasure set concurrently. Uses a version-based tie-breaker (highest version wins)
+     * to resolve read-after-write consistency issues when nodes process deletes asynchronously.
      */
+    // Helper record to hold the parsed HEAD response
+    private record NodeResponse(int status, long version) {}
     public boolean bucketExists(String bucket) {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
@@ -675,50 +673,78 @@ public final class StorageWorker {
         // DOWN nodes are skipped unconditionally. If every node is DOWN, return false.
         Set<InetSocketAddress> healthyForHead = healthTracker.getHealthyNodes(nodes);
 
-        List<Callable<Boolean>> tasks = new ArrayList<>();
+        List<Callable<NodeResponse>> tasks = new ArrayList<>();
         for (InetSocketAddress node : nodes) {
             tasks.add(() -> {
                 if (!healthyForHead.contains(node)) {
                     logger.trace("HEAD bucket {} → node {} skipped (marked DOWN)", bucket, node);
-                    return false;
+                    return new NodeResponse(-1, -1);
                 }
+
                 URI uri = URI.create(String.format("http://%s:%d/bucket/%s",
                         node.getHostString(), node.getPort(),
                         URLEncoder.encode(bucket, java.nio.charset.StandardCharsets.UTF_8)));
+
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(uri)
                         .method("HEAD", HttpRequest.BodyPublishers.noBody())
                         .build();
+
                 try {
                     HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
-                    int status = resp.statusCode();
-                    // Any HTTP response means the node is reachable.
                     healthTracker.recordSuccess(node);
-                    if (status == 200)
-                        return true;
-                    if (status == 404) {
-                        logger.trace("HEAD bucket {} → node {} HTTP 404, trying next", bucket, node);
-                        return false;
+
+                    int status = resp.statusCode();
+                    long version = 0;
+
+                    // Parse the version header populated by StorageNodeServerV2
+                    var versionHeader = resp.headers().firstValue("X-Bucket-Version");
+                    if (versionHeader.isPresent()) {
+                        try {
+                            version = Long.parseLong(versionHeader.get());
+                        } catch (NumberFormatException e) {
+                            logger.warn("Invalid version header from node {}", node);
+                        }
                     }
-                    logger.trace("HEAD bucket {} → node {} HTTP {}, trying next", bucket, node, status);
+
+                    logger.trace("HEAD bucket {} → node {} HTTP {} version {}", bucket, node, status, version);
+                    return new NodeResponse(status, version);
+
                 } catch (Exception e) {
                     healthTracker.recordFailure(node);
                     logger.trace("HEAD bucket {} → node {} failed: {}", bucket, node, e.getMessage());
+                    return new NodeResponse(-1, -1);
                 }
-                return false;
             });
         }
 
         try {
-            // Return true if ANY node reports the bucket exists
-            return executor.invokeAll(tasks).stream().anyMatch(f -> {
+            long highestVersion = -1;
+            int statusAtHighestVersion = 404; // Default to not found
+
+            for (var f : executor.invokeAll(tasks)) {
                 try {
-                    return f.get();
-                } catch (InterruptedException | ExecutionException e) {
+                    NodeResponse response = f.get();
+                    if (response.status() == -1) continue; // Skip failed requests
+
+                    // The highest version represents the most recent state
+                    if (response.version() > highestVersion) {
+                        highestVersion = response.version();
+                        statusAtHighestVersion = response.status();
+                    }
+                    // Tie-breaker: if versions match exactly, prefer 200 (Active) over 410 (Tombstone)
+                    else if (response.version() == highestVersion && response.status() == 200) {
+                        statusAtHighestVersion = 200;
+                    }
+
+                } catch (ExecutionException e) {
                     logger.trace("bucketExists task error: {}", e.getMessage());
-                    return false;
                 }
-            });
+            }
+
+            // The bucket logically exists ONLY if the highest known version is HTTP 200
+            return statusAtHighestVersion == 200;
+
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
