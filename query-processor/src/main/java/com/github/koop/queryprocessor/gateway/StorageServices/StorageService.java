@@ -21,6 +21,9 @@ public interface StorageService {
      */
     record GetObjectResult(InputStream data, long size) {}
 
+    /** Metadata-only response for S3 HEAD object. */
+    record HeadObjectResult(long size, String lastModified) {}
+
     /**
      * Uploads an object to the specified bucket.
      *
@@ -42,6 +45,12 @@ public interface StorageService {
      * @throws Exception If an unexpected system or network error occurs during retrieval.
      */
     GetObjectResult getObject(String bucket, String key) throws Exception;
+
+    /**
+     * Checks for an object's existence and returns its size, without downloading
+     * the body. Returns {@code null} when the key is missing or tombstoned.
+     */
+    HeadObjectResult headObject(String bucket, String key) throws Exception;
 
     /**
      * Logically deletes (tombstones) an object.

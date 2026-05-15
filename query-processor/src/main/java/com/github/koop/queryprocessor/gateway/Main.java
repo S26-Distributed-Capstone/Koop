@@ -202,20 +202,17 @@ public class Main {
         String bucket = ctx.pathParam("bucket");
         String key = ctx.pathParam("key");
         try {
-            List<ObjectSummary> objects = storage.listObjects(bucket, key, 5);
-            var match = objects.stream().filter(o -> o.key().equals(key)).findFirst();
-
-            if (match.isPresent()) {
-                ctx.status(200);
-                ctx.header("Content-Type", "application/octet-stream");
-                ctx.header("Content-Length", String.valueOf(match.get().size()));
-
-                String lastMod = match.get().lastModified();
-                ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
-                ctx.header("ETag", UUID.randomUUID().toString().replace("-", ""));
-            } else {
+            StorageService.HeadObjectResult head = storage.headObject(bucket, key);
+            if (head == null) {
                 ctx.status(404);
+                return;
             }
+            ctx.status(200);
+            ctx.header("Content-Type", "application/octet-stream");
+            ctx.header("Content-Length", String.valueOf(head.size()));
+            String lastMod = head.lastModified();
+            ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
+            ctx.header("ETag", UUID.randomUUID().toString().replace("-", ""));
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
         } catch (Exception e) {

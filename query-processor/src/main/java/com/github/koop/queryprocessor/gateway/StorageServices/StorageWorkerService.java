@@ -69,6 +69,15 @@ public class StorageWorkerService implements StorageService {
         return new GetObjectResult(result.stream(), result.size());
     }
 
+    @Override
+    public HeadObjectResult headObject(String bucket, String key) throws Exception {
+        StorageWorker.HeadResult result = storageWorker.head(bucket, key);
+        if (result == null) {
+            return null;
+        }
+        return new HeadObjectResult(result.size(), "1970-01-01T00:00:00.000Z");
+    }
+
     /**
      * Generates a request ID and delegates the tombstone operation to the StorageWorker.
      *

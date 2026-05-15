@@ -428,6 +428,44 @@ public class StorageNodeServerV2 {
         }
     }
 
+    private void handleHeadObject(Context ctx) {
+        try {
+            String bucket = ctx.pathParam("bucket");
+            String key = ctx.pathParam("key");
+            String fullKey = bucket + "/" + key;
+
+            Optional<Metadata> metaOpt = db.getItem(fullKey);
+            if (metaOpt.isEmpty() || metaOpt.get().versions().isEmpty()) {
+                ctx.status(404);
+                return;
+            }
+
+            FileVersion latest = metaOpt.get().versions().get(metaOpt.get().versions().size() - 1);
+            String typeHeader;
+            long logicalSize = -1;
+
+            if (latest instanceof RegularFileVersion r) {
+                typeHeader = "BLOB";
+                logicalSize = r.size();
+            } else if (latest instanceof MultipartFileVersion m) {
+                typeHeader = "MULTIPART";
+                logicalSize = m.size();
+            } else {
+                typeHeader = "TOMBSTONE";
+            }
+
+            ctx.header("X-Koop-Version", String.valueOf(latest.sequenceNumber()));
+            ctx.header("X-Koop-Type", typeHeader);
+            if (logicalSize >= 0) {
+                ctx.header("X-Koop-Size", String.valueOf(logicalSize));
+            }
+            ctx.status(200);
+        } catch (Exception e) {
+            logger.error("Error handling HEAD object", e);
+            ctx.status(500);
+        }
+    }
+
     public void processSequencerMessage(int partition, Message message, long seqNumber) {
         try {
             String requestId = null;
@@ -742,6 +780,7 @@ public class StorageNodeServerV2 {
             config.http.maxRequestSize = 100_000_000L;
             config.routes.put("/store/{partition}/{bucket}/<key>", this::handlePut);
             config.routes.get("/store/{partition}/{bucket}/<key>", this::handleGet);
+            config.routes.head("/store/{partition}/{bucket}/<key>", this::handleHeadObject);
 
             config.routes.head("/bucket/{bucket}", this::handleHeadBucket);
             config.routes.get("/bucket/{bucket}", this::handleListObjects);
