@@ -19,9 +19,9 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class)
-class KafkaPubSubTest {
+class KafakPubSubIT {
 
-    private static final Logger log = LogManager.getLogger(KafkaPubSubTest.class);
+    private static final Logger log = LogManager.getLogger(KafakPubSubIT.class);
 
     private ConfluentKafkaContainer kafka;
 
