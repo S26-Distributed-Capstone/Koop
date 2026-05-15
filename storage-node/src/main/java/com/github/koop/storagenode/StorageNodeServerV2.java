@@ -723,11 +723,11 @@ public class StorageNodeServerV2 {
                 return;
             }
 
-            if (!storageNode.bucketExists(bucket)) {
-                ctx.status(404);
-                return;
-            }
-
+            // Don't check bucketExists here: bucket metadata lives on the single partition
+            // the bucket name hashes to, while object metadata is distributed across every
+            // partition. A node serving this listing usually owns object partitions that
+            // are NOT the bucket's metadata partition, so the local check would 404 even
+            // though objects exist. Bucket existence is enforced at the gateway.
             String scanPrefix = bucket + "/";
             if (prefix != null && !prefix.isEmpty()) {
                 scanPrefix = bucket + "/" + prefix;

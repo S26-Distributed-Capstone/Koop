@@ -555,6 +555,7 @@ class S3Test {
     @Test
     @Order(23)
     void sdkListObjects_emptyBucket_returnsZeroContents() throws Exception {
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(List.of());
 
@@ -574,6 +575,7 @@ class S3Test {
                 new ObjectSummary("file-a.txt", 100L, "2025-01-01T00:00:00Z"),
                 new ObjectSummary("file-b.txt", 200L, "2025-01-02T00:00:00Z")
         );
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(summaries);
 
@@ -589,6 +591,7 @@ class S3Test {
     @Test
     @Order(25)
     void sdkListObjects_passesPrefix_toStorageService() throws Exception {
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), eq("logs/"), anyInt()))
                 .thenReturn(List.of());
 
@@ -608,6 +611,7 @@ class S3Test {
         List<ObjectSummary> summaries = List.of(
                 new ObjectSummary("photo.jpg", 100L, "2025-01-01T00:00:00Z")
         );
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(summaries);
 
@@ -629,6 +633,7 @@ class S3Test {
         List<ObjectSummary> summaries = List.of(
                 new ObjectSummary("a&b<c.txt", 50L, "2025-01-01T00:00:00Z")
         );
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(summaries);
 
@@ -648,6 +653,7 @@ class S3Test {
     void sdkListObjects_maxKeysReflectedInResponse() throws Exception {
         // The XML builder hardcodes <MaxKeys>1000</MaxKeys> regardless of the
         // client's max-keys query parameter. The SDK should see the requested value.
+        when(mockStorage.bucketExists(BUCKET)).thenReturn(true);
         when(mockStorage.listObjects(eq(BUCKET), anyString(), anyInt()))
                 .thenReturn(List.of());
 
@@ -660,6 +666,23 @@ class S3Test {
 
         assertEquals(5, response.maxKeys(),
                 "MaxKeys in response should reflect the client's requested value, not hardcoded 1000");
+    }
+
+    @Test
+    @Order(284)
+    void sdkListObjects_bucketMissing_throwsNoSuchBucketException() throws Exception {
+        // The storage node deliberately does NOT 404 on a missing bucket during listing
+        // (bucket metadata only lives on the bucket's hash-partition, so most SNs would
+        // spuriously 404 even when the bucket exists). The gateway is the single layer
+        // that enforces NoSuchBucket semantics.
+        when(mockStorage.bucketExists("ghost-bucket")).thenReturn(false);
+
+        NoSuchBucketException ex = assertThrows(NoSuchBucketException.class, () ->
+                s3.listObjectsV2(ListObjectsV2Request.builder().bucket("ghost-bucket").build())
+        );
+
+        assertEquals(404, ex.statusCode());
+        verify(mockStorage, never()).listObjects(anyString(), anyString(), anyInt());
     }
 
     // ===================== MULTIPART UPLOAD =====================
