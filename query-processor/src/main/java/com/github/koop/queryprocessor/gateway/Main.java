@@ -202,15 +202,14 @@ public class Main {
         try {
             List<ObjectSummary> objects = storage.listObjects(bucket, key, 5);
             var match = objects.stream().filter(o -> o.key().equals(key)).findFirst();
-
             if (match.isPresent()) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
                 ctx.header("Content-Length", String.valueOf(match.get().size()));
-
                 String lastMod = match.get().lastModified();
                 ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
-                ctx.header("ETag", "\"dummy-etag-12345\"");
+                String randomEtag = java.util.UUID.randomUUID().toString().replace("-", "");
+                ctx.header("ETag", " \"" + randomEtag + "\"");
             } else {
                 ctx.status(404);
             }
