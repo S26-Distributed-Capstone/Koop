@@ -72,7 +72,7 @@ services:
       ETCD_URL: "http://etcd-0:2379"
       KAFKA_BOOTSTRAP_SERVERS: "kafka-0:9092,kafka-1:9092,kafka-2:9092"
       NODE_IP: "storage-node-set1-0"
-    depends_on: [etcd-0, kafka-0]
+    depends_on: [etcd-0, kafka-0, kafka-1, kafka-2]
   storage-node-set1-1: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-1" } }
   storage-node-set1-2: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-2" } }
   storage-node-set1-3: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-3" } }
@@ -127,6 +127,9 @@ services:
     depends_on:
       - etcd-seeder
       - storage-node-set1-0
+      - kafka-0
+      - kafka-1
+      - kafka-2
   query-processor-2:
     <<: *qp_base
     ports: ["9002:8080"]

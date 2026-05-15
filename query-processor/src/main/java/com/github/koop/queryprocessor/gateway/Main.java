@@ -165,6 +165,13 @@ public class Main {
         }
 
         try {
+            if (!storage.bucketExists(bucket)) {
+                ctx.status(404);
+                ctx.header("Content-Type", "application/xml");
+                ctx.result(buildS3ErrorXml("NoSuchBucket",
+                        "The specified bucket does not exist.", "/" + bucket));
+                return;
+            }
             List<ObjectSummary> objects = storage.listObjects(bucket, prefix, maxKeys);
             ctx.status(200);
             ctx.header("Content-Type", "application/xml");

@@ -585,6 +585,40 @@ class StorageNodeServerV2Test {
     }
 
     @Test
+    void testListObjects_succeedsWhenBucketMetadataLivesOnAnotherPartition() throws Exception {
+        // The bucket-creation message is published only to the partition that the bucket
+        // name hashes to. A storage node that owns a different partition (which still
+        // owns *objects* in that bucket) never sees CreateBucketMessage and so has no
+        // local record of the bucket. handleListObjects must NOT 404 in that case —
+        // otherwise listing fans out across partitions but only returns objects from the
+        // single SN that happens to own the bucket's metadata partition.
+        int objectPartition = 17;
+        String bucket = "cross-partition-bucket";
+        String key = "only-object.txt";
+        String fullKey = bucket + "/" + key;
+
+        // Note: NO CreateBucketMessage is processed. Only an object commit on this
+        // partition. This simulates an SN that owns an object partition but not the
+        // bucket's metadata partition.
+        http.send(HttpRequest.newBuilder()
+                        .uri(storeUriWithReq(objectPartition, fullKey, "req-xp-1"))
+                        .PUT(HttpRequest.BodyPublishers.ofString("data")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        server.processSequencerMessage(objectPartition,
+                new Message.FileCommitMessage(bucket, key, "req-xp-1", getDummySender(), 1024L), 1300L);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(bucketUri(bucket))
+                .GET()
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode(),
+                "Listing must succeed even when this SN never saw the CreateBucketMessage");
+        assertTrue(resp.body().contains(fullKey),
+                "Listing should return the object stored on this partition, body=" + resp.body());
+    }
+
+    @Test
     void testListObjects_excludesDeletedObjects() throws Exception {
         int partition = 16;
         String bucket = "tombstone-list-bucket";
