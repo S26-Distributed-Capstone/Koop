@@ -67,6 +67,7 @@ public final class StorageWorker {
     private final MetadataClient metadataClient;
     private final CommitCoordinator commitCoordinator;
     private final NodeHealthTracker healthTracker;
+    private final ErasureCoder erasureCoder;
     private final AtomicReference<ErasureRouting> routing = new AtomicReference<>();
 
     // Wrapper record to return both the stream and its exact byte size
@@ -94,6 +95,7 @@ public final class StorageWorker {
         this.metadataClient = metadataClient;
         this.commitCoordinator = commitCoordinator;
         this.healthTracker = healthTracker != null ? healthTracker : new NodeHealthTracker();
+        this.erasureCoder = new ErasureCoder();
         registerListeners();
         tryRebuildRouting();
     }
@@ -155,7 +157,7 @@ public final class StorageWorker {
         }
 
         // Phase 1 – stream erasure-coded shards to all storage nodes concurrently.
-        InputStream[] shardStreams = ErasureCoder.shard(data, length, m, n);
+        InputStream[] shardStreams = erasureCoder.shard(data, length, m, n);
 
         List<InflightTransfer> inflight = new ArrayList<>();
         List<CompletableFuture<Boolean>> results = new ArrayList<>();
@@ -528,7 +530,7 @@ public final class StorageWorker {
             }
         }
 
-        try (InputStream reconstructed = ErasureCoder.reconstruct(ins, present, m, n)) {
+        try (InputStream reconstructed = erasureCoder.reconstruct(ins, present, m, n)) {
             byte[] buf = new byte[64 * 1024];
             int bytesRead;
             while ((bytesRead = reconstructed.read(buf)) != -1) {
@@ -908,6 +910,7 @@ public final class StorageWorker {
 
     public void shutdown() {
         executor.shutdownNow();
+        erasureCoder.shutdown();
         commitCoordinator.close();
     }
 

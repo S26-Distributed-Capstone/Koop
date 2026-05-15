@@ -243,9 +243,10 @@ class StorageNodeRepairTest {
         byte[] originalData = "Testing actual blob repair with erasure coding across nodes.".getBytes(StandardCharsets.UTF_8);
         int k = 2;
         int n = 3;
+        ErasureCoder coder = new ErasureCoder();
         InputStream[] shards;
         try (var bais = new java.io.ByteArrayInputStream(originalData)) {
-            shards = ErasureCoder.shard(bais, originalData.length, k, n);
+            shards = coder.shard(bais, originalData.length, k, n);
         }
         byte[] shard0 = shards[0].readAllBytes();
         byte[] shard1 = shards[1].readAllBytes();
@@ -331,6 +332,7 @@ class StorageNodeRepairTest {
         } finally {
             peer1.stop();
             peer2.stop();
+            coder.shutdown();
         }
     }
 }

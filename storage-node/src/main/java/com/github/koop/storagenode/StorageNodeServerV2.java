@@ -55,6 +55,7 @@ public class StorageNodeServerV2 {
     private final GossipService gossipService;
     private final GarbageCollectorWorker gcWorker;
     private final BlobDeletionWorker blobDeletionWorker;
+    private final ErasureCoder erasureCoder;
 
     /** Eviction window: peers silent for longer than this are excluded from the watermark. */
     static final long GOSSIP_STALE_AFTER_MS = 30_000L;
@@ -103,6 +104,7 @@ public class StorageNodeServerV2 {
         this.gcWorker = new GarbageCollectorWorker(db, watermarks,
                 ignored -> snapshotSubscribedPartitions(), GOSSIP_STALE_AFTER_MS, GC_INTERVAL_MS);
         this.blobDeletionWorker = new BlobDeletionWorker(db, dir, BLOB_DELETION_INTERVAL_MS);
+        this.erasureCoder = new ErasureCoder();
     }
 
     public static void main(String[] args) {
@@ -546,10 +548,10 @@ public class StorageNodeServerV2 {
                 return;
             }
 
-            try (InputStream reconstructed = ErasureCoder.reconstruct(shardStreams, present, m, n)) {
+            try (InputStream reconstructed = erasureCoder.reconstruct(shardStreams, present, m, n)) {
                 byte[] fullData = reconstructed.readAllBytes();
 
-                InputStream[] resharded = ErasureCoder.shard(
+                InputStream[] resharded = erasureCoder.shard(
                         new java.io.ByteArrayInputStream(fullData),
                         fullData.length, m, n);
 
@@ -788,6 +790,8 @@ public class StorageNodeServerV2 {
 
         partitionExecutors.values().forEach(ExecutorService::shutdownNow);
         partitionExecutors.clear();
+
+        erasureCoder.shutdown();
 
         logger.info("StorageNodeServerV2 stopped");
     }

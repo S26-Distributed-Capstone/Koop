@@ -6,7 +6,7 @@ import java.io.*;
 import java.util.Arrays;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -15,9 +15,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Stateless erasure coding utility using Reed-Solomon with configurable
+ * Erasure coding utility using Reed-Solomon with configurable
  * {@code m}-of-{@code n} shard layouts, where {@code m} is the number of
  * data shards and {@code k = n - m} parity shards are computed dynamically.
+ *
+ * <p>Each instance owns an {@link Executor} that drives the background
+ * producer/reconstructor tasks. Lifecycle is managed by the owner — call
+ * {@link #shutdown()} to terminate the underlying executor when the owner
+ * itself is shutting down.
  *
  * Sharding:
  * {@link #shard(InputStream, long, int, int)} splits a data stream into
@@ -38,9 +43,30 @@ public final class ErasureCoder {
 
     public static final int SHARD_SIZE = 1 << 20; // 1 MB per shard per stripe
     private static final Logger logger = LogManager.getLogger(ErasureCoder.class);
-    private static final Executor defaultExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
-    private ErasureCoder() {
+    private final Executor executor;
+
+    /** Creates an ErasureCoder backed by a fresh virtual-thread-per-task executor. */
+    public ErasureCoder() {
+        this(Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    /** Creates an ErasureCoder backed by the supplied executor. */
+    public ErasureCoder(Executor executor) {
+        if (executor == null)
+            throw new IllegalArgumentException("executor is null");
+        this.executor = executor;
+    }
+
+    /**
+     * Shuts down the underlying executor if it is an {@link ExecutorService}.
+     * Owners should call this when they are themselves shutting down so the
+     * coder's background threads do not outlive its owner.
+     */
+    public void shutdown() {
+        if (executor instanceof ExecutorService es) {
+            es.shutdownNow();
+        }
     }
 
     /**
@@ -193,7 +219,7 @@ public final class ErasureCoder {
     // Sharding
     // -------------------------------------------------------------------------
 
-public static InputStream[] shard(InputStream data, long length, int m, int n, Executor executor) throws IOException {
+    public InputStream[] shard(InputStream data, long length, int m, int n) throws IOException {
         if (data == null)
             throw new IllegalArgumentException("data is null");
         if (length < 0)
@@ -226,10 +252,10 @@ public static InputStream[] shard(InputStream data, long length, int m, int n, E
             try {
                 // Initialize the dead array before the prefix write loop
                 boolean[] dead = new boolean[n];
-                
+
                 byte[] lenBytes = new byte[8];
                 writeLong(lenBytes, length);
-                
+
                 // Wrap the prefix write in a try-catch to handle immediate connection drops
                 for (int i = 0; i < n; i++) {
                     try {
@@ -274,7 +300,7 @@ public static InputStream[] shard(InputStream data, long length, int m, int n, E
                         }
                     }
                 }
-                
+
                 // Flush only the pipes that haven't been marked dead
                 for (int i = 0; i < n; i++) {
                     if (!dead[i]) {
@@ -297,15 +323,11 @@ public static InputStream[] shard(InputStream data, long length, int m, int n, E
         return pis;
     }
 
-    public static InputStream[] shard(InputStream data, long length, int m, int n) throws IOException {
-        return shard(data, length, m, n, defaultExecutor);
-    }
-
     // -------------------------------------------------------------------------
     // Reconstruction
     // -------------------------------------------------------------------------
 
-    public static InputStream reconstruct(InputStream[] shards, boolean[] present, int m, int n) throws IOException {
+    public InputStream reconstruct(InputStream[] shards, boolean[] present, int m, int n) throws IOException {
         if (shards == null || shards.length != n)
             throw new IllegalArgumentException("shards must have length " + n);
         if (present == null || present.length != n)
@@ -331,7 +353,7 @@ public static InputStream[] shard(InputStream data, long length, int m, int n, E
 
         final boolean[] pres = Arrays.copyOf(present, n);
 
-        Thread.startVirtualThread(() -> {
+        executor.execute(() -> {
             try {
                 int first = -1;
                 for (int i = 0; i < n; i++)
