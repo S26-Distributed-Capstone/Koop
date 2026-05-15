@@ -309,6 +309,14 @@ public class Database implements AutoCloseable {
     }
 
     // -------------------------------------------------------------------------
+    // GET BUCKET — return raw bucket row (including tombstones)
+    // -------------------------------------------------------------------------
+
+    public Optional<Bucket> getBucket(String bucketKey) throws Exception {
+        return strategy.getBucket(bucketKey);
+    }
+
+    // -------------------------------------------------------------------------
     // LIST ITEMS IN BUCKET — prefix scan on metadata table
     // -------------------------------------------------------------------------
 

@@ -11,15 +11,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+import com.github.koop.storagenode.db.*;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import com.github.koop.storagenode.db.Database;
-import com.github.koop.storagenode.db.FileVersion;
-import com.github.koop.storagenode.db.Metadata;
-import com.github.koop.storagenode.db.MultipartFileVersion;
-import com.github.koop.storagenode.db.RegularFileVersion;
-import com.github.koop.storagenode.db.TombstoneFileVersion;
 
 /**
  * StorageNodeV2 is an enhanced version of StorageNode that integrates with a
@@ -299,6 +293,14 @@ public class StorageNodeV2 {
      */
     protected boolean bucketExists(String bucketKey) throws Exception {
         return db.bucketExists(bucketKey);
+    }
+
+    /**
+     * Retrieves the raw Bucket metadata, which includes its sequence number
+     * and whether it has been tombstoned (deleted).
+     */
+    protected Optional<Bucket> getBucket(String bucketKey) throws Exception {
+        return db.getBucket(bucketKey);
     }
 
     /**
