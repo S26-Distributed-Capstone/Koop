@@ -3,7 +3,6 @@ package com.github.koop.common.erasure;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -32,44 +31,49 @@ public class ErasureCoderTest {
         byte[] original = new byte[size];
         new Random(42).nextBytes(original);
 
-        InputStream[] shards = ErasureCoder.shard(new ByteArrayInputStream(original), size, k, n);
-        byte[][] shardedData = new byte[n][];
+        ErasureCoder coder = new ErasureCoder();
+        try {
+            InputStream[] shards = coder.shard(new ByteArrayInputStream(original), size, k, n);
+            byte[][] shardedData = new byte[n][];
 
-        // Drain streams concurrently. Reading sequentially would result in a deadlock
-        // when the pipe buffers fill up before the encoder completes.
-        ExecutorService exec = Executors.newFixedThreadPool(n);
-        List<Future<?>> futures = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            final int idx = i;
-            futures.add(exec.submit(() -> {
-                shardedData[idx] = shards[idx].readAllBytes();
-                return null;
-            }));
-        }
-
-        // Wait for all shard streams to finish
-        for (Future<?> f : futures) {
-            f.get();
-        }
-        exec.shutdown();
-
-        // Simulate missing shards (1 data, 1 parity)
-        boolean[] present = new boolean[n];
-        Arrays.fill(present, true);
-        present[1] = false;
-        present[5] = false;
-
-        InputStream[] reconstructInputs = new InputStream[n];
-        for (int i = 0; i < n; i++) {
-            if (present[i]) {
-                reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+            // Drain streams concurrently. Reading sequentially would result in a deadlock
+            // when the pipe buffers fill up before the encoder completes.
+            ExecutorService exec = Executors.newFixedThreadPool(n);
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                final int idx = i;
+                futures.add(exec.submit(() -> {
+                    shardedData[idx] = shards[idx].readAllBytes();
+                    return null;
+                }));
             }
+
+            // Wait for all shard streams to finish
+            for (Future<?> f : futures) {
+                f.get();
+            }
+            exec.shutdown();
+
+            // Simulate missing shards (1 data, 1 parity)
+            boolean[] present = new boolean[n];
+            Arrays.fill(present, true);
+            present[1] = false;
+            present[5] = false;
+
+            InputStream[] reconstructInputs = new InputStream[n];
+            for (int i = 0; i < n; i++) {
+                if (present[i]) {
+                    reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+                }
+            }
+
+            InputStream reconstructedStream = coder.reconstruct(reconstructInputs, present, k, n);
+            byte[] reconstructed = reconstructedStream.readAllBytes();
+
+            assertArrayEquals(original, reconstructed, "Reconstructed large data payload does not match the original byte array.");
+        } finally {
+            coder.shutdown();
         }
-
-        InputStream reconstructedStream = ErasureCoder.reconstruct(reconstructInputs, present, k, n);
-        byte[] reconstructed = reconstructedStream.readAllBytes();
-
-        assertArrayEquals(original, reconstructed, "Reconstructed large data payload does not match the original byte array.");
     }
 
     /**
@@ -85,44 +89,49 @@ public class ErasureCoderTest {
         byte[] original = new byte[size];
         new Random(100).nextBytes(original);
 
-        InputStream[] shards = ErasureCoder.shard(new ByteArrayInputStream(original), size, k, n);
-        byte[][] shardedData = new byte[n][];
+        ErasureCoder coder = new ErasureCoder();
+        try {
+            InputStream[] shards = coder.shard(new ByteArrayInputStream(original), size, k, n);
+            byte[][] shardedData = new byte[n][];
 
-        ExecutorService exec = Executors.newFixedThreadPool(n);
-        List<Future<?>> futures = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            final int idx = i;
-            futures.add(exec.submit(() -> {
-                if (idx == 0 || idx == 4) {
-                    // Simulate a network failure or downed node by closing the pipe early
-                    shards[idx].close();
-                    shardedData[idx] = null;
-                } else {
-                    shardedData[idx] = shards[idx].readAllBytes();
-                }
-                return null;
-            }));
-        }
-
-        for (Future<?> f : futures) {
-            f.get();
-        }
-        exec.shutdown();
-
-        // Attempt reconstruction with the surviving streams (1, 2, 3)
-        boolean[] present = new boolean[n];
-        InputStream[] reconstructInputs = new InputStream[n];
-        for (int i = 0; i < n; i++) {
-            if (shardedData[i] != null) {
-                present[i] = true;
-                reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+            ExecutorService exec = Executors.newFixedThreadPool(n);
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                final int idx = i;
+                futures.add(exec.submit(() -> {
+                    if (idx == 0 || idx == 4) {
+                        // Simulate a network failure or downed node by closing the pipe early
+                        shards[idx].close();
+                        shardedData[idx] = null;
+                    } else {
+                        shardedData[idx] = shards[idx].readAllBytes();
+                    }
+                    return null;
+                }));
             }
+
+            for (Future<?> f : futures) {
+                f.get();
+            }
+            exec.shutdown();
+
+            // Attempt reconstruction with the surviving streams (1, 2, 3)
+            boolean[] present = new boolean[n];
+            InputStream[] reconstructInputs = new InputStream[n];
+            for (int i = 0; i < n; i++) {
+                if (shardedData[i] != null) {
+                    present[i] = true;
+                    reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+                }
+            }
+
+            InputStream reconstructedStream = coder.reconstruct(reconstructInputs, present, k, n);
+            byte[] reconstructed = reconstructedStream.readAllBytes();
+
+            assertArrayEquals(original, reconstructed, "Data failed to reconstruct after output streams were interrupted during encode.");
+        } finally {
+            coder.shutdown();
         }
-
-        InputStream reconstructedStream = ErasureCoder.reconstruct(reconstructInputs, present, k, n);
-        byte[] reconstructed = reconstructedStream.readAllBytes();
-
-        assertArrayEquals(original, reconstructed, "Data failed to reconstruct after output streams were interrupted during encode.");
     }
 
     @Test
@@ -132,42 +141,48 @@ public class ErasureCoderTest {
         int size = 200 * 1024 * 1024; // 200 MB
         byte[] original = new byte[size];
         new Random(100).nextBytes(original);
-        InputStream[] shards = ErasureCoder.shard(new ByteArrayInputStream(original), size, k, n);
-        byte[][] shardedData = new byte[n][];
 
-        ExecutorService exec = Executors.newFixedThreadPool(n);
-        List<Future<?>> futures = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            final int idx = i;
-            futures.add(exec.submit(() -> {
-                shardedData[idx] = shards[idx].readAllBytes();
-                return null;
-            }));
+        ErasureCoder coder = new ErasureCoder();
+        try {
+            InputStream[] shards = coder.shard(new ByteArrayInputStream(original), size, k, n);
+            byte[][] shardedData = new byte[n][];
+
+            ExecutorService exec = Executors.newFixedThreadPool(n);
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                final int idx = i;
+                futures.add(exec.submit(() -> {
+                    shardedData[idx] = shards[idx].readAllBytes();
+                    return null;
+                }));
+            }
+
+            for (Future<?> f : futures) {
+                f.get();
+            }
+            exec.shutdown();
+
+            boolean[] present = new boolean[n];
+            Arrays.fill(present, true);
+
+            InputStream[] reconstructInputs = new InputStream[n];
+            for (int i = 0; i < n; i++) {
+                reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+            }
+
+            InputStream reconstructedStream = coder.reconstruct(reconstructInputs, present, k, n);
+            byte[] reconstructed = reconstructedStream.readAllBytes();
+
+            assertArrayEquals(original, reconstructed, "Reconstructed large data payload does not match the original byte array.");
+        } finally {
+            coder.shutdown();
         }
-
-        for (Future<?> f : futures) {
-            f.get();
-        }
-        exec.shutdown();
-
-        boolean[] present = new boolean[n];
-        Arrays.fill(present, true);
-
-        InputStream[] reconstructInputs = new InputStream[n];
-        for (int i = 0; i < n; i++) {
-            reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
-        }
-
-        InputStream reconstructedStream = ErasureCoder.reconstruct(reconstructInputs, present, k, n);
-        byte[] reconstructed = reconstructedStream.readAllBytes();
-
-        assertArrayEquals(original, reconstructed, "Reconstructed large data payload does not match the original byte array.");
     }
 
    /**
-     * Tests resilience against immediate pipe closures deterministically. 
-     * By injecting a capturing Executor, the test prevents the producer thread 
-     * from starting until after the main thread has explicitly closed the pipes, 
+     * Tests resilience against immediate pipe closures deterministically.
+     * By injecting a capturing Executor, the test prevents the producer thread
+     * from starting until after the main thread has explicitly closed the pipes,
      * guaranteeing the prefix-write failure path is exercised.
      */
     @Test
@@ -181,10 +196,11 @@ public class ErasureCoderTest {
         // 1. Create an executor that merely captures the task instead of running it
         AtomicReference<Runnable> producerTask = new AtomicReference<>();
         Executor capturingExecutor = producerTask::set;
+        ErasureCoder capturingCoder = new ErasureCoder(capturingExecutor);
 
         // 2. Call shard(). This creates the pipes, but the producer has NOT started.
-        InputStream[] shards = ErasureCoder.shard(new ByteArrayInputStream(original), size, m, n, capturingExecutor);
-        
+        InputStream[] shards = capturingCoder.shard(new ByteArrayInputStream(original), size, m, n);
+
         // 3. Deterministically close two shards to simulate instantaneous connection refused.
         shards[0].close();
         shards[1].close();
@@ -221,10 +237,14 @@ public class ErasureCoderTest {
             }
         }
 
-        // Note: If you also add Executor injection to reconstruct(), update this call accordingly.
-        InputStream reconstructedStream = ErasureCoder.reconstruct(reconstructInputs, present, m, n);
-        byte[] reconstructed = reconstructedStream.readAllBytes();
+        ErasureCoder reconstructCoder = new ErasureCoder();
+        try {
+            InputStream reconstructedStream = reconstructCoder.reconstruct(reconstructInputs, present, m, n);
+            byte[] reconstructed = reconstructedStream.readAllBytes();
 
-        assertArrayEquals(original, reconstructed, "Data failed to reconstruct after immediate pipe closures.");
+            assertArrayEquals(original, reconstructed, "Data failed to reconstruct after immediate pipe closures.");
+        } finally {
+            reconstructCoder.shutdown();
+        }
     }
 }
