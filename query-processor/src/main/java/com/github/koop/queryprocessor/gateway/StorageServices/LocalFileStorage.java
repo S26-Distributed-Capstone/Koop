@@ -42,6 +42,15 @@ public class LocalFileStorage implements StorageService {
     }
 
     @Override
+    public HeadObjectResult headObject(String bucket, String key) throws Exception {
+        Path filePath = rootDir.resolve(bucket).resolve(key);
+        if (Files.exists(filePath)) {
+            return new HeadObjectResult(Files.size(filePath), "1970-01-01T00:00:00.000Z");
+        }
+        return null;
+    }
+
+    @Override
     public StorageResult deleteObject(String bucket, String key) throws Exception {
         Path filePath = rootDir.resolve(bucket).resolve(key);
         Files.deleteIfExists(filePath);

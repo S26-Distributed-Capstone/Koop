@@ -74,6 +74,11 @@ public final class StorageWorker {
     public record RetrievedObject(InputStream stream, long size) {
     }
 
+    // Result of a HEAD: object exists with a known logical size. Returning null
+    // from head() signals "not found" (missing key or latest version is tombstone).
+    public record HeadResult(long size) {
+    }
+
     // Convenience constructor — creates a MemoryPubSub-backed CommitCoordinator
     // on an OS-assigned port. Useful when only a MetadataClient is available.
     public StorageWorker(MetadataClient metadataClient) {
@@ -330,6 +335,102 @@ public final class StorageWorker {
         // Return both the stream and the logical size extracted from the storage node
         // headers
         return new RetrievedObject(pis, representative.logicalSize());
+    }
+
+    /**
+     * Cheap metadata-only existence check. Routes the request to the single
+     * erasure set that owns this key (same as {@link #get}) and issues HTTP
+     * HEAD against the node replicas. Returns null when the key is missing
+     * or the latest version is a tombstone.
+     */
+    public HeadResult head(String bucket, String key) {
+        if (bucket == null) throw new IllegalArgumentException("bucket is null");
+        if (key == null) throw new IllegalArgumentException("key is null");
+
+        String storageKey = bucket + "/" + key;
+        ErasureRouting r = getRouting();
+        OptionalInt partition = r.getPartition(storageKey);
+        Optional<ErasureSetConfiguration.ErasureSet> esOpt = partition.isPresent()
+                ? r.getErasureSet(partition.getAsInt())
+                : Optional.empty();
+
+        if (partition.isEmpty() || esOpt.isEmpty()) {
+            logger.error("Routing failed for key {}, aborting head", storageKey);
+            return null;
+        }
+
+        int resolvedPartition = partition.getAsInt();
+        List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
+                .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
+
+        Set<InetSocketAddress> healthy = healthTracker.getHealthyNodes(nodes);
+
+        List<CompletableFuture<HeadShardResponse>> futures = new ArrayList<>();
+        for (InetSocketAddress node : nodes) {
+            if (!healthy.contains(node)) {
+                futures.add(CompletableFuture.completedFuture(null));
+                continue;
+            }
+            URI uri;
+            try {
+                uri = new URI("http", null, node.getHostString(), node.getPort(),
+                        "/store/" + resolvedPartition + "/" + storageKey, null, null);
+            } catch (URISyntaxException e) {
+                logger.error("Failed to build HEAD URI for node {}: {}", node, e.getMessage());
+                futures.add(CompletableFuture.completedFuture(null));
+                continue;
+            }
+            HttpRequest request = HttpRequest.newBuilder().uri(uri)
+                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                    .build();
+            futures.add(httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                    .handle((resp, ex) -> {
+                        if (ex != null) {
+                            healthTracker.recordFailure(node);
+                            return null;
+                        }
+                        if (resp.statusCode() == 200) {
+                            healthTracker.recordSuccess(node);
+                            long version = resp.headers().firstValueAsLong("X-Koop-Version").orElse(-1L);
+                            ShardType type = ShardType.fromHeader(resp.headers().firstValue("X-Koop-Type").orElse("BLOB"));
+                            long size = resp.headers().firstValueAsLong("X-Koop-Size").orElse(-1L);
+                            return new HeadShardResponse(version, type, size);
+                        }
+                        if (resp.statusCode() >= 500) {
+                            healthTracker.recordFailure(node);
+                        }
+                        return null;
+                    }));
+        }
+
+        List<HeadShardResponse> responses = new ArrayList<>();
+        for (CompletableFuture<HeadShardResponse> f : futures) {
+            try {
+                HeadShardResponse hr = f.get();
+                if (hr != null) responses.add(hr);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (ExecutionException e) {
+                logger.trace("HEAD shard fetch failed: {}", e.getMessage());
+            }
+        }
+
+        if (responses.isEmpty()) {
+            return null;
+        }
+
+        HeadShardResponse representative = responses.stream()
+                .max(Comparator.comparingLong(HeadShardResponse::version))
+                .orElseThrow();
+
+        if (representative.type() == ShardType.TOMBSTONE) {
+            return null;
+        }
+        return new HeadResult(representative.size());
+    }
+
+    private record HeadShardResponse(long version, ShardType type, long size) {
     }
 
     private void processGetConsensus(int partition, String storageKey, List<InetSocketAddress> nodes, int m, int n,
