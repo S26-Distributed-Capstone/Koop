@@ -132,6 +132,7 @@ public final class StorageWorker {
             throw new IllegalArgumentException("length < 0");
 
         String storageKey = bucket + "/" + key;
+        logger.trace("PUT begin: bucket={} key={} length={} requestId={}", bucket, key, length, requestID);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
@@ -139,7 +140,7 @@ public final class StorageWorker {
                 : Optional.empty();
 
         if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting put", storageKey);
+            logger.error("PUT error: routing failed for key {}, aborting", storageKey);
             return false;
         }
 
@@ -156,8 +157,8 @@ public final class StorageWorker {
         // write quorum, fail fast — no point starting the erasure-coding producer.
         Set<InetSocketAddress> healthyForWrite = healthTracker.getHealthyNodes(resolvedNodes);
         if (healthyForWrite.size() < writeQuorum) {
-            logger.error("Aborting put: only {} healthy nodes available, writeQuorum={}",
-                    healthyForWrite.size(), writeQuorum);
+            logger.error("PUT error: aborting key={}, only {} healthy nodes available, writeQuorum={}",
+                    storageKey, healthyForWrite.size(), writeQuorum);
             return false;
         }
 
@@ -240,7 +241,8 @@ public final class StorageWorker {
         }
 
         if (uploaded < writeQuorum) {
-            logger.error("Phase 1 failed: only {}/{} shards uploaded. Aborting commit.", uploaded, n);
+            logger.error("PUT error: phase 1 failed for bucket={} key={}, only {}/{} shards uploaded. Aborting commit.",
+                    bucket, key, uploaded, n);
             return false;
         }
 
@@ -250,7 +252,10 @@ public final class StorageWorker {
         boolean committed = commitCoordinator.beginCommit(requestID, resolvedPartition, bucket, key, length,
                 writeQuorum);
         if (!committed) {
-            logger.error("Commit phase failed for requestId {} (quorum ACKs not received)", requestID);
+            logger.error("PUT error: commit phase failed for bucket={} key={} requestId={} (quorum ACKs not received)",
+                    bucket, key, requestID);
+        } else {
+            logger.trace("PUT complete: bucket={} key={} requestId={}", bucket, key, requestID);
         }
         return committed;
     }
@@ -264,6 +269,7 @@ public final class StorageWorker {
             throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "/" + key;
+        logger.trace("GET begin: bucket={} key={} requestId={}", bucket, key, requestID);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = partition.isPresent()
@@ -271,7 +277,7 @@ public final class StorageWorker {
                 : Optional.empty();
 
         if (partition.isEmpty() || erasureSetOpt.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting get", storageKey);
+            logger.error("GET error: routing failed for bucket={} key={}, aborting", bucket, key);
             return null;
         }
 
@@ -289,7 +295,7 @@ public final class StorageWorker {
         List<ShardResponse> responses = fetchShards(resolvedPartition, storageKey, resolvedNodes, OptionalLong.empty());
 
         if (responses.isEmpty()) {
-            logger.debug("No shards found for key {} — object does not exist", storageKey);
+            logger.trace("GET not found: no shards for bucket={} key={}", bucket, key);
             return null;
         }
 
@@ -298,7 +304,7 @@ public final class StorageWorker {
         ShardResponse representative = maxVersionResponses.get(0);
 
         if (representative.type() == ShardType.TOMBSTONE) {
-            logger.debug("Latest version {} for key {} is a tombstone.", maxVersion, storageKey);
+            logger.trace("GET not found: bucket={} key={} latest version {} is a tombstone", bucket, key, maxVersion);
             return null;
         }
 
@@ -313,7 +319,7 @@ public final class StorageWorker {
                 try (pos) {
                     handleMultipartGet(representative.chunks(), m, pos);
                 } catch (Exception e) {
-                    logger.error("Failed to stream multipart data for key {}", storageKey, e);
+                    logger.error("GET error: failed to stream multipart data bucket={} key={}", bucket, key, e);
                 }
             });
         } else {
@@ -327,13 +333,15 @@ public final class StorageWorker {
                                 maxVersion, maxVersionResponses.size(), responses);
                     }
                 } catch (Exception e) {
-                    logger.error("Failed to reconstruct stream for key {}", storageKey, e);
+                    logger.error("GET error: failed to reconstruct stream bucket={} key={}", bucket, key, e);
                 }
             });
         }
 
         // Return both the stream and the logical size extracted from the storage node
         // headers
+        logger.trace("GET complete: bucket={} key={} version={} size={} requestId={}",
+                bucket, key, maxVersion, representative.logicalSize(), requestID);
         return new RetrievedObject(pis, representative.logicalSize());
     }
 
@@ -348,6 +356,7 @@ public final class StorageWorker {
         if (key == null) throw new IllegalArgumentException("key is null");
 
         String storageKey = bucket + "/" + key;
+        logger.trace("HEAD begin: bucket={} key={}", bucket, key);
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         Optional<ErasureSetConfiguration.ErasureSet> esOpt = partition.isPresent()
@@ -355,7 +364,7 @@ public final class StorageWorker {
                 : Optional.empty();
 
         if (partition.isEmpty() || esOpt.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting head", storageKey);
+            logger.error("HEAD error: routing failed for bucket={} key={}, aborting", bucket, key);
             return null;
         }
 
@@ -417,6 +426,7 @@ public final class StorageWorker {
         }
 
         if (responses.isEmpty()) {
+            logger.trace("HEAD not found: no shards for bucket={} key={}", bucket, key);
             return null;
         }
 
@@ -425,8 +435,12 @@ public final class StorageWorker {
                 .orElseThrow();
 
         if (representative.type() == ShardType.TOMBSTONE) {
+            logger.trace("HEAD not found: bucket={} key={} latest version {} is a tombstone",
+                    bucket, key, representative.version());
             return null;
         }
+        logger.trace("HEAD complete: bucket={} key={} version={} size={}",
+                bucket, key, representative.version(), representative.size());
         return new HeadResult(representative.size());
     }
 
@@ -675,9 +689,10 @@ public final class StorageWorker {
             throw new IllegalArgumentException("key is null");
 
         String storageKey = toStorageKey(bucket, key);
+        logger.trace("DELETE begin: bucket={} key={} requestId={}", bucket, key, requestID);
         Optional<PartitionAndSet> resolved = resolveErasureSet(storageKey);
         if (resolved.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting delete", storageKey);
+            logger.error("DELETE error: routing failed for bucket={} key={}, aborting", bucket, key);
             return false;
         }
 
@@ -685,7 +700,10 @@ public final class StorageWorker {
         boolean deleted = commitCoordinator.beginDelete(
                 requestID, resolved.get().partition(), bucket, key, deleteQuorum);
         if (!deleted) {
-            logger.error("Delete commit failed for requestId {} (quorum ACKs not received)", requestID);
+            logger.error("DELETE error: commit failed for bucket={} key={} requestId={} (quorum ACKs not received)",
+                    bucket, key, requestID);
+        } else {
+            logger.trace("DELETE complete: bucket={} key={} requestId={}", bucket, key, requestID);
         }
         return deleted;
     }
@@ -703,9 +721,10 @@ public final class StorageWorker {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
 
+        logger.trace("CREATE_BUCKET begin: bucket={} requestId={}", bucket, requestID);
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
-            logger.error("Routing failed for bucket {}, aborting createBucket", bucket);
+            logger.error("CREATE_BUCKET error: routing failed for bucket={}, aborting", bucket);
             return false;
         }
 
@@ -713,8 +732,10 @@ public final class StorageWorker {
         boolean created = commitCoordinator.beginCreateBucket(
                 requestID, resolved.get().partition(), bucket, deleteQuorum);
         if (!created) {
-            logger.error("CreateBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
-                    requestID, bucket);
+            logger.error("CREATE_BUCKET error: commit failed for bucket={} requestId={} (quorum ACKs not received)",
+                    bucket, requestID);
+        } else {
+            logger.trace("CREATE_BUCKET complete: bucket={} requestId={}", bucket, requestID);
         }
         return created;
     }
@@ -737,9 +758,10 @@ public final class StorageWorker {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
 
+        logger.trace("DELETE_BUCKET begin: bucket={} requestId={}", bucket, requestID);
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
-            logger.error("Routing failed for bucket {}, aborting deleteBucket", bucket);
+            logger.error("DELETE_BUCKET error: routing failed for bucket={}, aborting", bucket);
             return false;
         }
 
@@ -747,8 +769,10 @@ public final class StorageWorker {
         boolean deleted = commitCoordinator.beginDeleteBucket(
                 requestID, resolved.get().partition(), bucket, deleteQuorum);
         if (!deleted) {
-            logger.error("DeleteBucket commit failed for requestId {} bucket {} (quorum ACKs not received)",
-                    requestID, bucket);
+            logger.error("DELETE_BUCKET error: commit failed for bucket={} requestId={} (quorum ACKs not received)",
+                    bucket, requestID);
+        } else {
+            logger.trace("DELETE_BUCKET complete: bucket={} requestId={}", bucket, requestID);
         }
         return deleted;
     }
@@ -764,9 +788,10 @@ public final class StorageWorker {
         if (bucket == null)
             throw new IllegalArgumentException("bucket is null");
 
+        logger.trace("BUCKET_EXISTS begin: bucket={}", bucket);
         Optional<PartitionAndSet> resolved = resolveErasureSet(bucket);
         if (resolved.isEmpty()) {
-            logger.error("Routing failed for bucket {}, aborting bucketExists", bucket);
+            logger.error("BUCKET_EXISTS error: routing failed for bucket={}, aborting", bucket);
             return false;
         }
 
@@ -846,7 +871,10 @@ public final class StorageWorker {
             }
 
             // The bucket logically exists ONLY if the highest known version is HTTP 200
-            return statusAtHighestVersion == 200;
+            boolean exists = statusAtHighestVersion == 200;
+            logger.trace("BUCKET_EXISTS complete: bucket={} exists={} highestVersion={}",
+                    bucket, exists, highestVersion);
+            return exists;
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -864,10 +892,11 @@ public final class StorageWorker {
         if (maxKeys < 0)
             throw new IllegalArgumentException("maxKeys < 0");
 
+        logger.trace("LIST begin: bucket={} prefix={} maxKeys={}", bucket, prefix, maxKeys);
         ErasureRouting r = getRouting();
         var spreads = metadataClient.get(PartitionSpreadConfiguration.class).getPartitionSpread();
         if (spreads == null || spreads.isEmpty()) {
-            logger.error("listObjects: no partition spread");
+            logger.error("LIST error: no partition spread for bucket={}", bucket);
             return List.of();
         }
 
@@ -912,12 +941,14 @@ public final class StorageWorker {
             return List.of();
         }
 
-        return merged.stream()
+        List<ObjectInfo> result = merged.stream()
                 .collect(java.util.stream.Collectors.toMap(ObjectInfo::key, o -> o, (a, b) -> a))
                 .values().stream()
                 .sorted(Comparator.comparing(ObjectInfo::key))
                 .limit(maxKeys)
                 .toList();
+        logger.trace("LIST complete: bucket={} prefix={} returned={}", bucket, prefix, result.size());
+        return result;
     }
 
     private List<ObjectInfo> fetchListFromAnyNode(String bucket, String query, List<InetSocketAddress> nodes) {
@@ -982,11 +1013,13 @@ public final class StorageWorker {
         if (chunks == null)
             throw new IllegalArgumentException("chunks is null");
 
+        logger.trace("MULTIPART_COMMIT begin: bucket={} key={} uploadId={} chunks={} totalSize={}",
+                bucket, key, uploadId, chunks.size(), totalSize);
         UUID requestId;
         try {
             requestId = UUID.fromString(uploadId);
         } catch (IllegalArgumentException e) {
-            logger.error("Invalid multipart uploadId {}, cannot begin commit", uploadId);
+            logger.error("MULTIPART_COMMIT error: invalid uploadId {} for bucket={} key={}", uploadId, bucket, key);
             return false;
         }
 
@@ -994,19 +1027,26 @@ public final class StorageWorker {
         ErasureRouting r = getRouting();
         OptionalInt partition = r.getPartition(storageKey);
         if (partition.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting multipart commit", storageKey);
+            logger.error("MULTIPART_COMMIT error: routing failed for bucket={} key={}, aborting", bucket, key);
             return false;
         }
 
         Optional<ErasureSetConfiguration.ErasureSet> erasureSetOpt = r.getErasureSet(partition.getAsInt());
         if (erasureSetOpt.isEmpty()) {
-            logger.error("Routing failed for key {}, aborting multipart commit", storageKey);
+            logger.error("MULTIPART_COMMIT error: routing failed for bucket={} key={}, aborting", bucket, key);
             return false;
         }
 
         int multipartQuorum = erasureSetOpt.get().getK() + 1;
-        return commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks, totalSize,
-                multipartQuorum);
+        boolean committed = commitCoordinator.beginMultipartCommit(requestId, partition.getAsInt(), bucket, key, chunks,
+                totalSize, multipartQuorum);
+        if (!committed) {
+            logger.error("MULTIPART_COMMIT error: commit failed for bucket={} key={} uploadId={}", bucket, key,
+                    uploadId);
+        } else {
+            logger.trace("MULTIPART_COMMIT complete: bucket={} key={} uploadId={}", bucket, key, uploadId);
+        }
+        return committed;
     }
 
     public void shutdown() {
