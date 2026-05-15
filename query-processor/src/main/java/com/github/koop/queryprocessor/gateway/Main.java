@@ -11,8 +11,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.UUID;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.EtcdFetcher;
@@ -41,7 +43,7 @@ import java.util.concurrent.Executors;
  */
 public class Main {
 
-    private static final Logger logger = Logger.getLogger(Main.class.getName());
+    private static final Logger logger = LogManager.getLogger(Main.class);
 
     public static Javalin createApp(StorageService storage) {
         return createApp(storage, null);
@@ -122,7 +124,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "CreateBucket is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in PUT /" + bucket, e);
+            logger.error("Error in PUT /{}", bucket, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -145,7 +147,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "DeleteBucket is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in DELETE /" + bucket, e);
+            logger.error("Error in DELETE /{}", bucket, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -173,7 +175,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "ListObjects is not yet implemented.", "/" + bucket));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in GET /" + bucket, e);
+            logger.error("Error in GET /{}", bucket, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -189,7 +191,7 @@ public class Main {
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in HEAD /" + bucket, e);
+            logger.error("Error in HEAD /{}", bucket, e);
             ctx.status(500);
         }
     }
@@ -202,21 +204,22 @@ public class Main {
         try {
             List<ObjectSummary> objects = storage.listObjects(bucket, key, 5);
             var match = objects.stream().filter(o -> o.key().equals(key)).findFirst();
+
             if (match.isPresent()) {
                 ctx.status(200);
                 ctx.header("Content-Type", "application/octet-stream");
                 ctx.header("Content-Length", String.valueOf(match.get().size()));
+
                 String lastMod = match.get().lastModified();
                 ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
-                String randomEtag = java.util.UUID.randomUUID().toString().replace("-", "");
-                ctx.header("ETag", " \"" + randomEtag + "\"");
+                ctx.header("ETag", UUID.randomUUID().toString().replace("-", ""));
             } else {
                 ctx.status(404);
             }
         } catch (UnsupportedOperationException e) {
             ctx.status(501);
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in HEAD /" + bucket + "/" + key, e);
+            logger.error("Error in HEAD /{}/{}", bucket, key, e);
             ctx.status(500);
         }
     }
@@ -250,7 +253,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "GetObject is not yet implemented.", resourcePath));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in GET " + resourcePath, e);
+            logger.error("Error in GET {}", resourcePath, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -288,7 +291,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "Delete/Abort is not yet implemented.", resourcePath));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in DELETE " + resourcePath, e);
+            logger.error("Error in DELETE {}", resourcePath, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -340,7 +343,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "Put/UploadPart is not yet implemented.", resourcePath));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in PUT " + resourcePath, e);
+            logger.error("Error in PUT {}", resourcePath, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",
@@ -388,7 +391,7 @@ public class Main {
             ctx.result(buildS3ErrorXml("NotImplemented",
                     "Multipart POST operations are not yet implemented.", resourcePath));
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "Error in POST " + resourcePath, e);
+            logger.error("Error in POST {}", resourcePath, e);
             ctx.status(500);
             ctx.header("Content-Type", "application/xml");
             ctx.result(buildS3ErrorXml("InternalError",

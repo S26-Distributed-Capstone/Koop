@@ -9,9 +9,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
@@ -160,5 +162,69 @@ public class ErasureCoderTest {
         byte[] reconstructed = reconstructedStream.readAllBytes();
 
         assertArrayEquals(original, reconstructed, "Reconstructed large data payload does not match the original byte array.");
+    }
+
+   /**
+     * Tests resilience against immediate pipe closures deterministically. 
+     * By injecting a capturing Executor, the test prevents the producer thread 
+     * from starting until after the main thread has explicitly closed the pipes, 
+     * guaranteeing the prefix-write failure path is exercised.
+     */
+    @Test
+    public void testImmediatePipeClosureSurvives() throws Exception {
+        int m = 4;
+        int n = 6;
+        int size = 5 * 1024 * 1024; // 5 MB
+        byte[] original = new byte[size];
+        new Random(42).nextBytes(original);
+
+        // 1. Create an executor that merely captures the task instead of running it
+        AtomicReference<Runnable> producerTask = new AtomicReference<>();
+        Executor capturingExecutor = producerTask::set;
+
+        // 2. Call shard(). This creates the pipes, but the producer has NOT started.
+        InputStream[] shards = ErasureCoder.shard(new ByteArrayInputStream(original), size, m, n, capturingExecutor);
+        
+        // 3. Deterministically close two shards to simulate instantaneous connection refused.
+        shards[0].close();
+        shards[1].close();
+
+        byte[][] shardedData = new byte[n][];
+
+        ExecutorService exec = Executors.newFixedThreadPool(n);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            futures.add(exec.submit(() -> {
+                if (idx != 0 && idx != 1) {
+                    shardedData[idx] = shards[idx].readAllBytes();
+                }
+                return null;
+            }));
+        }
+
+        // 4. Now that the pipes are closed and consumers are waiting, release the producer.
+        Thread.startVirtualThread(producerTask.get());
+
+        for (Future<?> f : futures) {
+            f.get();
+        }
+        exec.shutdown();
+
+        // Attempt reconstruction with the surviving streams (2, 3, 4, 5).
+        boolean[] present = new boolean[n];
+        InputStream[] reconstructInputs = new InputStream[n];
+        for (int i = 0; i < n; i++) {
+            if (shardedData[i] != null) {
+                present[i] = true;
+                reconstructInputs[i] = new ByteArrayInputStream(shardedData[i]);
+            }
+        }
+
+        // Note: If you also add Executor injection to reconstruct(), update this call accordingly.
+        InputStream reconstructedStream = ErasureCoder.reconstruct(reconstructInputs, present, m, n);
+        byte[] reconstructed = reconstructedStream.readAllBytes();
+
+        assertArrayEquals(original, reconstructed, "Data failed to reconstruct after immediate pipe closures.");
     }
 }
