@@ -739,6 +739,86 @@ public class StorageWorkerApiTest {
         }
     }
 
+    /**
+     * Verifies that bucketExists correctly processes X-Bucket-Version headers to handle
+     * read-after-write consistency, properly prioritizing active vs tombstone states.
+     */
+    @Test
+    void bucketExists_resolvesTombstonesAndVersionTieBreakers() throws Exception {
+        record NodeResponse(int status, long version) {}
+        java.util.Map<Integer, NodeResponse> mockResponses = new java.util.concurrent.ConcurrentHashMap<>();
+
+        // Spin up 3 temporary Javalin servers using the Javalin 7 config.routes pattern
+        io.javalin.Javalin node1 = io.javalin.Javalin.create(config -> {
+            config.routes.head("/bucket/{bucket}", ctx -> {
+                NodeResponse r = mockResponses.getOrDefault(ctx.port(), new NodeResponse(404, 0));
+                ctx.header("X-Bucket-Version", String.valueOf(r.version()));
+                ctx.status(r.status());
+            });
+        }).start(0);
+
+        io.javalin.Javalin node2 = io.javalin.Javalin.create(config -> {
+            config.routes.head("/bucket/{bucket}", ctx -> {
+                NodeResponse r = mockResponses.getOrDefault(ctx.port(), new NodeResponse(404, 0));
+                ctx.header("X-Bucket-Version", String.valueOf(r.version()));
+                ctx.status(r.status());
+            });
+        }).start(0);
+
+        io.javalin.Javalin node3 = io.javalin.Javalin.create(config -> {
+            config.routes.head("/bucket/{bucket}", ctx -> {
+                NodeResponse r = mockResponses.getOrDefault(ctx.port(), new NodeResponse(404, 0));
+                ctx.header("X-Bucket-Version", String.valueOf(r.version()));
+                ctx.status(r.status());
+            });
+        }).start(0);
+
+        try {
+            int p1 = node1.port();
+            int p2 = node2.port();
+            int p3 = node3.port();
+
+            List<InetSocketAddress> addrs = List.of(
+                    new InetSocketAddress("127.0.0.1", p1),
+                    new InetSocketAddress("127.0.0.1", p2),
+                    new InetSocketAddress("127.0.0.1", p3)
+            );
+
+            // Use the existing helper to point a new StorageWorker at our 3 special test nodes
+            MetadataClient customClient = createConfiguredClient(addrs);
+            PubSubClient tempBus = new PubSubClient(new MemoryPubSub());
+            tempBus.start();
+            StorageWorker versionAwareWorker = new StorageWorker(customClient, new CommitCoordinator(tempBus, 0));
+
+            // Scenario 1: Tie-breaker prefers 200 over 410 when versions are identical
+            mockResponses.put(p1, new NodeResponse(200, 5));
+            mockResponses.put(p2, new NodeResponse(410, 5));
+            mockResponses.put(p3, new NodeResponse(404, 0));
+            assertTrue(versionAwareWorker.bucketExists("test-bucket"),
+                    "Tie-breaker should prefer Active (200) over Tombstone (410) for matching versions");
+
+            // Scenario 2: Tombstone wins with higher version (lagging nodes think it's active)
+            mockResponses.put(p1, new NodeResponse(200, 1));
+            mockResponses.put(p2, new NodeResponse(200, 1));
+            mockResponses.put(p3, new NodeResponse(410, 2));
+            assertFalse(versionAwareWorker.bucketExists("test-bucket"),
+                    "Tombstone (410) with higher version should override lagging active nodes");
+
+            // Scenario 3: Active wins with higher version (re-creation after delete)
+            mockResponses.put(p1, new NodeResponse(410, 2));
+            mockResponses.put(p2, new NodeResponse(410, 2));
+            mockResponses.put(p3, new NodeResponse(200, 3));
+            assertTrue(versionAwareWorker.bucketExists("test-bucket"),
+                    "Active (200) with higher version should override older tombstones");
+
+            versionAwareWorker.shutdown();
+        } finally {
+            node1.stop();
+            node2.stop();
+            node3.stop();
+        }
+    }
+
     @Test
     void listObjects_returnsEmptyForEmptyBucket() throws Exception {
         PubSubClient bus = new PubSubClient(new MemoryPubSub());
