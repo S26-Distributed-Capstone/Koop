@@ -1,0 +1,152 @@
+services:
+  # ==========================================
+  # 1. ETCD CLUSTER (3 Nodes)
+  # ==========================================
+  etcd-0: &etcd_base
+    image: quay.io/coreos/etcd:v3.5.0
+    command: etcd --name etcd-0 --initial-advertise-peer-urls http://etcd-0:2380 --listen-peer-urls http://0.0.0.0:2380 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd-0:2379 --initial-cluster-token etcd-cluster-1 --initial-cluster etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380 --initial-cluster-state new
+  etcd-1:
+    <<: *etcd_base
+    command: etcd --name etcd-1 --initial-advertise-peer-urls http://etcd-1:2380 --listen-peer-urls http://0.0.0.0:2380 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd-1:2379 --initial-cluster-token etcd-cluster-1 --initial-cluster etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380 --initial-cluster-state new
+  etcd-2:
+    <<: *etcd_base
+    command: etcd --name etcd-2 --initial-advertise-peer-urls http://etcd-2:2380 --listen-peer-urls http://0.0.0.0:2380 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd-2:2379 --initial-cluster-token etcd-cluster-1 --initial-cluster etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380 --initial-cluster-state new
+
+  # ==========================================
+  # 2. REDIS CLUSTER (Primary + 2 Replicas)
+  # ==========================================
+  redis-0:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+  redis-1:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --replicaof redis-0 6379
+    depends_on: [redis-0]
+  redis-2:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --replicaof redis-0 6379
+    depends_on: [redis-0]
+
+  # ==========================================
+  # 3. KAFKA CLUSTER (3 Nodes, KRaft)
+  # ==========================================
+  kafka-0: &kafka_base
+    image: confluentinc/cp-kafka:7.7.8
+    environment: &kafka_env
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-0:9093,2@kafka-1:9093,3@kafka-2:9093'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-0:9092'
+  kafka-1:
+    <<: *kafka_base
+    environment:
+      <<: *kafka_env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-1:9092'
+  kafka-2:
+    <<: *kafka_base
+    environment:
+      <<: *kafka_env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-2:9092'
+
+  # ==========================================
+  # 4. STORAGE NODES (18 Nodes Total)
+  # ==========================================
+  # --- Erasure Set 1 (9 Nodes) ---
+  storage-node-set1-0: &sn_base
+    image: ygins/storage-node:latest
+    environment: &sn_env
+      APP_PORT: "8080"
+      STORAGE_DIR: "/storage"
+      ETCD_URL: "http://etcd-0:2379"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-0:9092,kafka-1:9092,kafka-2:9092"
+      NODE_IP: "storage-node-set1-0"
+    depends_on: [etcd-0, kafka-0]
+  storage-node-set1-1: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-1" } }
+  storage-node-set1-2: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-2" } }
+  storage-node-set1-3: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-3" } }
+  storage-node-set1-4: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-4" } }
+  storage-node-set1-5: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-5" } }
+  storage-node-set1-6: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-6" } }
+  storage-node-set1-7: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-7" } }
+  storage-node-set1-8: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set1-8" } }
+
+  # --- Erasure Set 2 (9 Nodes) ---
+  storage-node-set2-0: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-0" } }
+  storage-node-set2-1: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-1" } }
+  storage-node-set2-2: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-2" } }
+  storage-node-set2-3: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-3" } }
+  storage-node-set2-4: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-4" } }
+  storage-node-set2-5: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-5" } }
+  storage-node-set2-6: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-6" } }
+  storage-node-set2-7: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-7" } }
+  storage-node-set2-8: { <<: *sn_base, environment: { <<: *sn_env, NODE_IP: "storage-node-set2-8" } }
+
+  # ==========================================
+  # 5. ETCD SEEDER (Job Parity)
+  # ==========================================
+  etcd-seeder:
+    image: quay.io/coreos/etcd:v3.5.0
+    depends_on: [etcd-0, etcd-1, etcd-2]
+    restart: "no"
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        echo "Waiting for Etcd to be ready..."
+        sleep 10
+        # Seed Erasure Set Configs for 18 Nodes
+        etcdctl --endpoints=http://etcd-0:2379 put erasure_set_configurations '{"erasure_sets":[{"number":1,"n":9,"m":6,"write_quorum":7,"machines":[{"ip":"storage-node-set1-0","port":8080},{"ip":"storage-node-set1-1","port":8080},{"ip":"storage-node-set1-2","port":8080},{"ip":"storage-node-set1-3","port":8080},{"ip":"storage-node-set1-4","port":8080},{"ip":"storage-node-set1-5","port":8080},{"ip":"storage-node-set1-6","port":8080},{"ip":"storage-node-set1-7","port":8080},{"ip":"storage-node-set1-8","port":8080}]},{"number":2,"n":9,"m":6,"write_quorum":7,"machines":[{"ip":"storage-node-set2-0","port":8080},{"ip":"storage-node-set2-1","port":8080},{"ip":"storage-node-set2-2","port":8080},{"ip":"storage-node-set2-3","port":8080},{"ip":"storage-node-set2-4","port":8080},{"ip":"storage-node-set2-5","port":8080},{"ip":"storage-node-set2-6","port":8080},{"ip":"storage-node-set2-7","port":8080},{"ip":"storage-node-set2-8","port":8080}]}]}'
+        # Seed Partition Spreads (30 partitions split across 2 sets)
+        etcdctl --endpoints=http://etcd-0:2379 put partition_spread_configurations '{"partition_spread":[{"erasure_set":1,"partitions":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]},{"erasure_set":2,"partitions":[15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]}]}'
+        echo "Etcd seeding complete."
+
+  # ==========================================
+  # 6. QUERY PROCESSORS (3 Replicas)
+  # ==========================================
+  query-processor-1: &qp_base
+    image: ygins/query-processor:latest
+    ports: [ "9001:8080" ]
+    environment: &qp_env
+      APP_PORT: "8080"
+      ETCD_URL: "http://etcd-0:2379"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-0:9092,kafka-1:9092,kafka-2:9092"
+      REDIS_URL: "redis://redis-0:6379"
+      STORAGE_NODE_URL: "http://storage-node-set1-0:8080"  # <--- ADD THIS LINE
+      NODE_IP: "query-processor-1"
+    depends_on:
+      - etcd-seeder
+      - storage-node-set1-0
+  query-processor-2:
+    <<: *qp_base
+    ports: ["9002:8080"]
+    environment: { <<: *qp_env, NODE_IP: "query-processor-2" }
+  query-processor-3:
+    <<: *qp_base
+    ports: ["9003:8080"]
+    environment: { <<: *qp_env, NODE_IP: "query-processor-3" }
+
+  # ==========================================
+  # 7. NGINX LOAD BALANCER
+  # ==========================================
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "30080:80"
+    volumes:
+      # Change the left side to your new file name
+      - ./nginx-k8s.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - query-processor-1
+      - query-processor-2
+      - query-processor-3
