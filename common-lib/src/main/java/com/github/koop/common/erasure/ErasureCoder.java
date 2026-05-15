@@ -5,6 +5,9 @@ import com.backblaze.erasure.ReedSolomon;
 import java.io.*;
 import java.util.Arrays;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +38,7 @@ public final class ErasureCoder {
 
     public static final int SHARD_SIZE = 1 << 20; // 1 MB per shard per stripe
     private static final Logger logger = LogManager.getLogger(ErasureCoder.class);
+    private static final Executor defaultExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     private ErasureCoder() {
     }
@@ -189,7 +193,7 @@ public final class ErasureCoder {
     // Sharding
     // -------------------------------------------------------------------------
 
-    public static InputStream[] shard(InputStream data, long length, int m, int n) throws IOException {
+public static InputStream[] shard(InputStream data, long length, int m, int n, Executor executor) throws IOException {
         if (data == null)
             throw new IllegalArgumentException("data is null");
         if (length < 0)
@@ -218,17 +222,27 @@ public final class ErasureCoder {
             pis[i] = pipes[i].in;
         }
 
-        Thread.startVirtualThread(() -> {
+        executor.execute(() -> {
             try {
+                // Initialize the dead array before the prefix write loop
+                boolean[] dead = new boolean[n];
+                
                 byte[] lenBytes = new byte[8];
                 writeLong(lenBytes, length);
-                for (int i = 0; i < n; i++)
-                    pos[i].write(lenBytes);
+                
+                // Wrap the prefix write in a try-catch to handle immediate connection drops
+                for (int i = 0; i < n; i++) {
+                    try {
+                        pos[i].write(lenBytes);
+                    } catch (IOException e) {
+                        dead[i] = true;
+                        logger.warn("Pipe for shard " + i + " died during length prefix write.");
+                    }
+                }
 
                 ReedSolomon rs = ReedSolomon.create(m, k);
                 byte[] stripeBuf = new byte[m * SHARD_SIZE];
                 long remaining = length;
-                boolean[] dead = new boolean[n];
 
                 while (remaining > 0) {
                     int want = (int) Math.min((long) stripeBuf.length, remaining);
@@ -260,21 +274,31 @@ public final class ErasureCoder {
                         }
                     }
                 }
-                for (int i = 0; i < n; i++)
-                    pos[i].flush();
+                
+                // Flush only the pipes that haven't been marked dead
+                for (int i = 0; i < n; i++) {
+                    if (!dead[i]) {
+                        pos[i].flush();
+                    }
+                }
             } catch (IOException e) {
                 logger.error("Error in erasure coding thread", e);
                 for (int i = 0; i < n; i++)
                     pipes[i].fail(e); // propagate to all consumers
             } finally {
-                for (OutputStream p : pos)
+                for (OutputStream p : pos) {
                     try {
                         p.close();
                     } catch (IOException ignored) {
                     }
+                }
             }
         });
         return pis;
+    }
+
+    public static InputStream[] shard(InputStream data, long length, int m, int n) throws IOException {
+        return shard(data, length, m, n, defaultExecutor);
     }
 
     // -------------------------------------------------------------------------
