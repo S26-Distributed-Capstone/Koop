@@ -689,7 +689,17 @@ public class StorageNodeServerV2 {
                         .filter(m -> {
                             var versions = m.versions();
                             if (versions == null || versions.isEmpty()) return false;
-                            return !(versions.getLast() instanceof TombstoneFileVersion);
+
+                            // Filter out tombstones
+                            if (versions.getLast() instanceof TombstoneFileVersion) return false;
+
+                            // Filter out internal multipart chunk objects.
+                            // MultipartUploadSession prefixes chunk keys with "__mpu__:"
+                            if (m.key().contains("/__mpu__:")) {
+                                return false;
+                            }
+
+                            return true;
                         })
                         .limit(maxKeys)
                         .map(m -> Map.<String, Object>of(
