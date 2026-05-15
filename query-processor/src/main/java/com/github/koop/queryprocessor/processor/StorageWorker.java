@@ -756,12 +756,16 @@ public final class StorageWorker {
         List<Callable<List<ObjectInfo>>> tasks = new ArrayList<>();
         for (int partition : partitions) {
             Optional<ErasureSetConfiguration.ErasureSet> esOpt = r.getErasureSet(partition);
-            if (esOpt.isEmpty())
+            if (esOpt.isEmpty()){
+                logger.error("listObjects: no erasure set for partition {}", partition);
                 continue;
+            }
             List<InetSocketAddress> nodes = esOpt.get().getMachines().stream()
                     .map(m -> new InetSocketAddress(m.getIp(), m.getPort())).toList();
-            if (nodes.isEmpty())
+            if (nodes.isEmpty()){
+                logger.error("listObjects: no nodes for partition {}", partition);
                 continue;
+            }
             tasks.add(() -> fetchListFromAnyNode(bucket, query, nodes));
         }
 

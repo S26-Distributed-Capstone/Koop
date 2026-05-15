@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.UUID
 
 import com.github.koop.common.metadata.ErasureSetConfiguration;
 import com.github.koop.common.metadata.EtcdFetcher;
@@ -210,7 +211,7 @@ public class Main {
 
                 String lastMod = match.get().lastModified();
                 ctx.header("Last-Modified", (lastMod == null || lastMod.isEmpty()) ? "1970-01-01T00:00:00.000Z" : lastMod);
-                ctx.header("ETag", "\"dummy-etag-12345\"");
+                ctx.header("ETag", UUID.randomUUID().toString().replace("-", ""));
             } else {
                 ctx.status(404);
             }
